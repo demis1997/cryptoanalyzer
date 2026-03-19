@@ -1,0 +1,634 @@
+{
+  "version": "1.0.0",
+  "description": "Formalized risk assessment schema based on the WWDA DeFi protocol rubric.",
+  "sections": [
+    {
+      "id": "security_risks",
+      "label": "Section 1: Security Risks",
+      "criteria": [
+        {
+          "id": "protocol_external_audit",
+          "label": "#1 Protocol External Audit",
+          "weight": 1.0,
+          "subcriteria": [
+            {
+              "id": "audit_completeness",
+              "label": "#1.1 Audit Completeness Scale",
+              "type": "scale",
+              "scale": [
+                { "id": "no_audit", "description": "No audit conducted", "score": 0.0 },
+                { "id": "lt_25", "description": "Audit covers <25% of contracts", "score": 0.2 },
+                { "id": "between_25_74", "description": "Audit covers 25-74% of contracts", "score": 0.4 },
+                { "id": "between_75_99", "description": "Audit covers 75-99% of contracts", "score": 0.8 },
+                { "id": "full_coverage", "description": "Comprehensive audit covering 100% of contracts", "score": 1.0 }
+              ],
+              "research_instructions": "Go to protocol documentation and search for 'audit', 'security', 'smart contract audit'. Find and read audit reports/PDFs. Subjectively estimate what percentage of deployed smart contracts are covered by published audits. If there is no information in documentation, search the web (\"<protocol> audit\", \"<protocol> security review\"). If no reliable audit info is found anywhere, choose 'no_audit'."
+            },
+            {
+              "id": "auditor_reputation",
+              "label": "#1.2 Auditor's Reputation",
+              "type": "scale",
+              "scale": [
+                { "id": "no_audit", "description": "Audit not completed", "score": 0.0 },
+                { "id": "unknown_poor", "description": "Auditor unknown or poorly regarded", "score": 0.2 },
+                {
+                  "id": "moderate_limited",
+                  "description": "Auditor moderately known with limited history",
+                  "score": 0.4
+                },
+                {
+                  "id": "respected_inexperienced",
+                  "description": "Auditor respected yet relatively inexperienced",
+                  "score": 0.6
+                },
+                {
+                  "id": "highly_regarded",
+                  "description": "Auditor highly regarded with positive community feedback",
+                  "score": 0.8
+                },
+                {
+                  "id": "top_tier",
+                  "description": "Auditor is top-tier firm (on WWDA 'Auditor Sheet')",
+                  "score": 1.0
+                }
+              ],
+              "research_instructions": "Once auditors are identified from audit reports or docs, compare against WWDA's internal trusted-auditors list. If missing, research firms via web, looking at their portfolio, reputation, years in business, and community feedback. Classify according to the scale. If no audit exists, choose 'no_audit'."
+            },
+            {
+              "id": "vulnerability_resolution",
+              "label": "#1.3 Vulnerability Resolution Scale",
+              "type": "scale",
+              "scale": [
+                { "id": "no_audit", "description": "No audit conducted", "score": 0.0 },
+                { "id": "unresolved_critical", "description": "Unresolved critical vulnerabilities", "score": 0.0 },
+                {
+                  "id": "unresolved_major",
+                  "description": "Unresolved significant (major) vulnerabilities",
+                  "score": 0.2
+                },
+                { "id": "unresolved_medium", "description": "Unresolved medium vulnerabilities", "score": 0.4 },
+                { "id": "unresolved_minor", "description": "Unresolved minor vulnerabilities only", "score": 0.8 },
+                {
+                  "id": "all_resolved",
+                  "description": "No vulnerabilities or all resolved and verified",
+                  "score": 1.0
+                }
+              ],
+              "research_instructions": "From audit reports, extract vulnerability severities and check resolution status (fixed / acknowledged / won't fix). Confirm via follow-up audits, GitHub issues, or public post-mortems if available. Map the remaining unresolved issues to the appropriate severity bucket and choose a score. If no audit exists, pick 'no_audit'."
+            }
+          ]
+        },
+        {
+          "id": "protocol_hacks_and_losses",
+          "label": "#2 Protocol Hack and Losses",
+          "weight": 0.91,
+          "subcriteria": [
+            {
+              "id": "hack_timing",
+              "label": "#2.1 Hack Timing",
+              "type": "scale",
+              "scale": [
+                { "id": "hacked_last_6m", "description": "Hacked in the last 6 months", "score": 0.0 },
+                { "id": "hacked_6_12m", "description": "Hacked 6-12 months ago", "score": 0.2 },
+                { "id": "hacked_1_2y", "description": "Hacked 1-2 years ago", "score": 0.4 },
+                { "id": "hacked_2_3y", "description": "Hacked 2-3 years ago", "score": 0.6 },
+                { "id": "hacked_gt_3y", "description": "Hacked more than 3 years ago", "score": 0.8 },
+                { "id": "no_hack", "description": "No hack incident known", "score": 1.0 }
+              ],
+              "research_instructions": "Search for hacks/exploits involving the protocol using web search (\"<protocol> hack\", \"<protocol> exploit\", \"post-mortem\"). Use reputable sources such as project blog posts, security writeups, and news sites. Identify the latest significant security incident and its date. Map elapsed time since that incident to the scale. If no credible incidents found, choose 'no_hack'."
+            },
+            {
+              "id": "protocol_security_direct_breach",
+              "label": "#2.2 Protocol Security Direct Breach",
+              "type": "scale",
+              "scale": [
+                { "id": "multiple_exploits", "description": "Multiple exploits", "score": 0.0 },
+                { "id": "single_exploit", "description": "A single exploit", "score": 0.2 },
+                {
+                  "id": "serious_vuln_no_exploit",
+                  "description": "Serious vulnerability with no exploit",
+                  "score": 0.4
+                },
+                {
+                  "id": "potential_vuln",
+                  "description": "Potential vulnerabilities only, no exploit",
+                  "score": 0.6
+                },
+                {
+                  "id": "minor_vuln_no_exploit",
+                  "description": "Minor vulnerabilities only, no exploit",
+                  "score": 0.8
+                },
+                { "id": "no_attacks", "description": "No attacks or exploits known", "score": 1.0 }
+              ],
+              "research_instructions": "From the same hack/exploit research, classify the severity and number of incidents. Consider whether vulnerabilities were directly in the protocol smart contracts or in dependencies. Choose the appropriate bucket based on number and severity of discovered issues."
+            },
+            {
+              "id": "financial_losses_external",
+              "label": "#2.3 Financial Losses from External Protocols",
+              "type": "scale",
+              "scale": [
+                {
+                  "id": "loss_all_funds",
+                  "description": "Significant loss of all funds (own and users')",
+                  "score": 0.0
+                },
+                {
+                  "id": "loss_users_funds",
+                  "description": "Significant loss of users' funds",
+                  "score": 0.2
+                },
+                {
+                  "id": "loss_own_funds",
+                  "description": "Significant loss of protocol's own funds",
+                  "score": 0.4
+                },
+                { "id": "minor_losses", "description": "Minor losses", "score": 0.6 },
+                { "id": "no_loss_with_risk", "description": "No loss, despite risks", "score": 0.8 },
+                { "id": "no_impact", "description": "No impact on funds", "score": 1.0 }
+              ],
+              "research_instructions": "Investigate financial impact of past incidents, distinguishing between user losses vs protocol treasury losses and severity. Use post-mortems, incident reports, and credible news sources. Estimate how much of TVL/treasury was affected."
+            },
+            {
+              "id": "funds_recovery",
+              "label": "#2.4 Funds Recovery Post-Hack",
+              "type": "scale",
+              "scale": [
+                { "id": "no_recovery", "description": "No funds recovered", "score": 0.0 },
+                { "id": "lt_25_recovered", "description": "<25% of funds recovered", "score": 0.2 },
+                { "id": "between_26_50", "description": "26-50% of funds recovered", "score": 0.4 },
+                { "id": "between_51_75", "description": "51-75% of funds recovered", "score": 0.6 },
+                { "id": "gt_76_recovered", "description": ">76% of funds recovered", "score": 0.8 },
+                {
+                  "id": "all_recovered_or_no_exploit",
+                  "description": "All funds recovered or no exploit at all",
+                  "score": 1.0
+                }
+              ],
+              "research_instructions": "For protocols with hacks, determine what percentage of funds were ultimately recovered (via refunds, whitehat returns, treasury compensation, etc.). If no exploit occurred, use 'all_recovered_or_no_exploit'."
+            }
+          ]
+        },
+        {
+          "id": "bug_bounty_program",
+          "label": "#3 Bug Bounty Program - Public Audit",
+          "weight": 0.7,
+          "type": "scale",
+          "scale": [
+            { "id": "no_bounty", "description": "No bounty program", "score": 0.0 },
+            { "id": "lt_50k", "description": "Max payout < USD 50K", "score": 0.2 },
+            { "id": "lt_100k", "description": "Max payout < USD 100K", "score": 0.4 },
+            { "id": "lt_250k", "description": "Max payout < USD 250K", "score": 0.6 },
+            { "id": "lt_500k", "description": "Max payout < USD 500K", "score": 0.8 },
+            { "id": "gt_1m", "description": "Max payout > USD 1M", "score": 1.0 }
+          ],
+          "research_instructions": "Search protocol documentation for bug bounty; check security sections. Then search on Immunefi (https://immunefi.com/bug-bounty/) and the general web for '<protocol> bug bounty'. Determine maximum bounty size in USD and map to the scale. If no program is found, select 'no_bounty'."
+        }
+      ]
+    },
+    {
+      "id": "technical_risks",
+      "label": "Section 2: Technical Risks",
+      "criteria": [
+        {
+          "id": "oracles_dependency",
+          "label": "#4 Oracle's Dependency on Third Parties",
+          "weight": 0.4,
+          "type": "scale",
+          "scale": [
+            { "id": "zero_oracle", "description": "Zero oracle", "score": 0.0 },
+            { "id": "one_untrusted", "description": "1 oracle, not trusted", "score": 0.0 },
+            { "id": "one_trusted", "description": "1 oracle, trusted", "score": 0.33 },
+            {
+              "id": "mixed_trusted",
+              "description": "1 oracle trusted, others not trusted",
+              "score": 0.66
+            },
+            { "id": "multiple_trusted", "description": "More than one trusted oracle", "score": 1.0 }
+          ],
+          "research_instructions": "Inspect protocol docs for 'oracle', 'price feed', 'Chainlink', etc. If necessary, look at smart contracts on explorers to identify oracle contracts and price sources. Determine whether the protocol relies on none, one, or multiple oracles and whether they are reputable third parties (e.g. Chainlink) or custom/unclear mechanisms."
+        },
+        {
+          "id": "bridge_asset_exposure",
+          "label": "#5 Bridge Asset Exposure",
+          "weight": 0.19,
+          "type": "scale",
+          "scale": [
+            { "id": "uses_bridge", "description": "Uses bridges for asset movement", "score": 0.0 },
+            { "id": "no_bridge", "description": "Does not use bridges", "score": 1.0 }
+          ],
+          "research_instructions": "Check docs and UI for use of cross-chain bridges or wrapped assets (e.g. Ethereum to Arbitrum, Optimism to Base, Bitcoin to Ethereum). If any bridging is integral to the protocol, mark 'uses_bridge'; otherwise 'no_bridge'."
+        },
+        {
+          "id": "liquidation_risk",
+          "label": "#6 Liquidation Risk",
+          "weight": 0.49,
+          "type": "scale",
+          "scale": [
+            { "id": "has_liquidation_risk", "description": "Yes, liquidation risk present", "score": 0.0 },
+            { "id": "no_liquidation_risk", "description": "No liquidation risk", "score": 1.0 }
+          ],
+          "research_instructions": "Look for lending/borrowing mechanics, leveraged strategies, or collateralized positions. If deposits can be liquidated (e.g., borrow against collateral, leveraged looping), set 'has_liquidation_risk'; otherwise 'no_liquidation_risk'."
+        },
+        {
+          "id": "bad_debt_risk",
+          "label": "#7 Bad Debt Risk",
+          "weight": 0.83,
+          "type": "scale",
+          "scale": [
+            {
+              "id": "no_liquidation_no_thirdparty",
+              "description": "No liquidation mechanism; doesn't use third party for liquidations",
+              "score": 0.0
+            },
+            {
+              "id": "no_liquidation_uses_thirdparty",
+              "description": "No liquidation mechanism; uses third party for liquidations",
+              "score": 0.5
+            },
+            {
+              "id": "liquidation_exists_bad_debt",
+              "description": "Liquidation mechanism exists but bad debt exists",
+              "score": 0.0
+            },
+            {
+              "id": "liquidation_exists_no_bad_debt",
+              "description": "Liquidation mechanism exists and no bad debt observed",
+              "score": 1.0
+            }
+          ],
+          "research_instructions": "From docs and external analysis, determine whether there is a liquidation mechanism and whether bad debt is known (e.g. undercollateralized positions that were not covered). Also check if third-party liquidators are used. This criterion is subjective; document assumptions when scoring."
+        }
+      ]
+    },
+    {
+      "id": "financial_risks",
+      "label": "Section 3: Financial Risks",
+      "criteria": [
+        {
+          "id": "locked_assets_tvl",
+          "label": "#8 Locked Assets (All Pools)",
+          "weight": 0.96,
+          "type": "scale",
+          "scale": [
+            { "id": "tvl_lt_1m", "description": "TVL < 1M USD", "score": 0.0 },
+            { "id": "tvl_ge_10m", "description": "TVL ≥ 10M USD", "score": 0.2 },
+            { "id": "tvl_ge_50m", "description": "TVL ≥ 50M USD", "score": 0.4 },
+            { "id": "tvl_ge_100m", "description": "TVL ≥ 100M USD", "score": 0.8 },
+            { "id": "tvl_gt_500m", "description": "TVL > 500M USD", "score": 1.0 }
+          ],
+          "research_instructions": "Retrieve TVL directly from DefiLlama or other reputable TVL metric sources. Use current TVL in USD, select the closest bucket according to the thresholds."
+        },
+        {
+          "id": "instant_withdrawal",
+          "label": "#9 Instant Withdrawal",
+          "weight": 0.57,
+          "type": "scale",
+          "scale": [
+            {
+              "id": "lock_gt_7d",
+              "description": "Lock period more than 7 days",
+              "score": 0.0
+            },
+            {
+              "id": "lock_3_6d",
+              "description": "Lock period 3 to 6 days",
+              "score": 0.33
+            },
+            {
+              "id": "lock_1_2d",
+              "description": "Lock period 1 to 2 days",
+              "score": 0.66
+            },
+            { "id": "no_lock", "description": "No lock period", "score": 1.0 }
+          ],
+          "research_instructions": "From protocol docs and UI (e.g., 'Withdraw', 'Redeem' flows), determine typical withdrawal times and any lock-up periods for user deposits. Use the longest standard lock period when multiple options exist."
+        },
+        {
+          "id": "deposit_reduction",
+          "label": "#10 Deposit Reduction",
+          "weight": 0.32,
+          "type": "scale",
+          "scale": [
+            { "id": "deposit_can_decrease", "description": "Yes, deposit value can decrease", "score": 0.0 },
+            { "id": "deposit_stable", "description": "No, deposit value is stable", "score": 1.0 }
+          ],
+          "research_instructions": "Review risk sections and mechanics in docs to see whether user principal can decrease (e.g., due to impermanent loss, strategy losses, slashing, or other risks). If clear risk of principal loss, select 'deposit_can_decrease'; otherwise 'deposit_stable'."
+        },
+        {
+          "id": "inflation_rewards",
+          "label": "#11 Inflation Rewards",
+          "weight": 0.06,
+          "subcriteria": [
+            {
+              "id": "reward_composition",
+              "label": "#11.1 Reward Composition",
+              "type": "scale",
+              "scale": [
+                { "id": "no_extra_rewards", "description": "No extra rewards", "score": 0.0 },
+                { "id": "only_extra_tokens", "description": "Only extra tokens", "score": 0.2 },
+                {
+                  "id": "mainly_tokens_some_growth",
+                  "description": "Mainly extra tokens, some principal growth",
+                  "score": 0.4
+                },
+                {
+                  "id": "balanced_tokens_growth",
+                  "description": "Balanced extra tokens and principal growth",
+                  "score": 0.6
+                },
+                {
+                  "id": "mainly_growth_some_tokens",
+                  "description": "Mainly principal growth, some extra tokens",
+                  "score": 0.8
+                },
+                { "id": "all_principal_growth", "description": "All principal growth", "score": 1.0 }
+              ],
+              "research_instructions": "Study APR/APY explanation in docs and UI. Determine whether returns are primarily from growth in underlying assets or from distribution of additional tokens/points. This is subjective; document assumptions in reasoning."
+            },
+            {
+              "id": "reward_volatility",
+              "label": "#11.2 Reward Volatility (Market Dynamics)",
+              "type": "scale",
+              "scale": [
+                { "id": "very_high", "description": "Very high (>20% monthly volatility)", "score": 0.0 },
+                { "id": "high", "description": "High (15-20% monthly)", "score": 0.2 },
+                { "id": "moderate", "description": "Moderate (10-15% monthly)", "score": 0.4 },
+                { "id": "low", "description": "Low (5-10% monthly)", "score": 0.6 },
+                { "id": "very_low", "description": "Very low (2-5% monthly)", "score": 0.8 },
+                { "id": "negligible", "description": "Negligible (<2% monthly) or no token", "score": 1.0 }
+              ],
+              "research_instructions": "For reward tokens, check price history (e.g. via CoinGecko/CoinMarketCap) over the last month. Estimate monthly volatility and map to the scale. If there is no token or rewards are not market-exposed, use 'negligible'."
+            },
+            {
+              "id": "reward_accessibility",
+              "label": "#11.3 Reward Accessibility",
+              "type": "scale",
+              "scale": [
+                { "id": "lock_gt_1y", "description": "Long lock-up (>1 year)", "score": 0.0 },
+                { "id": "vesting_6_12m", "description": "Long vesting (6-12 months)", "score": 0.2 },
+                { "id": "vesting_3_6m", "description": "Moderate vesting (3-6 months)", "score": 0.4 },
+                { "id": "vesting_1_3m", "description": "Short vesting (1-3 months)", "score": 0.6 },
+                { "id": "vesting_lt_1m", "description": "Minimal vesting (<1 month)", "score": 0.8 },
+                {
+                  "id": "immediate_or_no_rewards",
+                  "description": "Immediate availability or no extra rewards",
+                  "score": 1.0
+                }
+              ],
+              "research_instructions": "From docs and UI, determine unlock schedules for rewards (tokens/points). Note any lock-up or vesting and classify into time buckets. If rewards are available immediately or there are no extra rewards, choose 'immediate_or_no_rewards'."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "operational_risks",
+      "label": "Section 4: Operational Risks",
+      "criteria": [
+        {
+          "id": "third_parties_usage",
+          "label": "#12 Third Parties Usage",
+          "weight": 0.28,
+          "type": "scale",
+          "scale": [
+            { "id": "uses_third_parties", "description": "Yes, uses other protocols for reinvestment", "score": 0.0 },
+            { "id": "no_third_parties", "description": "No, does not reinvest into third parties", "score": 1.0 }
+          ],
+          "research_instructions": "Study strategies/mechanics in docs and UI to see if funds are reinvested into other DeFi protocols (e.g., yield aggregators, lending loops on other platforms). If there is any counterparty protocol exposure, mark 'uses_third_parties'; otherwise 'no_third_parties'."
+        },
+        {
+          "id": "protocol_maturity",
+          "label": "#13 Protocol Maturity",
+          "weight": 0.79,
+          "type": "scale",
+          "scale": [
+            { "id": "inc_current_year", "description": "Incorporated in current year", "score": 0.0 },
+            { "id": "gt_1y", "description": "More than 1 year", "score": 0.33 },
+            { "id": "gt_3y", "description": "More than 3 years", "score": 0.66 },
+            { "id": "gt_5y", "description": "More than 5 years", "score": 1.0 }
+          ],
+          "research_instructions": "Estimate age from protocol docs, creation date of primary GitHub repository, and Twitter account creation date (use the oldest). Optionally cross-check with Certik Skynet 'Project Maturity Metrics' if listed. Map age to scale."
+        }
+      ]
+    },
+    {
+      "id": "documentation_transparency",
+      "label": "Section 5: Documentation and Transparency",
+      "criteria": [
+        {
+          "id": "protocol_documentation",
+          "label": "#14 Protocol Documentation (or Whitepaper)",
+          "weight": 0.66,
+          "type": "scale",
+          "scale": [
+            { "id": "no_docs", "description": "No documentation", "score": 0.0 },
+            { "id": "whitepaper_only", "description": "Only whitepaper", "score": 0.5 },
+            { "id": "well_documented", "description": "Well documented", "score": 1.0 }
+          ],
+          "research_instructions": "Assess quality and completeness of docs: clarity of mechanics, deposit/withdraw flows, risk disclosures, and architecture descriptions. This is subjective—if everything is clearly explained and thorough, choose 'well_documented'."
+        },
+        {
+          "id": "locate_contract_address",
+          "label": "#15 Locate Contract Address",
+          "weight": 0.74,
+          "type": "scale",
+          "scale": [
+            { "id": "no_contracts", "description": "No contract addresses located", "score": 0.0 },
+            { "id": "partial_contracts", "description": "Some but not all contracts documented", "score": 0.5 },
+            { "id": "all_contracts", "description": "All relevant contracts documented or linked", "score": 1.0 }
+          ],
+          "research_instructions": "Check documentation for smart contract addresses or links to registry repositories (e.g., GitHub JSON lists). Evaluate how complete the list is for main contracts users might need if the UI is unavailable."
+        },
+        {
+          "id": "contract_method_explained",
+          "label": "#16 Contract Method Explained",
+          "weight": 0.15,
+          "type": "scale",
+          "scale": [
+            { "id": "no_methods_docs", "description": "No contracts found or linked", "score": 0.0 },
+            { "id": "some_methods_docs", "description": "Some contracts or methods documented", "score": 0.5 },
+            { "id": "all_methods_docs", "description": "All contracts and relevant methods documented", "score": 1.0 }
+          ],
+          "research_instructions": "Look for function/method documentation for important contracts (deposit, withdraw, claim, view functions). Better projects provide ABI-level explanations for interacting via block explorers or scripts."
+        }
+      ]
+    },
+    {
+      "id": "community_ecosystem",
+      "label": "Section 6: Community and Ecosystem",
+      "criteria": [
+        {
+          "id": "twitter",
+          "label": "#17 Twitter (Activity and Popularity)",
+          "weight": 0.23,
+          "subcriteria": [
+            {
+              "id": "twitter_followers",
+              "label": "#17.1 Followers",
+              "type": "formula",
+              "formula": "min(1, followers / 1000)",
+              "research_instructions": "Find official Twitter/X account from docs/site. Read follower count and compute followers/1000; cap at 1.0."
+            },
+            {
+              "id": "twitter_posts",
+              "label": "#17.2 Posts & Reports (Last 30 days)",
+              "type": "scale",
+              "scale": [
+                { "id": "lt_5_posts", "description": "Fewer than 5 posts", "score": 0.0 },
+                {
+                  "id": "between_5_10",
+                  "description": "Between 5 and 10 posts => posts/10",
+                  "score_formula": "posts / 10"
+                },
+                { "id": "ge_10_posts", "description": "10 or more posts", "score": 1.0 }
+              ],
+              "research_instructions": "Manually or via API count posts in last 30 days. If <5, score 0. If 5–10, use posts/10. If ≥10, score 1."
+            },
+            {
+              "id": "twitter_age",
+              "label": "#17.3 Twitter account age",
+              "type": "scale",
+              "scale": [
+                { "id": "lt_1y", "description": "Less than 1 year", "score": 0.0 },
+                { "id": "ge_1y", "description": "1 year or more", "score": 0.5 },
+                { "id": "ge_2y", "description": "2 years or more", "score": 1.0 }
+              ],
+              "research_instructions": "Use account creation date and compare to current date; map to age buckets."
+            }
+          ]
+        },
+        {
+          "id": "discord",
+          "label": "#18 Discord (Activity and Popularity)",
+          "weight": 0.11,
+          "type": "scale",
+          "scale": [
+            { "id": "no_activity", "description": "No visible activity", "score": 0.0 },
+            { "id": "irregular_activity", "description": "Activity not every day", "score": 0.5 },
+            {
+              "id": "daily_last_3d",
+              "description": "Active every day for last 3 days",
+              "score": 1.0
+            }
+          ],
+          "research_instructions": "Join official Discord (link from docs/site/Twitter). Inspect general/dev channels for activity and responses from team over last 3 days; classify according to scale."
+        },
+        {
+          "id": "github_activity",
+          "label": "#19 Github (Activity and Popularity)",
+          "weight": 0.45,
+          "subcriteria": [
+            {
+              "id": "github_followers",
+              "label": "#19.1 Followers",
+              "type": "formula",
+              "formula": "min(1, followers / 1000)",
+              "research_instructions": "From main GitHub org or repo, read followers and compute followers/1000; cap at 1.0."
+            },
+            {
+              "id": "github_stars",
+              "label": "#19.2 Stars",
+              "type": "formula",
+              "formula": "min(1, stars / 1000)",
+              "research_instructions": "Aggregate stars across core repos; compute stars/1000; cap at 1.0."
+            },
+            {
+              "id": "github_forks",
+              "label": "#19.3 Forks",
+              "type": "formula",
+              "formula": "min(1, forks / 1000)",
+              "research_instructions": "Aggregate forks across core repos; compute forks/1000; cap at 1.0."
+            },
+            {
+              "id": "github_commits",
+              "label": "#19.4 Commits",
+              "type": "formula",
+              "formula": "use_external_formula",
+              "research_instructions": "Use 'Github Commits Formula' from external sheet (https://docs.google.com/spreadsheets/d/1WytQnlrPtfYQFc8MzgoTHBezOx4bchbfZAraJ_Nlg6M/edit?gid=1204815281). Apply that formula to commit history across repos."
+            }
+          ]
+        },
+        {
+          "id": "other_social_activity",
+          "label": "#20 Other Social Activity (Telegram, Medium, Mirror, Reddit, etc.)",
+          "weight": 0.02,
+          "type": "scale",
+          "scale": [
+            { "id": "no_other_social", "description": "No other social activity", "score": 0.0 },
+            {
+              "id": "active_content",
+              "description": "Active Medium/Reddit/etc. (≥1 post last month)",
+              "score": 1.0
+            },
+            {
+              "id": "active_telegram",
+              "description": "Active Telegram (admin message in last 3-7 days)",
+              "score": 1.0
+            }
+          ],
+          "research_instructions": "Find additional social channels from docs/site/Twitter (Telegram, Medium, Mirror, Reddit, etc.). Check recent activity; if any channel is actively maintained per criteria, assign score 1. If none, score 0."
+        },
+        {
+          "id": "contact_developers",
+          "label": "#21 Contact Developers",
+          "weight": 0.62,
+          "type": "scale",
+          "scale": [
+            { "id": "contact_possible", "description": "Yes, contact channel exists", "score": 1.0 },
+            { "id": "contact_not_possible", "description": "No clear way to contact team", "score": 0.0 }
+          ],
+          "research_instructions": "Look for support channels such as Discord tickets, Intercom/Zendesk, contact forms, emails, or direct contact via social networks. If any official support/contact method is obvious and working, set 'contact_possible'; otherwise 'contact_not_possible'."
+        }
+      ]
+    },
+    {
+      "id": "investment_reputation",
+      "label": "Section 7: Investment and Reputation",
+      "criteria": [
+        {
+          "id": "top_tier_funds",
+          "label": "#22 Top Tier Funds, Angels, Investors",
+          "weight": 0.53,
+          "type": "scale",
+          "scale": [
+            { "id": "blacklist_or_unknown", "description": "Blacklist or unknown tier", "score": 0.0 },
+            { "id": "tier_5", "description": "Tier 5 investor", "score": 0.2 },
+            { "id": "tier_4", "description": "Tier 4 investor", "score": 0.4 },
+            { "id": "tier_3", "description": "Tier 3 investor", "score": 0.6 },
+            { "id": "tier_2", "description": "Tier 2 investor", "score": 0.8 },
+            { "id": "tier_1", "description": "Tier 1 investor", "score": 1.0 }
+          ],
+          "research_instructions": "Use https://cryptorank.io/ to find project funding rounds and investors. If missing, search web for '<protocol> funding round'. Then match investor categories against WWDA's investor tier mapping and select score. If no investment info is available, score 0."
+        },
+        {
+          "id": "wwda_deposit_history",
+          "label": "#23 WWDA Deposit History",
+          "weight": 0.87,
+          "type": "scale",
+          "scale": [
+            { "id": "no_history", "description": "No history of WWDA deposits", "score": 0.0 },
+            { "id": "lt_1m_deposits", "description": "History less than 1 month", "score": 0.5 },
+            { "id": "gt_1m_deposits", "description": "History more than 1 month", "score": 1.0 }
+          ],
+          "research_instructions": "This depends on internal WWDA tables of previous interactions with the protocol. For external tools, this may always be 0 unless integrated with WWDA's own data store."
+        },
+        {
+          "id": "defi_safety",
+          "label": "#24 Defi Safety",
+          "weight": 0.36,
+          "type": "scale",
+          "scale": [
+            { "id": "lt_70", "description": "DefiSafety score less than 70%", "score": 0.0 },
+            { "id": "ge_70", "description": "70% or more", "score": 0.2 },
+            { "id": "ge_80", "description": "80% or more", "score": 0.4 },
+            { "id": "ge_85", "description": "85% or more", "score": 0.8 },
+            { "id": "ge_90", "description": "90% or more", "score": 1.0 }
+          ],
+          "research_instructions": "Look up protocol on https://defisafety.com/app. If absent, score 0. If present, read score and map to thresholds. Optionally, also consider additional third-party ratings (e.g., Certik Skynet at https://skynet.certik.com/) as future extensions."
+        }
+      ]
+    }
+  ]
+}
+

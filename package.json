@@ -1,0 +1,24 @@
+{
+  "name": "protocol-inspector-frontend",
+  "version": "1.1.0",
+  "description": "Very simple frontend to inspect a DeFi protocol website and display key metrics such as contract addresses, TVL, investors, and transactions per day.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "defi",
+    "frontend",
+    "dashboard",
+    "scraper-ui"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.2.1",
+    "gpt4all": "^4.0.0",
+    "node-fetch": "^3.3.2",
+    "playwright": "^1.58.2"
+  }
+}

@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Protocol Inspector</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="app__header">
+        <h1>Protocol Inspector</h1>
+        <p class="app__subtitle">
+          Paste a DeFi protocol website to inspect real on‑chain metrics,
+          funding, and qualitative risk in one place.
+        </p>
+      </header>
+
+      <section class="card card--input">
+        <form id="protocol-form">
+          <label for="protocol-url" class="field__label">
+            Protocol website
+          </label>
+          <div class="field__row">
+            <input
+              id="protocol-url"
+              name="protocol-url"
+              type="url"
+              class="field__input"
+              placeholder="https://app.uniswap.org"
+              required
+            />
+            <button type="submit" class="btn btn--primary">
+              Analyze
+            </button>
+            <button type="button" id="report-pdf-btn" class="btn btn--ghost">
+              Download PDF
+            </button>
+            <button type="button" id="report-json-btn" class="btn btn--ghost">
+              Download JSON
+            </button>
+          </div>
+          <label for="wallet-address" class="field__label" style="margin-top: 10px;">
+            Wallet address (optional)
+          </label>
+          <div class="field__row">
+            <input
+              id="wallet-address"
+              name="wallet-address"
+              type="text"
+              class="field__input"
+              placeholder="0x…"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </div>
+          <p class="field__hint">
+            Analyze calls your backend (DefiLlama, on‑chain data, HTML
+            parsing, and funding sources). Risk score uses your local LLM
+            and the full risk rubric.
+          </p>
+        </form>
+      </section>
+
+      <section class="grid grid--meta">
+        <article class="card">
+          <h2 class="card__title">Protocol overview</h2>
+          <div id="protocol-name" class="metric metric--primary">–</div>
+          <div id="protocol-url-display" class="metric metric--muted">Paste a URL and click Analyze.</div>
+          <div id="protocol-chains" class="metric metric--muted"></div>
+          <div id="protocol-audits" class="metric metric--muted"></div>
+          <div id="protocol-methodology" class="metric metric--muted"></div>
+        </article>
+
+        <article class="card">
+          <h2 class="card__title">Overall rating</h2>
+          <div id="overall-score" class="metric metric--primary">–</div>
+          <div id="overall-notes" class="metric metric--muted">
+            Risk assessment is generated automatically after Analyze.
+          </div>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2 class="card__title">Smart Contracts</h2>
+          <ul id="contract-list" class="list"></ul>
+          <p class="card__empty" id="contracts-empty">
+            No data yet. Paste a URL and click Analyze.
+          </p>
+        </article>
+
+        <article class="card">
+          <h2 class="card__title">Total Value Locked (TVL)</h2>
+          <div id="tvl-value" class="metric metric--primary">–</div>
+          <div id="tvl-change" class="metric metric--muted"></div>
+        </article>
+
+        <article class="card">
+          <h2 class="card__title">Total raised</h2>
+          <ul id="investor-list" class="list"></ul>
+          <p class="card__empty" id="investors-empty">
+            No total raised data yet. Paste a URL and click Analyze.
+          </p>
+        </article>
+
+        <article class="card">
+          <h2 class="card__title">Volume (24h)</h2>
+          <div id="tx-per-day" class="metric metric--primary">–</div>
+          <div id="tx-trend" class="metric metric--muted"></div>
+        </article>
+
+        <article class="card">
+          <h2 class="card__title">Token liquidity</h2>
+          <ul id="token-liquidity-list" class="list"></ul>
+          <p class="card__empty" id="token-liquidity-empty">
+            No token liquidity list detected on this page yet.
+          </p>
+        </article>
+
+        <article class="card">
+          <h2 class="card__title">Allocations & exposures</h2>
+          <ul id="allocation-list" class="list"></ul>
+          <p class="card__empty" id="allocations-empty">
+            Enter your wallet address above to show your allocated funds.
+          </p>
+        </article>
+
+        <article class="card">
+          <h2 class="card__title">Risk Assessment</h2>
+          <div id="risk-overall" class="metric metric--primary">–</div>
+          <div id="risk-status" class="metric metric--muted">
+            Risk assessment is generated automatically after Analyze.
+          </div>
+          <ul id="risk-sections" class="list"></ul>
+          <ul id="risk-notes" class="list"></ul>
+        </article>
+
+        <article class="card">
+          <h2 class="card__title">Evidence & notes</h2>
+          <ul id="evidence-list" class="list"></ul>
+          <p class="card__empty" id="evidence-empty">
+            After Analyze, this will summarize where each number comes from
+            (DefiLlama, HTML snippets, funding sources, etc).
+          </p>
+        </article>
+      </section>
+
+      <section class="card card--footer">
+        <p>
+          Results are generated by your backend using live data sources and
+          heuristics. Double check critical decisions against primary protocol
+          documentation and audits.
+        </p>
+        <p style="margin-top: 6px;">
+          Helpful places to validate protocol facts:
+        </p>
+        <ul style="margin-top: 6px;">
+          <li>
+            <a
+              href="https://defillama.com"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              DefiLlama
+            </a>
+          </li>
+          <li>
+            <a
+              href="https://dune.com"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Dune Analytics
+            </a>
+          </li>
+          <li>
+            <a
+              href="https://nansen.ai"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Nansen
+            </a>
+          </li>
+          <li>
+            <a
+              href="https://covalent.com"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Covalent
+            </a>
+          </li>
+          <li>
+            <a
+              href="https://rekt.news"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              REKT news
+            </a>
+          </li>
+        </ul>
+      </section>
+    </div>
+
+    <script type="module" src="frontend/app.js"></script>
+  </body>
+  </html>
+

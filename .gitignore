@@ -1,0 +1,12 @@
+node_modules/
+.DS_Store
+.git2/
+
+# Local env / secrets
+.env
+*.env
+
+# OS/editor
+.idea/
+.vscode/
+
