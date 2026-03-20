@@ -57,6 +57,8 @@ const allocationsEmpty = document.getElementById("allocations-empty");
 
 const evidenceList = document.getElementById("evidence-list");
 const evidenceEmpty = document.getElementById("evidence-empty");
+const reportPdfBtn = document.getElementById("report-pdf-btn");
+const reportJsonBtn = document.getElementById("report-json-btn");
 
 const overallScoreEl = document.getElementById("overall-score");
 const overallNotesEl = document.getElementById("overall-notes");
@@ -150,18 +152,12 @@ function renderMetrics(data) {
   const tvlUsd = data?.tvl?.valueUsd ?? null;
   tvlValue.textContent = tvlUsd ? formatUsd(tvlUsd) : "–";
   tvlChange.className = "metric metric--muted";
-  tvlChange.textContent = data?.tvl?.evidence?.[0]
-    ? data.tvl.evidence[0]
-    : data?.tvl
-      ? "TVL inferred from website HTML (if mentioned)."
-      : "No TVL data yet.";
+  tvlChange.textContent = tvlUsd ? "Current TVL." : "No TVL data yet.";
 
   const vol = data?.txsPerDay?.value ?? null;
   txPerDay.textContent = vol ? formatUsd(vol) : "–";
   txTrend.className = "metric metric--muted";
-  txTrend.textContent =
-    data?.txsPerDay?.evidence?.[0] ||
-    (vol ? "Native token volume (24h)." : "No native token volume data yet.");
+  txTrend.textContent = vol ? "Native token volume (24h)." : "No native token volume data yet.";
 }
 
 function renderTokenLiquidity(items) {
@@ -390,4 +386,88 @@ if (form && urlInput) {
       });
   });
 }
+
+function safeFilenamePart(value) {
+  return String(value || "report")
+    .toLowerCase()
+    .replace(/https?:\/\//g, "")
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 60);
+}
+
+function downloadJson(filename, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function downloadPdf(filename, body) {
+  const resp = await fetch("/api/report/pdf", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error || `PDF request failed with status ${resp.status}`);
+  }
+  const blob = await resp.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+reportPdfBtn?.addEventListener("click", async () => {
+  if (!lastAnalysis) {
+    alert("Run Analyze first.");
+    return;
+  }
+  const name =
+    lastAnalysis?.protocol?.name ||
+    safeFilenamePart(lastAnalysis?.protocol?.url) ||
+    "protocol";
+  reportPdfBtn.disabled = true;
+  try {
+    await downloadPdf(`${safeFilenamePart(name)}-report.pdf`, {
+      generatedAt: new Date().toISOString(),
+      analysis: lastAnalysis,
+      riskAssessment: lastRubric,
+    });
+  } catch (e) {
+    console.error(e);
+    alert("Failed to generate PDF report. Check server logs.");
+  } finally {
+    reportPdfBtn.disabled = false;
+  }
+});
+
+reportJsonBtn?.addEventListener("click", () => {
+  if (!lastAnalysis) {
+    alert("Run Analyze first.");
+    return;
+  }
+  const name =
+    lastAnalysis?.protocol?.name ||
+    safeFilenamePart(lastAnalysis?.protocol?.url) ||
+    "protocol";
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    analysis: lastAnalysis,
+    riskAssessment: lastRubric,
+  };
+  downloadJson(`${safeFilenamePart(name)}-report.json`, payload);
+});
 

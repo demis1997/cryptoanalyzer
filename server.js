@@ -957,220 +957,247 @@ function buildPdfReportHtml({ analysis, riskAssessment, generatedAt }) {
   const p = a.protocol || {};
   const urlAnalysis = a.urlAnalysis || {};
   const tvlUsd = a?.tvl?.valueUsd;
-  const chains = Array.isArray(a?.chainsSupported) ? a.chainsSupported : (Array.isArray(p?.chains) ? p.chains : []);
+  const chains = Array.isArray(a?.chainsSupported)
+    ? a.chainsSupported
+    : (Array.isArray(p?.chains) ? p.chains : []);
   const totalRaisedUsd = typeof p?.totalRaisedUsd === "number" ? p.totalRaisedUsd : null;
-  const totalRaisedEvidence = Array.isArray(p?.totalRaisedEvidence) ? p.totalRaisedEvidence : [];
   const contracts = Array.isArray(a?.contracts) ? a.contracts : [];
   const tokens = Array.isArray(a?.tokenLiquidity) ? a.tokenLiquidity : [];
   const allocations = Array.isArray(a?.allocations) ? a.allocations : [];
 
   const auditsCount = Number.isFinite(p?.audits) ? p.audits : null;
-  const methodology = p?.methodology || null;
-  const methodologyUrl = p?.methodologyUrl || null;
-  const auditLinks = Array.isArray(p?.auditLinks) ? p.auditLinks : [];
   const vol24h = a?.txsPerDay?.value;
-  const txEvidence = Array.isArray(a?.txsPerDay?.evidence) ? a.txsPerDay.evidence : [];
+  const generatedTs = generatedAt || new Date().toISOString();
 
   const overall = riskAssessment?.overallTotal;
   const sectionTotals = Array.isArray(riskAssessment?.sectionTotals) ? riskAssessment.sectionTotals : [];
 
-  const topTokens = tokens
-    .filter((t) => typeof t?.liquidityUsd === "number")
-    .sort((x, y) => (y.liquidityUsd || 0) - (x.liquidityUsd || 0))
-    .slice(0, 20);
+  const tokenRows = tokens
+    .map((t) => {
+      const tokenName = t?.token || t?.asset || t?.symbol || "—";
+      const tokenContract =
+        t?.contractAddress ||
+        t?.tokenAddress ||
+        t?.address ||
+        "—";
+      const liquidityText =
+        typeof t?.liquidityUsd === "number"
+          ? fmtUsd(t.liquidityUsd)
+          : (t?.liquidityLabel || "—");
+      return { tokenName, tokenContract, liquidityText };
+    })
+    .slice(0, 120);
 
   return `<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
     <style>
-      :root { --bg:#0b1220; --card:#111c33; --muted:#94a3b8; --text:#e5e7eb; --accent:#38bdf8; --border:rgba(148,163,184,.25); }
+      :root {
+        --text:#0f172a;
+        --muted:#475569;
+        --line:#dbe3ee;
+        --title:#0b1324;
+        --accent:#1d4ed8;
+      }
       * { box-sizing:border-box; }
-      body { margin:0; font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; color: var(--text); background: var(--bg); }
-      .wrap { padding: 18px; }
-      .header { display:flex; justify-content:space-between; gap: 14px; align-items:flex-start; }
-      .title { font-size: 20px; font-weight: 700; margin:0; }
-      .sub { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
-      .pill { display:inline-block; padding: 4px 10px; border-radius: 999px; border:1px solid var(--border); color: var(--muted); font-size: 11px; }
-      .grid { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
-      .card { border:1px solid var(--border); background: var(--card); border-radius: 14px; padding: 12px; }
-      .h { margin:0 0 8px; font-size: 13px; letter-spacing:.02em; color:#cbd5e1; }
-      .k { color: var(--muted); font-size: 11px; }
-      .v { font-size: 14px; font-weight: 600; margin-top: 2px; }
-      table { width:100%; border-collapse: collapse; }
-      th, td { text-align:left; padding: 6px 0; border-bottom: 1px solid rgba(148,163,184,.18); font-size: 11px; vertical-align: top; }
-      th { color: var(--muted); font-weight: 600; }
+      body {
+        margin:0;
+        font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+        color: var(--text);
+        background: #fff;
+      }
+      .wrap { padding: 20px; }
+      .header { border-bottom: 2px solid var(--line); padding-bottom: 12px; margin-bottom: 14px; }
+      .title { margin: 0; font-size: 24px; color: var(--title); }
+      .sub { margin-top: 6px; font-size: 12px; color: var(--muted); }
+      .section { margin-top: 14px; }
+      .section h2 {
+        margin: 0 0 8px;
+        font-size: 15px;
+        color: var(--title);
+        border-left: 4px solid var(--accent);
+        padding-left: 8px;
+      }
+      .summary {
+        font-size: 12px;
+        line-height: 1.45;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px;
+      }
+      table { width:100%; border-collapse: collapse; border:1px solid var(--line); }
+      th, td { text-align:left; padding: 7px 8px; border-bottom:1px solid var(--line); font-size: 11px; vertical-align: top; }
+      th { background:#f8fafc; color:#334155; font-weight:700; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 10px; }
+      .muted { color: var(--muted); font-size: 11px; }
+      .kpi-grid { display:grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+      .kpi {
+        border:1px solid var(--line);
+        border-radius:8px;
+        padding:8px;
+      }
+      .kpi .label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
+      .kpi .value { margin-top:4px; font-size:16px; font-weight:700; color:var(--title); }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-      .small { font-size: 10px; color: var(--muted); }
-      .twoCol { display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-      .score { color: var(--accent); font-weight: 800; }
-      .muted { color: var(--muted); }
-      .list { margin:0; padding-left: 16px; }
-      .list li { margin: 2px 0; }
+      .small { font-size:10px; color: var(--muted); }
+      .page-break { page-break-before: always; }
     </style>
   </head>
   <body>
     <div class="wrap">
       <div class="header">
-        <div>
-          <h1 class="title">${escapeHtml(p?.name || "Protocol")} — Report</h1>
-          <div class="sub">Generated: ${escapeHtml(generatedAt || new Date().toISOString())}</div>
-          <div class="sub">URL: <span class="mono">${escapeHtml(p?.url || a?.origin || "")}</span></div>
-          ${chains.length ? `<div class="sub">Chains: ${escapeHtml(chains.join(", "))}</div>` : ""}
-        </div>
-        <div class="pill">Protocol Inspector</div>
+        <h1 class="title">${escapeHtml(p?.name || "Protocol")} Risk & Liquidity Report</h1>
+        <div class="sub">Generated: ${escapeHtml(generatedTs)}</div>
+        <div class="sub">Protocol URL: <span class="mono">${escapeHtml(p?.url || a?.origin || "—")}</span></div>
+        <div class="sub">Chains: ${escapeHtml(chains.length ? chains.join(", ") : "—")}</div>
       </div>
 
-      <div class="grid">
-        <div class="card">
-          <div class="h">Key metrics</div>
-          <div class="twoCol">
-            <div>
-              <div class="k">TVL / Liquidity</div>
-              <div class="v">${escapeHtml(fmtUsd(tvlUsd))}</div>
-              <div class="small">${escapeHtml((a?.tvl?.evidence?.[0]) || "")}</div>
-            </div>
-            <div>
-              <div class="k">Native token volume (24h)</div>
-              <div class="v">${escapeHtml(typeof vol24h === "number" ? String(vol24h) : "—")}</div>
-              <div class="small">${escapeHtml(txEvidence[0] || "")}</div>
-            </div>
+      <section class="section">
+        <h2>Protocol Summary</h2>
+        <div class="summary">
+          ${escapeHtml(p?.description || "No protocol description available.")}
+          <div style="margin-top:8px;" class="muted">
+            DefiLlama audits: ${escapeHtml(auditsCount != null ? String(auditsCount) : "—")}<br />
+            Page type: ${escapeHtml(urlAnalysis.pageType || a.pageType || "—")}<br />
+            URL chain: ${escapeHtml(urlAnalysis.chain || "—")}<br />
+            URL pool/contract: <span class="mono">${escapeHtml(urlAnalysis.poolAddress || "—")}</span>
           </div>
         </div>
+      </section>
 
-        <div class="card">
-          <div class="h">URL analysis</div>
-          <div class="twoCol">
-            <div>
-              <div class="k">Page type</div>
-              <div class="v">${escapeHtml(urlAnalysis.pageType || a.pageType || "—")}</div>
-            </div>
-            <div>
-              <div class="k">Chain</div>
-              <div class="v">${escapeHtml(urlAnalysis.chain || "—")}</div>
-            </div>
+      <section class="section">
+        <h2>Liquidity & Volume Metrics</h2>
+        <div class="kpi-grid">
+          <div class="kpi">
+            <div class="label">Total Value Locked (TVL)</div>
+            <div class="value">${escapeHtml(fmtUsd(tvlUsd))}</div>
           </div>
-          <div style="height:8px;"></div>
-          <div class="k">Pool / contract address (from URL)</div>
-          <div class="v mono">${escapeHtml(urlAnalysis.poolAddress || "—")}</div>
+          <div class="kpi">
+            <div class="label">Native Token Volume (24h)</div>
+            <div class="value">${escapeHtml(fmtUsd(typeof vol24h === "number" ? vol24h : NaN))}</div>
+          </div>
+          <div class="kpi">
+            <div class="label">Total Raised</div>
+            <div class="value">${escapeHtml(fmtUsd(typeof totalRaisedUsd === "number" ? totalRaisedUsd : NaN))}</div>
+          </div>
         </div>
+      </section>
 
-        <div class="card">
-          <div class="h">Protocol description</div>
-          <div class="small muted">${escapeHtml(p?.description || "—")}</div>
-          <div style="height:8px;"></div>
-          <div class="k">DefiLlama audits</div>
-          <div class="v">${escapeHtml(auditsCount != null ? String(auditsCount) : "—")}</div>
-          ${
-            auditLinks.length
-              ? `<div class="small muted" style="margin-top:4px;">${escapeHtml(
-                  auditLinks.slice(0, 5).join(", ")
-                )}</div>`
-              : `<div class="small muted" style="margin-top:4px;">No audit links found on DefiLlama.</div>`
-          }
-          <div style="height:8px;"></div>
-          <div class="k">Methodology</div>
-          <div class="small muted">${escapeHtml(methodology || "—")}</div>
-          ${
-            methodologyUrl
-              ? `<div class="small muted" style="margin-top:4px;">${escapeHtml(
-                  methodologyUrl
-                )}</div>`
-              : ""
-          }
-          <div style="height:8px;"></div>
-          <div class="k">Features</div>
-          ${
-            Array.isArray(p?.features) && p.features.length
-              ? `<ul class="list">${p.features
-                  .slice(0, 10)
-                  .map((f) => `<li>${escapeHtml(f)}</li>`)
-                  .join("")}</ul>`
-              : `<div class="small muted">—</div>`
-          }
-          <div style="height:8px;"></div>
-          <div class="k">Native token</div>
-          <div class="v">${escapeHtml(p?.nativeToken || "—")}</div>
-        </div>
-
-        <div class="card">
-          <div class="h">Risk summary</div>
-          <div class="k">Overall score (0–1)</div>
-          <div class="v"><span class="score">${escapeHtml(typeof overall === "number" ? overall.toFixed(2) : "—")}</span></div>
-          ${sectionTotals.length ? `
-            <table>
-              <thead><tr><th>Section</th><th>Score</th></tr></thead>
-              <tbody>
-                ${sectionTotals.slice(0, 10).map((s) => `<tr><td>${escapeHtml(s.sectionId)}</td><td>${escapeHtml(typeof s.score === "number" ? s.score.toFixed(2) : "—")}</td></tr>`).join("")}
-              </tbody>
-            </table>
-          ` : `<div class="small muted">Run “Risk score” to include section totals.</div>`}
-        </div>
-
-        <div class="card">
-          <div class="h">Top token liquidity</div>
-          ${topTokens.length ? `
-            <table>
-              <thead><tr><th>Token</th><th>Liquidity</th></tr></thead>
-              <tbody>
-                ${topTokens.map((t) => `<tr><td>${escapeHtml(t.token || "—")}</td><td>${escapeHtml(fmtUsd(t.liquidityUsd))}</td></tr>`).join("")}
-              </tbody>
-            </table>
-          ` : `<div class="small muted">No token liquidity table detected.</div>`}
-        </div>
-
-        <div class="card">
-          <div class="h">Total raised</div>
-          ${
-            typeof totalRaisedUsd === "number" ? `
-              <div class="v">${escapeHtml(fmtUsd(totalRaisedUsd))}</div>
-              ${
-                totalRaisedEvidence.length
-                  ? `<div class="small muted" style="margin-top:6px;">${escapeHtml(totalRaisedEvidence[0] || "")}</div>`
-                  : ""
-              }
-            `
-            : `<div class="small muted">No total raised amount found.</div>`
-          }
-        </div>
-
-        <div class="card" style="grid-column: 1 / -1;">
-          <div class="h">Smart contracts (best‑effort)</div>
-          ${contracts.length ? `
-            <table>
-              <thead><tr><th>Label</th><th>Network</th><th>Address</th></tr></thead>
-              <tbody>
-                ${contracts.slice(0, 30).map((c) => `
+      <section class="section page-break">
+        <h2>Token Liquidity Table</h2>
+        ${
+          tokenRows.length
+            ? `<table>
+                <thead>
                   <tr>
-                    <td>${escapeHtml(c.label || "Contract")}</td>
-                    <td>${escapeHtml(c.network || "Unknown")}</td>
-                    <td class="mono">${escapeHtml(c.address || "")}</td>
+                    <th>Token Name</th>
+                    <th>Token Contract</th>
+                    <th>Liquidity</th>
                   </tr>
-                `).join("")}
-              </tbody>
-            </table>
-          ` : `<div class="small muted">No contract addresses exposed by the submitted page.</div>`}
-        </div>
+                </thead>
+                <tbody>
+                  ${tokenRows
+                    .map(
+                      (r) => `<tr>
+                        <td>${escapeHtml(r.tokenName)}</td>
+                        <td class="mono">${escapeHtml(r.tokenContract)}</td>
+                        <td>${escapeHtml(r.liquidityText)}</td>
+                      </tr>`
+                    )
+                    .join("")}
+                </tbody>
+              </table>`
+            : `<div class="muted">No token liquidity entries were detected for this protocol page.</div>`
+        }
+      </section>
 
-        <div class="card" style="grid-column: 1 / -1;">
-          <div class="h">Wallet allocations (optional)</div>
-          ${allocations.length ? `
-            <table>
-              <thead><tr><th>Target</th><th>Token</th><th>Net</th><th>Note</th></tr></thead>
-              <tbody>
-                ${allocations.slice(0, 30).map((x) => `
+      <section class="section">
+        <h2>Smart Contracts</h2>
+        ${
+          contracts.length
+            ? `<table>
+                <thead>
                   <tr>
-                    <td>${escapeHtml(x.target || "—")}</td>
-                    <td>${escapeHtml(x.token || "—")}</td>
-                    <td>${escapeHtml(x.netAmount ? `${x.netDirection === "net_deposit" ? "+" : "-"}${x.netAmount}` : "—")}</td>
-                    <td class="small">${escapeHtml(x.tvlLabel || "")}</td>
+                    <th>Label</th>
+                    <th>Network</th>
+                    <th>Address</th>
                   </tr>
-                `).join("")}
-              </tbody>
-            </table>
-          ` : `<div class="small muted">Provide a wallet address in the UI to include allocations (requires Etherscan API key).</div>`}
+                </thead>
+                <tbody>
+                  ${contracts
+                    .slice(0, 80)
+                    .map(
+                      (c) => `<tr>
+                        <td>${escapeHtml(c.label || "Contract")}</td>
+                        <td>${escapeHtml(c.network || "Unknown")}</td>
+                        <td class="mono">${escapeHtml(c.address || "—")}</td>
+                      </tr>`
+                    )
+                    .join("")}
+                </tbody>
+              </table>`
+            : `<div class="muted">No smart contract addresses were detected.</div>`
+        }
+      </section>
+
+      <section class="section">
+        <h2>Wallet Allocations (Optional)</h2>
+        ${
+          allocations.length
+            ? `<table>
+                <thead>
+                  <tr>
+                    <th>Target</th>
+                    <th>Token</th>
+                    <th>Share</th>
+                    <th>Value / Note</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${allocations
+                    .slice(0, 80)
+                    .map(
+                      (x) => `<tr>
+                        <td>${escapeHtml(x.target || "—")}</td>
+                        <td>${escapeHtml(x.token || "—")}</td>
+                        <td>${escapeHtml(typeof x.sharePercent === "number" ? `${x.sharePercent.toFixed(1)}%` : (x.share || "—"))}</td>
+                        <td>${escapeHtml(x.tvlLabel || (typeof x.tvlUsd === "number" ? fmtUsd(x.tvlUsd) : "—"))}</td>
+                      </tr>`
+                    )
+                    .join("")}
+                </tbody>
+              </table>`
+            : `<div class="muted">No wallet allocations were attached to this report.</div>`
+        }
+      </section>
+
+      <section class="section">
+        <h2>Risk Summary</h2>
+        <div class="summary">
+          Overall score: <strong>${escapeHtml(typeof overall === "number" ? overall.toFixed(2) : "—")}</strong>
         </div>
-      </div>
+        ${
+          sectionTotals.length
+            ? `<table style="margin-top:8px;">
+                <thead>
+                  <tr><th>Risk Section</th><th>Score</th></tr>
+                </thead>
+                <tbody>
+                  ${sectionTotals
+                    .slice(0, 20)
+                    .map(
+                      (s) => `<tr>
+                        <td>${escapeHtml(s.sectionId || "Section")}</td>
+                        <td>${escapeHtml(typeof s.score === "number" ? s.score.toFixed(2) : "—")}</td>
+                      </tr>`
+                    )
+                    .join("")}
+                </tbody>
+              </table>`
+            : `<div class="muted" style="margin-top:8px;">Risk section breakdown is unavailable for this report.</div>`
+        }
+      </section>
     </div>
   </body>
 </html>`;
@@ -2316,22 +2343,72 @@ async function getWalletHoldingsFromEtherscan({ walletAddress }) {
     "&page=1&offset=200" +
     `&apikey=${encodeURIComponent(apiKey)}`;
 
+  const allocations = [];
+  const toFiniteNumber = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const parseUnitsToFloat = (raw, decimals) => {
+    const cleaned = String(raw || "0").trim();
+    if (!/^\d+$/.test(cleaned)) return null;
+    let bi;
+    try {
+      bi = BigInt(cleaned);
+    } catch {
+      return null;
+    }
+    if (bi <= 0n) return 0;
+    const d = Math.max(0, Math.min(30, Number.isFinite(Number(decimals)) ? Number(decimals) : 0));
+    const base = 10n ** BigInt(d);
+    const whole = bi / base;
+    const frac = bi % base;
+    if (d === 0) {
+      const n = toFiniteNumber(whole.toString());
+      return n == null ? null : n;
+    }
+    const fracStr = frac.toString().padStart(d, "0").slice(0, 8).replace(/0+$/, "");
+    const asStr = fracStr ? `${whole.toString()}.${fracStr}` : whole.toString();
+    return toFiniteNumber(asStr);
+  };
+
+  // Include native ETH balance so wallets without ERC20 holdings still show something.
+  const nativeUrl =
+    "https://api.etherscan.io/v2/api?chainid=1&module=account&action=balance" +
+    `&address=${encodeURIComponent(wallet)}` +
+    "&tag=latest" +
+    `&apikey=${encodeURIComponent(apiKey)}`;
+  const nativeResp = await fetch(nativeUrl).catch(() => null);
+  if (nativeResp && nativeResp.ok) {
+    const nativeJson = await nativeResp.json().catch(() => null);
+    const weiRaw = String(nativeJson?.result || "0");
+    const eth = parseUnitsToFloat(weiRaw, 18);
+    if (eth != null && eth > 0) {
+      allocations.push({
+        target: "ETH (wallet balance)",
+        share: "—",
+        tvlLabel: `${eth.toLocaleString(undefined, { maximumFractionDigits: 6 })} ETH`,
+        riskLevel: "unknown",
+        evidence: ["Source: Etherscan account balance (Ethereum)"],
+      });
+    }
+  }
+
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`Etherscan addresstokenbalance failed: ${resp.status}`);
   const json = await resp.json().catch(() => null);
   const result = Array.isArray(json?.result) ? json.result : [];
 
-  const allocations = result
+  const tokenAllocations = result
     .map((t) => {
-      const symbol = t?.TokenSymbol || t?.tokenSymbol || "TOKEN";
-      const decimals = Number(t?.TokenDivisor || t?.tokenDecimal || 0);
-      const balanceRaw = String(t?.TokenQuantity || t?.balance || "0");
-      const price = Number(t?.TokenPriceUSD || t?.tokenPriceUSD || 0);
-
-      const balNum = Number(balanceRaw);
-      if (!Number.isFinite(balNum) || balNum <= 0) return null;
-      const amount = decimals > 0 ? balNum / 10 ** decimals : balNum;
+      const symbol = t?.TokenSymbol || t?.tokenSymbol || t?.symbol || "TOKEN";
+      const decimalsRaw = t?.TokenDivisor ?? t?.tokenDecimal ?? t?.decimals ?? 0;
+      const decimals = Number(decimalsRaw);
+      const balanceRaw = String(t?.TokenQuantity ?? t?.tokenQuantity ?? t?.balance ?? t?.value ?? "0");
+      const amount = parseUnitsToFloat(balanceRaw, decimals);
+      if (amount == null || amount <= 0) return null;
+      const price = toFiniteNumber(t?.TokenPriceUSD ?? t?.tokenPriceUSD ?? t?.token_price_usd ?? 0) || 0;
       const usd = price > 0 ? amount * price : null;
+      const sortValue = usd != null ? usd : amount;
 
       return {
         target: `${symbol} (wallet holding)`,
@@ -2342,18 +2419,20 @@ async function getWalletHoldingsFromEtherscan({ walletAddress }) {
             : `${amount.toLocaleString(undefined, { maximumFractionDigits: 4 })} ${symbol}`,
         riskLevel: "unknown",
         evidence: ["Source: Etherscan addresstokenbalance (Ethereum)"],
+        __sortValue: sortValue,
       };
     })
     .filter(Boolean)
     .sort((a, b) => {
-      const av = Number(String(a.tvlLabel || "").replace(/[$,]/g, "")) || 0;
-      const bv = Number(String(b.tvlLabel || "").replace(/[$,]/g, "")) || 0;
-      return bv - av;
+      return (b.__sortValue || 0) - (a.__sortValue || 0);
     })
+    .map(({ __sortValue, ...rest }) => rest)
     .slice(0, 100);
 
+  allocations.push(...tokenAllocations);
+
   return {
-    allocations,
+    allocations: allocations.slice(0, 100),
     evidence: allocations.length
       ? ["Source: Etherscan wallet token holdings (Ethereum)."]
       : ["Etherscan returned no wallet token holdings (Ethereum)."],

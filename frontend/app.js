@@ -167,19 +167,13 @@ function renderMetrics(data) {
   tvlValue.textContent = tvlUsd ? formatUsd(tvlUsd) : "–";
 
   tvlChange.className = "metric metric--muted";
-  tvlChange.textContent = data?.tvl
-    ? (data.tvl.evidence && data.tvl.evidence.length
-        ? data.tvl.evidence[0]
-        : "TVL inferred from website HTML (if mentioned).")
-    : "No TVL data yet.";
+  tvlChange.textContent = tvlUsd ? "Current TVL." : "No TVL data yet.";
 
   const vol = data?.txsPerDay?.value ?? null;
   txPerDay.textContent = vol ? formatUsd(vol) : "–";
 
   txTrend.className = "metric metric--muted";
-  txTrend.textContent =
-    data?.txsPerDay?.evidence?.[0] ||
-    (vol ? "Native token volume (24h)." : "No native token volume data yet.");
+  txTrend.textContent = vol ? "Native token volume (24h)." : "No native token volume data yet.";
 }
 
 function renderTokenLiquidity(items) {
