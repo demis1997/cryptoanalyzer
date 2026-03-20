@@ -203,8 +203,10 @@ async function getVisibleTextFromUrl(url, { waitForText = null, timeoutMs = 6000
 
     // Avoid long waits: sample rendered text shortly after DOMContentLoaded and
     // retry briefly if it still doesn't contain the target phrase.
-    const sampleWaitMs = Number(process.env.DEFI_LLAMA_RENDER_SAMPLE_WAIT_MS || 1500);
-    const retryWindowMs = Number(process.env.DEFI_LLAMA_RENDER_RETRY_WINDOW_MS || 8000);
+    // Default tuning: Morpho's DefiLlama metrics often appear a few seconds after
+    // DOMContentLoaded; allow a short retry window to capture them reliably.
+    const sampleWaitMs = Number(process.env.DEFI_LLAMA_RENDER_SAMPLE_WAIT_MS || 2500);
+    const retryWindowMs = Number(process.env.DEFI_LLAMA_RENDER_RETRY_WINDOW_MS || 20000);
 
     await page.waitForTimeout(sampleWaitMs).catch(() => {});
 
