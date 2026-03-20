@@ -1,4 +1,5 @@
 import fetch from "node-fetch";
+import { chromium } from "playwright";
 
 function htmlToVisibleText(html) {
   return String(html || "")
@@ -96,53 +97,96 @@ export async function getDefiLlamaProtocolByUrl(origin) {
   };
 }
 
+function parseCompactMoney(raw, suffix) {
+  let v = parseFloat(String(raw || "").replace(/,/g, ""));
+  if (!isFinite(v)) return null;
+  const s = String(suffix || "").toLowerCase();
+  if (s === "k") v *= 1e3;
+  else if (s === "m") v *= 1e6;
+  else if (s === "b") v *= 1e9;
+  return v;
+}
+
+async function getVisibleTextFromUrl(url, { waitForText = null, timeoutMs = 60000 } = {}) {
+  // 1) Try static HTML first (fast).
+  try {
+    const resp = await fetch(url, {
+      headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" },
+    });
+    if (resp.ok) {
+      const html = await resp.text();
+      const text = htmlToVisibleText(html);
+      if (!waitForText || String(text).includes(waitForText)) return text;
+    }
+  } catch {
+    // Ignore and fall back to rendered content below.
+  }
+
+  // 2) Render fallback (handles SPA/lazy-loaded metrics).
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+    if (waitForText) {
+      await page
+        .waitForFunction(
+          (t) => Boolean(document.body && document.body.innerText && document.body.innerText.includes(t)),
+          waitForText,
+          { timeout: timeoutMs }
+        )
+        .catch(() => {});
+    }
+    const renderedText = await page.evaluate(() => (document.body ? document.body.innerText : ""));
+    return htmlToVisibleText(renderedText);
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
 export async function getDefiLlamaVolume24h(slug) {
   if (!slug) return null;
 
   const protoUrl = `https://defillama.com/protocol/${encodeURIComponent(slug)}`;
-  const resp = await fetch(protoUrl, {
-    headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" },
-  });
-  if (!resp.ok) throw new Error(`DefiLlama volume24h request failed: ${resp.status}`);
+  const text = await getVisibleTextFromUrl(protoUrl, { waitForText: "Volume 24h" });
 
-  const html = await resp.text();
-  const text = htmlToVisibleText(html);
+  // Prefer the native token volume line: "$SYMBOL Volume 24h$".
+  // This matches what you referenced for Morpho ($MORPHO Volume 24h$) and Pendle ($PENDLE Volume 24h$).
+  const tokenRe = /\$([A-Z][A-Z0-9]{1,12})\s+Volume\s+24h\s*\$?\s*([\d.,]+)\s*([kKmMbB])?/i;
+  const m = tokenRe.exec(text);
+  if (m) {
+    const v = parseCompactMoney(m[2], m[3]);
+    if (v != null) {
+      const symbol = m[1] || null;
+      return {
+        value: v,
+        evidence: [`$${symbol} Volume 24h (native token, DefiLlama protocol page)`, protoUrl],
+        raw: { matched: m[0], source: "native_token_volume_24h" },
+      };
+    }
+  }
 
-  // We want the same "total $<SYMBOL> Volume 24h$" shown in the UI.
-  const re = /\$([A-Z][A-Z0-9]{1,12})\s+Volume 24h\$\s*([0-9.,]+)\s*([kKmMbB])?/i;
-  const m = re.exec(text);
-  if (!m) return { value: null, evidence: ["24h volume not found on DefiLlama protocol page."] };
+  // Fallback: Key Metrics DEX volume row.
+  const dexRe = /DEX\s+Volume\s+24h\s*\$?\s*([\d.,]+)\s*([kKmMbB])?/i;
+  const dexM = dexRe.exec(text);
+  if (!dexM) return { value: null, evidence: ["24h volume not found on DefiLlama protocol page."] };
 
-  const valueRaw = m[2];
-  const suffix = (m[3] || "").toLowerCase();
+  const v = parseCompactMoney(dexM[1], dexM[2]);
+  if (v == null) return { value: null, evidence: ["24h volume parse failed."] };
 
-  let v = parseFloat(String(valueRaw).replace(/,/g, ""));
-  if (!isFinite(v)) return { value: null, evidence: ["24h volume parse failed."] };
-
-  if (suffix === "k") v *= 1e3;
-  else if (suffix === "m") v *= 1e6;
-  else if (suffix === "b") v *= 1e9;
-
-  const symbol = m[1] || null;
   return {
     value: v,
-    evidence: [`$${symbol} Volume 24h`, protoUrl],
-    raw: { matched: m[0] },
+    evidence: ["DEX Volume 24h (DefiLlama protocol page)", protoUrl],
+    raw: { matched: dexM[0], source: "dex_volume_24h" },
   };
 }
 
 export async function getDefiLlamaTotalRaisedUsd(slug) {
   if (!slug) return null;
   const protoUrl = `https://defillama.com/protocol/${encodeURIComponent(slug)}`;
-  const resp = await fetch(protoUrl, {
-    headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" },
-  });
-  if (!resp.ok) throw new Error(`DefiLlama totalRaised request failed: ${resp.status}`);
-  const html = await resp.text();
-  const text = htmlToVisibleText(html);
+  const text = await getVisibleTextFromUrl(protoUrl, { waitForText: "Total Raised" });
 
   // Example: "Total Raised$3.7m"
-  const re = /Total Raised\s*\$?\s*([\d.,]+)\s*([kKmMbB])?/i;
+  const re = /Total\s+Raised\s*\$?\s*([\d.,]+)\s*([kKmMbB])?/i;
   const m = re.exec(text);
   if (!m) {
     return {
@@ -167,5 +211,119 @@ export async function getDefiLlamaTotalRaisedUsd(slug) {
     evidence: ["Total raised (from DefiLlama protocol page)", protoUrl],
     raw: { matched: m[0] },
   };
+}
+
+export async function getDefiLlamaProtocolInformation(slug) {
+  if (!slug) return null;
+  const protoUrl = `https://defillama.com/protocol/${encodeURIComponent(slug)}`;
+  const text = await getVisibleTextFromUrl(protoUrl, { waitForText: "Protocol Information" });
+
+  // Visible text usually contains:
+  // "## Protocol Information\n\n<paragraph>\n\n[Website] ...\n\n## Methodology"
+  const re = /Protocol Information\s*([\s\S]*?)\s*## Methodology/i;
+  const m = re.exec(text);
+  if (!m) return null;
+
+  let info = String(m[1] || "").trim();
+
+  // Remove the trailing "links block" like "[Website](...)" if present.
+  info = info.replace(/\n\s*\[[A-Za-z][^\n]*?\].*$/s, "").trim();
+  return { description: info || null, evidence: ["Protocol Information (DefiLlama protocol page)", protoUrl] };
+}
+
+async function fetchTextLimited(url, { maxBytes = 250_000, timeoutMs = 12_000 } = {}) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, {
+      headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" },
+      signal: controller.signal,
+    });
+    if (!resp.ok) throw new Error(`Request failed: ${resp.status}`);
+    if (!resp.body) return "";
+
+    let total = 0;
+    const chunks = [];
+    for await (const chunk of resp.body) {
+      chunks.push(chunk);
+      total += chunk.length;
+      if (total >= maxBytes) break;
+    }
+    const buf = Buffer.concat(
+      chunks.map((c) => (Buffer.isBuffer(c) ? c : Buffer.from(c)))
+    );
+    return buf.toString("utf8");
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+export async function getDefiLlamaTokenLiquidityFromYields(slugOrName) {
+  // Best-effort fallback for cases where the submitted protocol page
+  // doesn't expose token-by-token liquidity.
+  if (!slugOrName) return null;
+
+  const projects = [];
+  // Targeted quality for Morpho (matches your provided DefiLlama yields URL).
+  if (String(slugOrName).toLowerCase() === "morpho") {
+    projects.push(
+      "Morpho V1",
+      "Morpho V0 AaveV2",
+      "Morpho V0 CompoundV2",
+      "Morpho V0 AaveV3"
+    );
+  } else {
+    // Generic attempts: pass slugOrName as a single project value.
+    projects.push(String(slugOrName));
+  }
+
+  // Construct: https://defillama.com/yields?project=A&project=B...
+  const url = `https://defillama.com/yields?${projects
+    .map((p) => `project=${encodeURIComponent(p)}`)
+    .join("&")}`;
+
+  const html = await fetchTextLimited(url).catch(() => null);
+  if (!html) return null;
+  const text = htmlToVisibleText(html);
+
+  // Heuristic extraction:
+  // Try to find lines that include both a token symbol and "TVL", plus a $ amount.
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const tokenRe = /\$?\s*([\d.,]+)\s*([kKmMbB])?/;
+  const out = new Map();
+
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    if (!lower.includes("tvl")) continue;
+    // Find a token-ish word before/near the money.
+    const tokenMatch = line.match(/\b([A-Z][A-Z0-9]{1,12})\b/);
+    if (!tokenMatch) continue;
+
+    const moneyMatch = tokenRe.exec(line);
+    if (!moneyMatch) continue;
+
+    const raw = moneyMatch[1];
+    const suffix = (moneyMatch[2] || "").toLowerCase();
+    let v = parseFloat(String(raw).replace(/,/g, ""));
+    if (!isFinite(v)) continue;
+    if (suffix === "k") v *= 1e3;
+    else if (suffix === "m") v *= 1e6;
+    else if (suffix === "b") v *= 1e9;
+
+    const token = tokenMatch[1];
+    // Keep the max TVL if a token appears multiple times.
+    const key = token.toLowerCase();
+    const current = out.get(key);
+    if (!current || v > current.liquidityUsd) {
+      out.set(key, {
+        token,
+        liquidityUsd: v,
+        evidence: [`DefiLlama yields TVL (best-effort)`, url, line.slice(0, 120)],
+      });
+    }
+  }
+
+  const items = Array.from(out.values()).sort((a, b) => (b.liquidityUsd || 0) - (a.liquidityUsd || 0));
+  return items.length ? items.slice(0, 25) : null;
 }
 

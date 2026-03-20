@@ -7,6 +7,7 @@ const protocolUrlEl = document.getElementById("protocol-url-display");
 const protocolChainsEl = document.getElementById("protocol-chains");
 const protocolAuditsEl = document.getElementById("protocol-audits");
 const protocolMethodologyEl = document.getElementById("protocol-methodology");
+const protocolInformationEl = document.getElementById("protocol-information");
 
 const contractList = document.getElementById("contract-list");
 const contractsEmpty = document.getElementById("contracts-empty");
@@ -134,6 +135,11 @@ function renderProtocolMeta(data) {
     const text = protocol?.methodology || "";
     protocolMethodologyEl.textContent = text ? `Methodology: ${text.slice(0, 120)}${text.length > 120 ? "…" : ""}` : "";
   }
+
+  if (protocolInformationEl) {
+    const text = protocol?.description || "";
+    protocolInformationEl.textContent = text ? text.slice(0, 260) + (text.length > 260 ? "…" : "") : "—";
+  }
 }
 
 function renderMetrics(data) {
@@ -153,7 +159,7 @@ function renderMetrics(data) {
   txTrend.className = "metric metric--muted";
   txTrend.textContent =
     data?.txsPerDay?.evidence?.[0] ||
-    (vol ? "24h volume." : "No 24h volume data yet.");
+    (vol ? "Native token volume (24h)." : "No native token volume data yet.");
 }
 
 function renderTokenLiquidity(items) {

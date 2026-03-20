@@ -9,6 +9,8 @@ import {
   getDefiLlamaProtocolByUrl as getDefiLlamaProtocolByUrlFromModule,
   getDefiLlamaVolume24h as getDefiLlamaVolume24hFromModule,
   getDefiLlamaTotalRaisedUsd as getDefiLlamaTotalRaisedUsdFromModule,
+  getDefiLlamaProtocolInformation as getDefiLlamaProtocolInformationFromModule,
+  getDefiLlamaTokenLiquidityFromYields as getDefiLlamaTokenLiquidityFromYieldsFromModule,
 } from "./backend/services/defillama.js";
 import { buildHeuristicRiskAssessment as buildHeuristicRiskAssessmentFromModule } from "./backend/llm/riskHeuristics.js";
 
@@ -90,6 +92,20 @@ app.post("/api/llm-analyze", async (req, res) => {
       return null;
     });
 
+    const defiLlamaSlug =
+      defillama?.slug ||
+      (defillama?.defillamaUrl
+        ? (() => {
+            try {
+              const u = new URL(defillama.defillamaUrl);
+              const parts = u.pathname.split("/").filter(Boolean);
+              return parts[parts.length - 1] || null;
+            } catch {
+              return null;
+            }
+          })()
+        : null);
+
     const page = await fetchHtmlWithOptionalRender(origin);
     if (!page.ok) {
       return res.status(502).json({
@@ -105,6 +121,18 @@ app.post("/api/llm-analyze", async (req, res) => {
     const tokenLiquidity = (page.extracted?.tokenLiquidity?.length
       ? page.extracted.tokenLiquidity
       : extractTokenLiquidityFromHtml(html));
+
+    // Fallback: if the submitted page doesn't expose token liquidity,
+    // pull a best-effort token+TVL list from DefiLlama yields.
+    let tokenLiquidityFinal = tokenLiquidity;
+    if (
+      Array.isArray(tokenLiquidity) &&
+      tokenLiquidity.length === 0 &&
+      defiLlamaSlug
+    ) {
+      const fromYields = await getDefiLlamaTokenLiquidityFromYieldsFromModule(defiLlamaSlug).catch(() => null);
+      if (Array.isArray(fromYields) && fromYields.length) tokenLiquidityFinal = fromYields;
+    }
 
     // Investors are not extracted; we show DefiLlama "Total raised" instead.
     const investorsFromHtml = [];
@@ -165,8 +193,8 @@ app.post("/api/llm-analyze", async (req, res) => {
     if (!enriched.protocol.description || !enriched.protocol.features) {
       const protoInfo = extractProtocolInfoFromHtml(html, {
         protocolName: enriched.protocol.name,
-        knownTokens: Array.isArray(tokenLiquidity)
-          ? tokenLiquidity.map((t) => t.token).filter(Boolean)
+        knownTokens: Array.isArray(tokenLiquidityFinal)
+          ? tokenLiquidityFinal.map((t) => t.token).filter(Boolean)
           : [],
       });
       if (protoInfo?.description && !enriched.protocol.description) {
@@ -234,7 +262,7 @@ app.post("/api/llm-analyze", async (req, res) => {
     }
 
     if (!Array.isArray(enriched.tokenLiquidity) || enriched.tokenLiquidity.length === 0) {
-      enriched.tokenLiquidity = tokenLiquidity;
+      enriched.tokenLiquidity = tokenLiquidityFinal;
     }
 
     // Step-4 aligned: asset list
@@ -246,18 +274,59 @@ app.post("/api/llm-analyze", async (req, res) => {
       }));
     }
 
-    // Total raised (replaces investors UI)
-    const totalRaised = await getDefiLlamaTotalRaisedUsdFromModule(
-      defillama?.slug || enriched?.protocol?.slug || defillama?.name || null
-    ).catch((err) => {
-      console.warn("DefiLlama totalRaised error:", err.message);
-      return null;
-    });
-
-    if (totalRaised && typeof totalRaised.value === "number") {
-      enriched.protocol.totalRaisedUsd = totalRaised.value;
-      enriched.protocol.totalRaisedEvidence = totalRaised.evidence || [];
+    function slugifyForDefiLlama(name) {
+      return String(name || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/-+/g, "-")
+        .replace(/^-|-$/g, "");
     }
+
+    // Total raised (replaces investors UI)
+    const totalRaisedSlugs = Array.from(
+      new Set(
+        [
+          defiLlamaSlug,
+          defillama?.slug,
+          defillama?.name ? slugifyForDefiLlama(defillama.name) : null,
+          enriched?.protocol?.name ? slugifyForDefiLlama(enriched.protocol.name) : null,
+        ].filter(Boolean)
+      )
+    );
+
+    let totalRaisedCandidate = null;
+    let totalRaisedEvidence = [];
+    for (const s of totalRaisedSlugs) {
+      const tr = await getDefiLlamaTotalRaisedUsdFromModule(s).catch((err) => {
+        console.warn("DefiLlama totalRaised error:", err.message);
+        return { value: null, evidence: [`Total raised request failed for slug "${s}": ${err.message}`] };
+      });
+      if (tr?.evidence && Array.isArray(tr.evidence) && tr.evidence.length && !totalRaisedEvidence.length) {
+        totalRaisedEvidence = tr.evidence;
+      }
+      if (tr && typeof tr.value === "number") {
+        totalRaisedCandidate = tr;
+        break;
+      }
+    }
+
+    if (totalRaisedCandidate?.value != null && typeof totalRaisedCandidate.value === "number") {
+      enriched.protocol.totalRaisedUsd = totalRaisedCandidate.value;
+    }
+    // Always attach evidence for troubleshooting (even if parse failed).
+    enriched.protocol.totalRaisedEvidence = totalRaisedCandidate?.evidence || totalRaisedEvidence || [];
+
+    // Protocol Information (DefiLlama) -> map into our existing description slot
+    let defiProtocolInfo = null;
+    for (const s of totalRaisedSlugs) {
+      const info = await getDefiLlamaProtocolInformationFromModule(s).catch(() => null);
+      if (info?.description) {
+        defiProtocolInfo = info;
+        break;
+      }
+    }
+    if (defiProtocolInfo?.description) enriched.protocol.description = defiProtocolInfo.description;
 
     enriched.investors = [];
 
@@ -336,7 +405,7 @@ app.post("/api/llm-analyze", async (req, res) => {
 
     // 24h Volume (DefiLlama): protocol-level metric (works for any protocol with a DefiLlama match).
     if (!enriched.txsPerDay || (enriched.txsPerDay && enriched.txsPerDay.value == null)) {
-      const volume = await getDefiLlamaVolume24hFromModule(defillama?.slug || enriched?.protocol?.slug || defillama?.name || null).catch((err) => {
+      const volume = await getDefiLlamaVolume24hFromModule(defiLlamaSlug).catch((err) => {
         console.warn("DefiLlama volume24h error:", err.message);
         return null;
       });
@@ -917,7 +986,7 @@ function buildPdfReportHtml({ analysis, riskAssessment, generatedAt }) {
               <div class="small">${escapeHtml((a?.tvl?.evidence?.[0]) || "")}</div>
             </div>
             <div>
-              <div class="k">24h Volume</div>
+              <div class="k">Native token volume (24h)</div>
               <div class="v">${escapeHtml(typeof vol24h === "number" ? String(vol24h) : "—")}</div>
               <div class="small">${escapeHtml(txEvidence[0] || "")}</div>
             </div>
@@ -2555,8 +2624,6 @@ async function getTransactionsPerDay(origin) {
 async function getDefiLlamaVolume24h(slug) {
   if (!slug) return null;
 
-  // Match DefiLlama's protocol page "$<SYMBOL> Volume 24h" (often CEX+DEX),
-  // not just "DEX Volume 24h".
   const protoUrl = `https://defillama.com/protocol/${encodeURIComponent(slug)}`;
   const resp = await fetch(protoUrl, {
     headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" },
@@ -2565,33 +2632,47 @@ async function getDefiLlamaVolume24h(slug) {
   const html = await resp.text();
   const text = htmlToVisibleText(html);
 
-  // Example: "$PENDLE Volume 24h$20.57m"
-  const re = /\$([A-Z][A-Z0-9]{1,12})\s+Volume 24h\$\s*([\d.,]+)\s*([kKmMbB])?/g;
+  function parseCompactMoney(raw, suffix) {
+    let v = parseFloat(String(raw || "").replace(/,/g, ""));
+    if (!isFinite(v)) return null;
+    const s = String(suffix || "").toLowerCase();
+    if (s === "k") v *= 1e3;
+    else if (s === "m") v *= 1e6;
+    else if (s === "b") v *= 1e9;
+    return v;
+  }
+
+  const dexRe = /DEX\s+Volume\s+24h\s*\$?\s*([\d.,]+)\s*([kKmMbB])?/i;
+  const tokenRe = /\$([A-Z][A-Z0-9]{1,12})\s+Volume\s+24h\s*\$?\s*([\d.,]+)\s*([kKmMbB])?/gi;
   let match;
   const values = [];
-  while ((match = re.exec(text)) !== null) {
-    const symbol = match[1];
-    const raw = match[2];
-    const suffix = (match[3] || "").toLowerCase();
-    let v = parseFloat(String(raw).replace(/,/g, ""));
-    if (!isFinite(v)) continue;
-    if (suffix === "k") v *= 1e3;
-    else if (suffix === "m") v *= 1e6;
-    else if (suffix === "b") v *= 1e9;
-    values.push({ symbol, value: v });
+  while ((match = tokenRe.exec(text)) !== null) {
+    const v = parseCompactMoney(match[2], match[3]);
+    if (v == null) continue;
+    values.push({ symbol: match[1], value: v });
   }
 
-  // Prefer the total "$<SYMBOL> Volume 24h" (should be the first match in practice).
-  if (!values.length) {
-    return { value: null, evidence: ["No 24h volume found on protocol page."], raw: null };
+  // Prefer native token volume first.
+  if (values.length) {
+    const chosen = values[0];
+    return {
+      value: chosen.value,
+      evidence: [`$${chosen.symbol} Volume 24h (native token, DefiLlama protocol page)`, protoUrl],
+      raw: { chosen, source: "native_token_volume_24h" },
+    };
   }
 
-  // There are also "DEX Volume 24h" and "CEX Volume 24h" lines; those won't match "$<SYMBOL> Volume 24h".
-  const chosen = values[0];
+  // Fallback: DEX Volume 24h row.
+  const dexM = dexRe.exec(text);
+  if (!dexM) return { value: null, evidence: ["No 24h volume found on protocol page."], raw: null };
+
+  const v = parseCompactMoney(dexM[1], dexM[2]);
+  if (v == null) return { value: null, evidence: ["24h volume parse failed."], raw: null };
+
   return {
-    value: chosen.value,
-    evidence: [`24h volume from protocol page`, protoUrl],
-    raw: { chosen },
+    value: v,
+    evidence: ["DEX Volume 24h (DefiLlama protocol page)", protoUrl],
+    raw: { matched: dexM[0], source: "dex_volume_24h" },
   };
 }
 
