@@ -2,6 +2,26 @@ const form = document.getElementById("protocol-form");
 const urlInput = document.getElementById("protocol-url");
 const walletInput = document.getElementById("wallet-address");
 
+const debankLinkWrap = document.getElementById("debank-link-wrap");
+const debankLink = document.getElementById("debank-link");
+
+function isValidWalletAddress(address) {
+  return /^0x[a-fA-F0-9]{40}$/.test(String(address || "").trim());
+}
+
+function updateDebankLink() {
+  const v = walletInput?.value?.trim() || "";
+  if (debankLinkWrap && debankLink && isValidWalletAddress(v)) {
+    debankLink.href = `https://debank.com/profile/${encodeURIComponent(v)}`;
+    debankLinkWrap.style.display = "block";
+    return;
+  }
+  if (debankLinkWrap) debankLinkWrap.style.display = "none";
+}
+
+walletInput?.addEventListener("input", updateDebankLink);
+updateDebankLink();
+
 const protocolNameEl = document.getElementById("protocol-name");
 const protocolUrlEl = document.getElementById("protocol-url-display");
 const protocolChainsEl = document.getElementById("protocol-chains");

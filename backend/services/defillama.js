@@ -72,7 +72,46 @@ export async function getDefiLlamaProtocolByUrl(origin) {
     return Boolean(originBase && pBase && originBase === pBase);
   });
 
-  if (!match) return null;
+  if (!match) {
+    // Fallback: try matching by a token from the origin host.
+    // Example: `app.morpho.org` -> tries to match protocol slug/name "morpho".
+    const hostParts = String(originHost || "")
+      .split(".")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+
+    const first = hostParts[0] || "";
+    const second = hostParts[1] || "";
+    const candidate = ["app", "www", "beta", "alpha", "staging", "test"].includes(first) ? second : first;
+
+    if (candidate) {
+      const token = candidate.toLowerCase();
+      const nameMatch = protocols.find((p) => {
+        const slug = typeof p?.slug === "string" ? p.slug.toLowerCase() : "";
+        const name = typeof p?.name === "string" ? p.name.toLowerCase() : "";
+        return slug === token || name === token || name.includes(token);
+      });
+      if (nameMatch) {
+        return {
+          name: nameMatch.name || null,
+          slug: nameMatch.slug || null,
+          tvlUsd: typeof nameMatch.tvl === "number" ? nameMatch.tvl : null,
+          defillamaUrl: nameMatch.url || null,
+          chains: Array.isArray(nameMatch.chains) ? nameMatch.chains : [],
+          listedAt: typeof nameMatch.listedAt === "number" ? nameMatch.listedAt : null,
+          description: typeof nameMatch.description === "string" ? nameMatch.description : null,
+          methodology: typeof nameMatch.methodology === "string" ? nameMatch.methodology : null,
+          methodologyUrl: typeof nameMatch.methodologyURL === "string" ? nameMatch.methodologyURL : null,
+          audits:
+            nameMatch?.audits == null ? null : Number.isFinite(Number(nameMatch.audits)) ? Number(nameMatch.audits) : null,
+          auditLinks: Array.isArray(nameMatch.audit_links) ? nameMatch.audit_links : [],
+          rawProtocol: nameMatch,
+        };
+      }
+    }
+
+    return null;
+  }
 
   return {
     name: match.name || null,
@@ -109,21 +148,28 @@ function parseCompactMoney(raw, suffix) {
 
 async function getVisibleTextFromUrl(url, { waitForText = null, timeoutMs = 60000 } = {}) {
   // 1) Try static HTML first (fast).
+  let staticText = null;
   try {
     const resp = await fetch(url, {
       headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" },
     });
     if (resp.ok) {
       const html = await resp.text();
-      const text = htmlToVisibleText(html);
-      if (!waitForText || String(text).includes(waitForText)) return text;
+      staticText = htmlToVisibleText(html);
+      if (!waitForText || String(staticText).includes(waitForText)) return staticText;
     }
   } catch {
     // Ignore and fall back to rendered content below.
   }
 
   // 2) Render fallback (handles SPA/lazy-loaded metrics).
-  const browser = await chromium.launch({ headless: true });
+  let browser = null;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch {
+    // If Playwright/Chromium isn't available, still return whatever static HTML text we got.
+    return staticText || "";
+  }
   try {
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
