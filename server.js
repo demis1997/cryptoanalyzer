@@ -147,11 +147,15 @@ app.post("/api/llm-analyze", async (req, res) => {
     // the 2048 token context window. This is enough for titles, headings, and key descriptions.
     const snippet = html.slice(0, 800);
 
-    // Try LLM-based analysis, but don't fail the whole request if it is not available.
-    const analysis = await runWebsiteAnalysisWithGpt4All(origin, snippet).catch((err) => {
-      console.warn("LLM website analysis failed, falling back to non-LLM data:", err.message);
-      return null;
-    });
+    // Website LLM analysis can be slow (and can block the request) on some hosts.
+    // Default to heuristic/non-LLM behavior unless explicitly enabled.
+    const enableWebsiteLlm = String(process.env.ENABLE_WEBSITE_LLM || "").toLowerCase() === "1";
+    const analysis = enableWebsiteLlm
+      ? await runWebsiteAnalysisWithGpt4All(origin, snippet).catch((err) => {
+          console.warn("LLM website analysis failed, falling back to non-LLM data:", err.message);
+          return null;
+        })
+      : null;
 
     // Enrich: DefiLlama TVL + basic metadata
     const enriched = analysis ? { ...analysis } : {};
@@ -1637,7 +1641,29 @@ async function fetchHtmlWithOptionalRender(url) {
     "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)",
   };
 
-  const resp = await fetch(url, { headers });
+  const isVercel = String(process.env.VERCEL || "") !== "";
+  const fetchTimeoutMs = Number(
+    process.env.HTML_FETCH_TIMEOUT_MS || (isVercel ? 30_000 : 15_000)
+  );
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), fetchTimeoutMs);
+
+  let resp;
+  try {
+    resp = await fetch(url, { headers, signal: controller.signal });
+  } catch (err) {
+    const msg = err?.message ? String(err.message) : String(err);
+    // Network timeouts are common when rendering JS-heavy pages.
+    return {
+      ok: false,
+      status: 504,
+      html: "",
+      rendered: false,
+      renderError: `Fetch timed out/failed: ${msg}`,
+    };
+  } finally {
+    clearTimeout(t);
+  }
   if (!resp.ok) {
     return { ok: false, status: resp.status, html: "", rendered: false };
   }
@@ -1649,8 +1675,19 @@ async function fetchHtmlWithOptionalRender(url) {
     return { ok: true, status: resp.status, html, rendered: false };
   }
 
+  // Safety valve for local debugging: some JS-heavy pages can make Playwright slow.
+  if (String(process.env.SKIP_PLAYWRIGHT_RENDER || "").toLowerCase() === "1") {
+    return { ok: true, status: resp.status, html, rendered: false, extracted: null };
+  }
+
   let renderError = null;
-  const rendered = await renderHtmlWithPlaywright(url).catch((err) => {
+  const renderTimeoutMs = Number(process.env.PLAYWRIGHT_RENDER_TIMEOUT_MS || 45_000);
+  const rendered = await Promise.race([
+    renderHtmlWithPlaywright(url),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`Playwright render timed out after ${renderTimeoutMs}ms`)), renderTimeoutMs)
+    ),
+  ]).catch((err) => {
     renderError = err?.message ? String(err.message) : String(err);
     console.warn("Playwright render failed, using raw HTML:", renderError);
     return null;
@@ -1705,10 +1742,12 @@ function shouldRenderHtml(html) {
 }
 
 async function renderHtmlWithPlaywright(url) {
-  // Vercel/serverless often requires these flags for Chromium.
+  // Serverless (Vercel) often needs these flags. Locally, apply default
+  // Chromium settings to avoid hangs/regressions.
+  const isVercel = String(process.env.VERCEL || "") !== "";
   const browser = await chromium.launch({
     headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    args: isVercel ? ["--no-sandbox", "--disable-setuid-sandbox"] : [],
   });
   try {
     const context = await browser.newContext({
@@ -1717,9 +1756,11 @@ async function renderHtmlWithPlaywright(url) {
     });
     const page = await context.newPage();
 
-    // Don’t hang forever on slow RPCs/images.
-    page.setDefaultNavigationTimeout(60_000);
-    page.setDefaultTimeout(60_000);
+    // Don’t hang forever on slow/non-responsive pages.
+    const navTimeoutMs = Number(process.env.PLAYWRIGHT_NAV_TIMEOUT_MS || (isVercel ? 60_000 : 25_000));
+    const opTimeoutMs = Number(process.env.PLAYWRIGHT_OP_TIMEOUT_MS || (isVercel ? 60_000 : 25_000));
+    page.setDefaultNavigationTimeout(navTimeoutMs);
+    page.setDefaultTimeout(opTimeoutMs);
 
     let lastErr = null;
     try {
@@ -1738,7 +1779,12 @@ async function renderHtmlWithPlaywright(url) {
           const t = (document.body && (document.body.innerText || document.body.textContent)) || "";
           return /liquidity/i.test(t) && /\$[\d]/.test(t);
         },
-        { timeout: 20_000 }
+        {
+          timeout: Number(
+            process.env.PLAYWRIGHT_WAIT_FOR_TEXT_TIMEOUT_MS ||
+              (isVercel ? 20_000 : 8_000)
+          ),
+        }
       );
     } catch {
       // If it never appears, continue with whatever we have.
