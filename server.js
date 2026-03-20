@@ -361,15 +361,24 @@ app.post("/api/llm-analyze", async (req, res) => {
         console.warn("Wallet allocations error:", err.message);
         return null;
       });
+      const etherscanHoldings =
+        !Array.isArray(alloc?.allocations) || alloc.allocations.length === 0
+          ? await getWalletHoldingsFromEtherscan({ walletAddress: walletAddress.trim() }).catch((err) => {
+              console.warn("Etherscan wallet holdings error:", err.message);
+              return null;
+            })
+          : null;
 
       const merged = [];
       if (Array.isArray(alloc?.allocations)) merged.push(...alloc.allocations);
+      if (Array.isArray(etherscanHoldings?.allocations)) merged.push(...etherscanHoldings.allocations);
       if (Array.isArray(debank?.allocations)) merged.push(...debank.allocations);
       if (Array.isArray(covalent?.allocations)) merged.push(...covalent.allocations);
       if (merged.length) enriched.allocations = merged;
 
       const walletEvidence = [
         ...(Array.isArray(alloc?.evidence) ? alloc.evidence : []),
+        ...(Array.isArray(etherscanHoldings?.evidence) ? etherscanHoldings.evidence : []),
         ...(Array.isArray(debank?.evidence) ? debank.evidence : []),
         ...(Array.isArray(covalent?.evidence) ? covalent.evidence : []),
       ];
@@ -2287,6 +2296,67 @@ async function getWalletAllocationsFromEtherscan({ walletAddress, contracts }) {
       "Source: Etherscan account tokentx API (latest 200 ERC-20 transfers).",
       "Allocations represent net token flow between your wallet and detected protocol contracts.",
     ],
+  };
+}
+
+async function getWalletHoldingsFromEtherscan({ walletAddress }) {
+  const apiKey = process.env.ETHERSCAN_API_KEY;
+  if (!apiKey) {
+    return { allocations: [], evidence: ["ETHERSCAN_API_KEY not configured; cannot query wallet holdings."] };
+  }
+
+  const wallet = String(walletAddress || "").trim().toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(wallet)) {
+    return { allocations: [], evidence: ["Invalid wallet address format for Etherscan holdings."] };
+  }
+
+  const url =
+    "https://api.etherscan.io/v2/api?chainid=1&module=account&action=addresstokenbalance" +
+    `&address=${encodeURIComponent(wallet)}` +
+    "&page=1&offset=200" +
+    `&apikey=${encodeURIComponent(apiKey)}`;
+
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`Etherscan addresstokenbalance failed: ${resp.status}`);
+  const json = await resp.json().catch(() => null);
+  const result = Array.isArray(json?.result) ? json.result : [];
+
+  const allocations = result
+    .map((t) => {
+      const symbol = t?.TokenSymbol || t?.tokenSymbol || "TOKEN";
+      const decimals = Number(t?.TokenDivisor || t?.tokenDecimal || 0);
+      const balanceRaw = String(t?.TokenQuantity || t?.balance || "0");
+      const price = Number(t?.TokenPriceUSD || t?.tokenPriceUSD || 0);
+
+      const balNum = Number(balanceRaw);
+      if (!Number.isFinite(balNum) || balNum <= 0) return null;
+      const amount = decimals > 0 ? balNum / 10 ** decimals : balNum;
+      const usd = price > 0 ? amount * price : null;
+
+      return {
+        target: `${symbol} (wallet holding)`,
+        share: "—",
+        tvlLabel:
+          usd != null
+            ? `$${usd.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+            : `${amount.toLocaleString(undefined, { maximumFractionDigits: 4 })} ${symbol}`,
+        riskLevel: "unknown",
+        evidence: ["Source: Etherscan addresstokenbalance (Ethereum)"],
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => {
+      const av = Number(String(a.tvlLabel || "").replace(/[$,]/g, "")) || 0;
+      const bv = Number(String(b.tvlLabel || "").replace(/[$,]/g, "")) || 0;
+      return bv - av;
+    })
+    .slice(0, 100);
+
+  return {
+    allocations,
+    evidence: allocations.length
+      ? ["Source: Etherscan wallet token holdings (Ethereum)."]
+      : ["Etherscan returned no wallet token holdings (Ethereum)."],
   };
 }
 
