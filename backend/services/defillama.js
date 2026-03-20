@@ -146,26 +146,46 @@ function parseCompactMoney(raw, suffix) {
   return v;
 }
 
+const _visibleTextCache = new Map();
+
 async function getVisibleTextFromUrl(url, { waitForText = null, timeoutMs = 60000 } = {}) {
+  const cache = _visibleTextCache.get(url) || {};
   const enableRender = String(process.env.DEFI_LLAMA_RENDER || "").toLowerCase() === "1";
+  const renderOnMiss = String(process.env.DEFI_LLAMA_RENDER_ON_MISS || "1").toLowerCase() !== "0";
+
+  // Fast path: cached rendered/static text already contains what we need.
+  if (cache.renderedText && (!waitForText || String(cache.renderedText).includes(waitForText))) {
+    return cache.renderedText;
+  }
+  if (cache.staticText && (!waitForText || String(cache.staticText).includes(waitForText))) {
+    return cache.staticText;
+  }
+
   // 1) Try static HTML first (fast).
-  let staticText = null;
-  try {
-    const resp = await fetch(url, {
-      headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" },
-    });
-    if (resp.ok) {
-      const html = await resp.text();
-      staticText = htmlToVisibleText(html);
-      if (!waitForText || String(staticText).includes(waitForText)) return staticText;
+  let staticText = cache.staticText || null;
+  if (staticText == null) {
+    try {
+      const resp = await fetch(url, {
+        headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" },
+      });
+      if (resp.ok) {
+        const html = await resp.text();
+        staticText = htmlToVisibleText(html);
+        cache.staticText = staticText;
+        _visibleTextCache.set(url, cache);
+      }
+    } catch {
+      // Ignore and fall back to rendered content below.
     }
-  } catch {
-    // Ignore and fall back to rendered content below.
+  }
+
+  if (!waitForText || String(staticText || "").includes(waitForText)) {
+    return staticText || "";
   }
 
   // If render is disabled (default), return whatever static HTML text we have.
   // This keeps responses fast; in that mode, waitForText-based metrics may be missing.
-  if (!enableRender) {
+  if (!enableRender && !renderOnMiss) {
     return staticText || "";
   }
 
@@ -174,23 +194,35 @@ async function getVisibleTextFromUrl(url, { waitForText = null, timeoutMs = 6000
   try {
     browser = await chromium.launch({ headless: true });
   } catch {
-    // If Playwright/Chromium isn't available, still return whatever static HTML text we got.
     return staticText || "";
   }
+
   try {
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
-    if (waitForText) {
-      await page
-        .waitForFunction(
-          (t) => Boolean(document.body && document.body.innerText && document.body.innerText.includes(t)),
-          waitForText,
-          { timeout: timeoutMs }
-        )
-        .catch(() => {});
+
+    // Avoid long waits: sample rendered text shortly after DOMContentLoaded and
+    // retry briefly if it still doesn't contain the target phrase.
+    const sampleWaitMs = Number(process.env.DEFI_LLAMA_RENDER_SAMPLE_WAIT_MS || 1500);
+    const retryWindowMs = Number(process.env.DEFI_LLAMA_RENDER_RETRY_WINDOW_MS || 8000);
+
+    await page.waitForTimeout(sampleWaitMs).catch(() => {});
+
+    let renderedText = await page.evaluate(() => (document.body ? document.body.innerText : ""));
+
+    if (waitForText && !String(renderedText).includes(waitForText) && retryWindowMs > 0) {
+      const started = Date.now();
+      while (Date.now() - started < retryWindowMs) {
+        await page.waitForTimeout(500).catch(() => {});
+        renderedText = await page.evaluate(() => (document.body ? document.body.innerText : ""));
+        if (String(renderedText).includes(waitForText)) break;
+      }
     }
-    const renderedText = await page.evaluate(() => (document.body ? document.body.innerText : ""));
-    return htmlToVisibleText(renderedText);
+
+    const visibleRendered = htmlToVisibleText(renderedText);
+    cache.renderedText = visibleRendered;
+    _visibleTextCache.set(url, cache);
+    return visibleRendered;
   } finally {
     await browser.close().catch(() => {});
   }
