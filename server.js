@@ -342,6 +342,11 @@ app.post("/api/llm-analyze", async (req, res) => {
 
     // Wallet allocations (optional): summarize token flows between the wallet and detected contracts.
     if (walletAddress && typeof walletAddress === "string" && walletAddress.trim()) {
+      const debank = await getWalletProtocolsFromDebank({ walletAddress: walletAddress.trim() }).catch((err) => {
+        console.warn("Debank wallet protocols error:", err.message);
+        return null;
+      });
+
       const alloc = await getWalletAllocationsFromEtherscan({
         walletAddress: walletAddress.trim(),
         contracts: Array.isArray(enriched.contracts) ? enriched.contracts : [],
@@ -349,9 +354,18 @@ app.post("/api/llm-analyze", async (req, res) => {
         console.warn("Wallet allocations error:", err.message);
         return null;
       });
-      if (alloc?.allocations) {
-        enriched.allocations = alloc.allocations;
-        enriched.wallet = { address: walletAddress.trim(), evidence: alloc.evidence || [] };
+
+      const merged = [];
+      if (Array.isArray(alloc?.allocations)) merged.push(...alloc.allocations);
+      if (Array.isArray(debank?.allocations)) merged.push(...debank.allocations);
+      if (merged.length) enriched.allocations = merged;
+
+      const walletEvidence = [
+        ...(Array.isArray(alloc?.evidence) ? alloc.evidence : []),
+        ...(Array.isArray(debank?.evidence) ? debank.evidence : []),
+      ];
+      if (walletEvidence.length) {
+        enriched.wallet = { address: walletAddress.trim(), evidence: walletEvidence };
       }
     }
 
@@ -2264,6 +2278,77 @@ async function getWalletAllocationsFromEtherscan({ walletAddress, contracts }) {
       "Source: Etherscan account tokentx API (latest 200 ERC-20 transfers).",
       "Allocations represent net token flow between your wallet and detected protocol contracts.",
     ],
+  };
+}
+
+async function getWalletProtocolsFromDebank({ walletAddress }) {
+  const accessKey = process.env.DEBANK_ACCESS_KEY;
+  if (!accessKey) {
+    return {
+      allocations: [],
+      evidence: ["DEBANK_ACCESS_KEY not configured; skipping Debank wallet protocols."],
+    };
+  }
+
+  const wallet = String(walletAddress || "").trim().toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(wallet)) {
+    return { allocations: [], evidence: ["Invalid wallet address format for Debank."] };
+  }
+
+  const endpoints = [
+    `https://pro-openapi.debank.com/v1/user/all_simple_protocol_list?id=${encodeURIComponent(wallet)}`,
+    `https://pro-openapi.debank.com/v1/user/simple_protocol_list?id=${encodeURIComponent(wallet)}`,
+  ];
+
+  let list = null;
+  for (const endpoint of endpoints) {
+    const resp = await fetch(endpoint, {
+      headers: {
+        accept: "application/json",
+        AccessKey: accessKey,
+      },
+    }).catch(() => null);
+    if (!resp || !resp.ok) continue;
+    const json = await resp.json().catch(() => null);
+    if (Array.isArray(json)) {
+      list = json;
+      break;
+    }
+  }
+
+  if (!Array.isArray(list)) {
+    return {
+      allocations: [],
+      evidence: ["Debank protocol list unavailable for this wallet/API key."],
+    };
+  }
+
+  const allocations = list
+    .map((p) => {
+      const name = p?.name || p?.id || "Protocol";
+      const chain = p?.chain || p?.chain_id || null;
+      const usd =
+        Number.isFinite(Number(p?.net_usd_value))
+          ? Number(p.net_usd_value)
+          : Number.isFinite(Number(p?.usd_value))
+            ? Number(p.usd_value)
+            : null;
+      return {
+        target: name,
+        share: "—",
+        tvlLabel: usd != null ? `$${usd.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : "—",
+        riskLevel: "unknown",
+        evidence: [
+          "Source: Debank user protocol list",
+          ...(chain ? [`Chain: ${chain}`] : []),
+        ],
+      };
+    })
+    .slice(0, 100);
+
+  return {
+    allocations,
+    evidence: ["Source: Debank wallet protocol positions."],
   };
 }
 

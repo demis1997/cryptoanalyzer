@@ -420,7 +420,7 @@ function renderAllocations(allocations) {
     const share =
       typeof a.sharePercent === "number"
         ? `${a.sharePercent.toFixed(1)}%`
-        : a.share;
+        : a.share || "—";
     const tvlText =
       typeof a.tvlUsd === "number" ? formatUsd(a.tvlUsd) : a.tvlLabel || "";
 

@@ -268,7 +268,7 @@ function renderAllocations(allocations) {
       <div>${a.target || a.protocol || a.name || "Destination"}</div>
       <div class="tag">
         <span class="tag__label">Share</span>
-        <span class="tag__value">${a.sharePercent ? a.sharePercent.toFixed(1) + "%" : (a.share || "—")}</span>
+        <span class="tag__value">${typeof a.sharePercent === "number" ? a.sharePercent.toFixed(1) + "%" : (a.share || "—")}</span>
       </div>
       <div class="tag">
         <span class="tag__label">TVL</span>
