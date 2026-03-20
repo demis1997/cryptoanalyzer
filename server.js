@@ -499,7 +499,10 @@ app.post("/api/llm-analyze", async (req, res) => {
       rendered: page.rendered,
       notes: page.rendered
         ? ["Content extracted after JavaScript rendering."]
-        : ["Content extracted from raw HTML response (no JavaScript)."],
+        : [
+            "Content extracted from raw HTML response (no JavaScript).",
+            ...(page.renderError ? [`Playwright render error: ${page.renderError}`] : []),
+          ],
     };
     if (page.rendered) {
       enriched.page.notes.push(
@@ -1646,8 +1649,10 @@ async function fetchHtmlWithOptionalRender(url) {
     return { ok: true, status: resp.status, html, rendered: false };
   }
 
+  let renderError = null;
   const rendered = await renderHtmlWithPlaywright(url).catch((err) => {
-    console.warn("Playwright render failed, using raw HTML:", err.message);
+    renderError = err?.message ? String(err.message) : String(err);
+    console.warn("Playwright render failed, using raw HTML:", renderError);
     return null;
   });
 
@@ -1661,7 +1666,14 @@ async function fetchHtmlWithOptionalRender(url) {
     };
   }
 
-  return { ok: true, status: resp.status, html, rendered: false, extracted: null };
+  return {
+    ok: true,
+    status: resp.status,
+    html,
+    rendered: false,
+    extracted: null,
+    renderError,
+  };
 }
 
 function shouldRenderHtml(html) {
@@ -1693,7 +1705,11 @@ function shouldRenderHtml(html) {
 }
 
 async function renderHtmlWithPlaywright(url) {
-  const browser = await chromium.launch({ headless: true });
+  // Vercel/serverless often requires these flags for Chromium.
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  });
   try {
     const context = await browser.newContext({
       userAgent: "ProtocolInspector/1.0 (+https://github.com/)",
