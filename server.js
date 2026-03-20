@@ -24,6 +24,10 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
+// On Vercel, static assets are typically picked from `public/`.
+// Serve `public/` first, then fall back to repo root for local/dev.
+const publicDir = path.join(__dirname, "public");
+app.use(express.static(publicDir));
 app.use(express.static(__dirname));
 
 app.get("/api/health", (req, res) => {
