@@ -147,6 +147,7 @@ function parseCompactMoney(raw, suffix) {
 }
 
 async function getVisibleTextFromUrl(url, { waitForText = null, timeoutMs = 60000 } = {}) {
+  const enableRender = String(process.env.DEFI_LLAMA_RENDER || "").toLowerCase() === "1";
   // 1) Try static HTML first (fast).
   let staticText = null;
   try {
@@ -160,6 +161,12 @@ async function getVisibleTextFromUrl(url, { waitForText = null, timeoutMs = 6000
     }
   } catch {
     // Ignore and fall back to rendered content below.
+  }
+
+  // If render is disabled (default), return whatever static HTML text we have.
+  // This keeps responses fast; in that mode, waitForText-based metrics may be missing.
+  if (!enableRender) {
+    return staticText || "";
   }
 
   // 2) Render fallback (handles SPA/lazy-loaded metrics).
