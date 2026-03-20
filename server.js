@@ -346,6 +346,13 @@ app.post("/api/llm-analyze", async (req, res) => {
         console.warn("Debank wallet protocols error:", err.message);
         return null;
       });
+      const covalent =
+        !Array.isArray(debank?.allocations) || debank.allocations.length === 0
+          ? await getWalletAllocationsFromCovalent({ walletAddress: walletAddress.trim() }).catch((err) => {
+              console.warn("Covalent wallet allocations error:", err.message);
+              return null;
+            })
+          : null;
 
       const alloc = await getWalletAllocationsFromEtherscan({
         walletAddress: walletAddress.trim(),
@@ -358,11 +365,13 @@ app.post("/api/llm-analyze", async (req, res) => {
       const merged = [];
       if (Array.isArray(alloc?.allocations)) merged.push(...alloc.allocations);
       if (Array.isArray(debank?.allocations)) merged.push(...debank.allocations);
+      if (Array.isArray(covalent?.allocations)) merged.push(...covalent.allocations);
       if (merged.length) enriched.allocations = merged;
 
       const walletEvidence = [
         ...(Array.isArray(alloc?.evidence) ? alloc.evidence : []),
         ...(Array.isArray(debank?.evidence) ? debank.evidence : []),
+        ...(Array.isArray(covalent?.evidence) ? covalent.evidence : []),
       ];
       if (walletEvidence.length) {
         enriched.wallet = { address: walletAddress.trim(), evidence: walletEvidence };
@@ -2349,6 +2358,66 @@ async function getWalletProtocolsFromDebank({ walletAddress }) {
   return {
     allocations,
     evidence: ["Source: Debank wallet protocol positions."],
+  };
+}
+
+async function getWalletAllocationsFromCovalent({ walletAddress }) {
+  const wallet = String(walletAddress || "").trim().toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(wallet)) {
+    return { allocations: [], evidence: ["Invalid wallet address format for Covalent."] };
+  }
+
+  // Covalent has a public/demo key for basic testing; override with your own key for production.
+  const apiKey = process.env.COVALENT_API_KEY || "ckey_demo";
+  const chains = [
+    { name: "Ethereum", id: 1 },
+    { name: "Base", id: 8453 },
+    { name: "Arbitrum", id: 42161 },
+    { name: "Optimism", id: 10 },
+    { name: "Polygon", id: 137 },
+    { name: "BSC", id: 56 },
+  ];
+
+  const allocations = [];
+  const evidence = [];
+
+  for (const chain of chains) {
+    const url =
+      `https://api.covalenthq.com/v1/${chain.id}/address/${encodeURIComponent(wallet)}` +
+      `/balances_v2/?nft=false&no-nft-fetch=true&key=${encodeURIComponent(apiKey)}`;
+    const resp = await fetch(url).catch(() => null);
+    if (!resp || !resp.ok) continue;
+    const json = await resp.json().catch(() => null);
+    const items = Array.isArray(json?.data?.items) ? json.data.items : [];
+    if (!items.length) continue;
+
+    items.forEach((item) => {
+      const q = Number(item?.quote || 0);
+      if (!Number.isFinite(q) || q <= 0) return;
+      allocations.push({
+        target: `${item.contract_ticker_symbol || item.contract_name || "Token"} (${chain.name})`,
+        share: "—",
+        tvlLabel: `$${q.toLocaleString(undefined, { maximumFractionDigits: 2 })}`,
+        riskLevel: "unknown",
+        evidence: [
+          "Source: Covalent balances_v2",
+          `Chain: ${chain.name}`,
+        ],
+      });
+    });
+    evidence.push(`Covalent balances fetched for ${chain.name}.`);
+  }
+
+  // Keep the section concise.
+  allocations.sort((a, b) => {
+    const av = Number(String(a.tvlLabel || "").replace(/[$,]/g, "")) || 0;
+    const bv = Number(String(b.tvlLabel || "").replace(/[$,]/g, "")) || 0;
+    return bv - av;
+  });
+
+  return {
+    allocations: allocations.slice(0, 100),
+    evidence: evidence.length ? evidence : ["Covalent returned no balances for supported chains."],
   };
 }
 
