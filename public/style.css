@@ -1,0 +1,246 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Segoe UI", sans-serif;
+  background: radial-gradient(circle at top left, #0f172a, #020617 55%);
+  color: #e5e7eb;
+  min-height: 100vh;
+}
+
+.app {
+  max-width: 1024px;
+  margin: 0 auto;
+  padding: 32px 16px 40px;
+}
+
+.app__header {
+  text-align: left;
+  margin-bottom: 24px;
+}
+
+.app__header h1 {
+  margin: 0 0 8px;
+  font-size: 28px;
+  letter-spacing: 0.02em;
+}
+
+.app__subtitle {
+  margin: 0;
+  max-width: 640px;
+  color: #9ca3af;
+  font-size: 14px;
+}
+
+.card {
+  background: rgba(15, 23, 42, 0.92);
+  border-radius: 16px;
+  padding: 18px 18px 20px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(24px);
+}
+
+.card--input {
+  margin-bottom: 24px;
+}
+
+.card--footer {
+  margin-top: 24px;
+  font-size: 13px;
+  color: #9ca3af;
+}
+
+.card--footer ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.card__title {
+  margin: 0 0 10px;
+  font-size: 16px;
+}
+
+.card__empty {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 18px;
+}
+
+.grid--meta {
+  margin-bottom: 18px;
+}
+
+.field__label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: #e5e7eb;
+}
+
+.field__row {
+  display: flex;
+  gap: 10px;
+}
+
+.field__input {
+  flex: 1;
+  padding: 10px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  background: rgba(15, 23, 42, 0.98);
+  color: #e5e7eb;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease,
+    background-color 0.15s ease;
+}
+
+.field__input::placeholder {
+  color: #6b7280;
+}
+
+.field__input:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.65);
+  background: #020617;
+}
+
+.field__hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.btn {
+  border: none;
+  border-radius: 999px;
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.12s ease,
+    opacity 0.12s ease;
+}
+
+.btn--primary {
+  background: linear-gradient(135deg, #38bdf8, #6366f1);
+  color: #0b1120;
+  box-shadow: 0 10px 25px rgba(37, 99, 235, 0.65);
+}
+
+.btn--primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 32px rgba(37, 99, 235, 0.85);
+}
+
+.btn--primary:active {
+  transform: translateY(0);
+  box-shadow: 0 8px 20px rgba(37, 99, 235, 0.75);
+}
+
+.btn--ghost {
+  background: rgba(2, 6, 23, 0.35);
+  color: #e5e7eb;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  box-shadow: none;
+}
+
+.btn--ghost:hover {
+  transform: translateY(-1px);
+  border-color: rgba(56, 189, 248, 0.55);
+  box-shadow: 0 10px 25px rgba(2, 6, 23, 0.35);
+}
+
+.btn--ghost:active {
+  transform: translateY(0);
+}
+
+.btn:disabled {
+  opacity: 0.65;
+  cursor: default;
+  transform: none;
+  box-shadow: none;
+}
+
+.metric {
+  font-variant-numeric: tabular-nums;
+}
+
+.metric--primary {
+  font-size: 20px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.metric--muted {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.metric--up {
+  color: #22c55e;
+}
+
+.metric--down {
+  color: #f97316;
+}
+
+.list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 13px;
+}
+
+.list li + li {
+  margin-top: 6px;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  background: rgba(15, 23, 42, 0.9);
+}
+
+.tag__label {
+  margin-right: 6px;
+  color: #9ca3af;
+}
+
+.tag__value {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  .app {
+    padding: 20px 14px 32px;
+  }
+
+  .field__row {
+    flex-direction: column;
+  }
+
+  .btn {
+    width: 100%;
+    justify-content: center;
+  }
+}
+

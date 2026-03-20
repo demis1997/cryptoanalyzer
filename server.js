@@ -18,6 +18,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+export { app };
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
@@ -2403,12 +2404,16 @@ function mapScanHostToNetwork(host) {
   return "Unknown";
 }
 
-app.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
-  console.log(
-    "Enabled routes: GET /api/health, GET /api/analyze, POST /api/llm-analyze, GET /api/risk-schema, POST /api/risk-assessment"
-  );
-});
+// In Vercel Serverless Functions we shouldn't bind to a port.
+// When running locally (or outside Vercel), start the HTTP server.
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`Server listening on http://localhost:${PORT}`);
+    console.log(
+      "Enabled routes: GET /api/health, GET /api/analyze, POST /api/llm-analyze, GET /api/risk-schema, POST /api/risk-assessment"
+    );
+  });
+}
 
 function normalizeUrl(rawUrl) {
   if (!rawUrl) return "";
