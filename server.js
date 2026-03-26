@@ -191,6 +191,17 @@ app.post("/api/llm-analyze", async (req, res) => {
       enriched.protocol.auditLinks = defillama.auditLinks;
     }
 
+    // Docs-first audit verification (best-effort). Helps correct stale/incorrect metadata.
+    const auditVerify = await verifyAuditsFromProtocolDocs({
+      origin,
+      protocolName: enriched?.protocol?.name || defillama?.name || null,
+    }).catch((err) => ({
+      count: null,
+      firms: [],
+      evidence: [`Audit verification failed: ${err?.message ? String(err.message) : String(err)}`],
+    }));
+    enriched.protocol.auditsVerified = auditVerify;
+
     // Compatibility: some clients expect `origin` at the top level.
     enriched.origin = origin;
 
@@ -1104,7 +1115,9 @@ function buildPdfReportHtml({ analysis, riskAssessment, generatedAt }) {
   const tokens = Array.isArray(a?.tokenLiquidity) ? a.tokenLiquidity : [];
   const allocations = Array.isArray(a?.allocations) ? a.allocations : [];
 
-  const auditsCount = Number.isFinite(p?.audits) ? p.audits : null;
+  const auditsCount = Number.isFinite(p?.auditsVerified?.count)
+    ? p.auditsVerified.count
+    : (Number.isFinite(p?.audits) ? p.audits : null);
   const vol24h = a?.txsPerDay?.value;
   const generatedTs = generatedAt || new Date().toISOString();
 
@@ -1683,6 +1696,141 @@ function parseLikelyJson(text) {
     }
     throw new Error("No JSON object found in GPT4All output.");
   }
+}
+
+async function fetchTextFast(url, { timeoutMs = 12000 } = {}) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, {
+      headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" },
+      signal: controller.signal,
+    });
+    if (!resp.ok) return { ok: false, status: resp.status, text: "" };
+    const html = await resp.text();
+    return { ok: true, status: resp.status, text: htmlToVisibleText(html) };
+  } catch (err) {
+    const msg = err?.message ? String(err.message) : String(err);
+    return { ok: false, status: 0, text: "", error: msg };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function extractAuditClaimsFromText(text) {
+  const t = String(text || "");
+  const lower = t.toLowerCase();
+  if (!t || !lower.includes("audit")) return { firms: [], snippets: [] };
+
+  const lines = t
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const snippets = [];
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (!/audit/i.test(l)) continue;
+    const win = lines.slice(Math.max(0, i - 1), Math.min(lines.length, i + 2)).join(" ");
+    snippets.push(win.slice(0, 280));
+    if (snippets.length >= 18) break;
+  }
+
+  // Common auditor names to catch without an LLM (expandable).
+  const known = [
+    "Trail of Bits",
+    "OpenZeppelin",
+    "Quantstamp",
+    "CertiK",
+    "PeckShield",
+    "Halborn",
+    "Sigma Prime",
+    "ChainSecurity",
+    "ConsenSys Diligence",
+    "Dedaub",
+    "OtterSec",
+    "Spearbit",
+    "Code4rena",
+    "Sherlock",
+  ];
+  const firms = [];
+  for (const name of known) {
+    if (lower.includes(name.toLowerCase())) firms.push(name);
+  }
+
+  return { firms: Array.from(new Set(firms)), snippets };
+}
+
+async function verifyAuditsFromProtocolDocs({ origin, protocolName }) {
+  const base = normalizeUrl(origin);
+  let u;
+  try {
+    u = new URL(base);
+  } catch {
+    return { count: null, firms: [], evidence: ["Audit verification skipped: invalid URL."] };
+  }
+
+  const candidates = [
+    base,
+    `${u.origin}/security`,
+    `${u.origin}/audits`,
+    `${u.origin}/docs`,
+    `${u.origin}/docs/security`,
+    `${u.origin}/docs/audits`,
+    `${u.origin}/documentation`,
+    `${u.origin}/documentation/security`,
+    `${u.origin}/documentation/audits`,
+  ];
+
+  const evidence = [];
+  const allSnippets = [];
+  const firmSet = new Set();
+
+  for (const url of candidates) {
+    const r = await fetchTextFast(url, { timeoutMs: 10_000 });
+    if (!r.ok) continue;
+    evidence.push(`Checked: ${url}`);
+    const { firms, snippets } = extractAuditClaimsFromText(r.text);
+    firms.forEach((f) => firmSet.add(f));
+    snippets.forEach((s) => allSnippets.push(s));
+    if (allSnippets.length >= 18) break;
+  }
+
+  // Optional AI normalization (docs-first).
+  const enableWebsiteLlm = String(process.env.ENABLE_WEBSITE_LLM || "").toLowerCase() === "1";
+  if (enableWebsiteLlm && allSnippets.length) {
+    const prompt = `
+Extract security audit firms from protocol docs text.
+Return JSON only: {"auditors":[{"name":string}]}.
+If none are clearly stated, return {"auditors":[]}.
+
+Protocol: ${protocolName || "unknown"}
+URL: ${base}
+
+Snippets:
+${allSnippets.map((s, i) => `${i + 1}. ${s}`).join("\n")}
+`.trim();
+    const parsed = await runWebsiteAnalysisWithGpt4All(base, prompt.slice(0, 1800)).catch(() => null);
+    const auditors = Array.isArray(parsed?.auditors) ? parsed.auditors : [];
+    auditors
+      .map((x) => String(x?.name || "").trim())
+      .filter(Boolean)
+      .forEach((n) => firmSet.add(n));
+  }
+
+  const firms = Array.from(firmSet);
+  const count = firms.length ? firms.length : null;
+  if (!evidence.length) evidence.push("No protocol docs pages reachable for audit verification.");
+
+  return {
+    count,
+    firms,
+    evidence: [
+      "Audits verified from protocol documentation (best‑effort).",
+      ...evidence.slice(0, 6),
+      ...(firms.length ? [`Auditors found: ${firms.join(", ")}`] : ["Auditors not found in checked pages."]),
+    ],
+  };
 }
 
 function extractTvlFromHtml(html) {
