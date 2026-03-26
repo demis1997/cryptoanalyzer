@@ -952,6 +952,145 @@ function fmtUsd(n) {
   return `$${Math.round(n).toLocaleString()}`;
 }
 
+function isLikelyAddress(v) {
+  return /^0x[a-fA-F0-9]{40}$/.test(String(v || "").trim());
+}
+
+function buildArchitectureDiagramSvg({ protocolLabel, protocolAddress, tokenNodes, vaultNodes }) {
+  // Vertical layout:
+  // [Token contracts...]
+  //          ↓
+  //   [Protocol/Router]
+  //          ↓
+  //   [Vaults/Pools...]
+  const tokens = Array.isArray(tokenNodes) ? tokenNodes : [];
+  const vaults = Array.isArray(vaultNodes) ? vaultNodes : [];
+
+  const width = 980;
+  const paddingX = 18;
+  const paddingY = 18;
+  const centerX = Math.round(width / 2);
+
+  const nodeW = 720;
+  const nodeH = 34;
+  const gap = 10;
+
+  const tokenCount = Math.max(1, tokens.length);
+  const vaultCount = Math.max(1, vaults.length);
+
+  const topLabelH = 18;
+  const tokensBlockH = topLabelH + tokenCount * (nodeH + gap);
+  const routerBlockH = 76;
+  const vaultsLabelH = 18;
+  const vaultsBlockH = vaultsLabelH + vaultCount * (nodeH + gap);
+
+  const height =
+    paddingY +
+    tokensBlockH +
+    16 +
+    routerBlockH +
+    16 +
+    vaultsBlockH +
+    paddingY +
+    14;
+
+  const nodeX = centerX - Math.round(nodeW / 2);
+
+  const rect = (x, y, w, h, fill, stroke) =>
+    `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" ry="10" fill="${fill}" stroke="${stroke}" />`;
+  const label = (x, y, text, size = 11, color = "#0f172a", anchor = "start") =>
+    `<text x="${x}" y="${y}" font-size="${size}" fill="${color}" font-family="-apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif" text-anchor="${anchor}">${escapeHtml(text)}</text>`;
+  const mono = (x, y, text, size = 9, color = "#475569", anchor = "start") =>
+    `<text x="${x}" y="${y}" font-size="${size}" fill="${color}" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" text-anchor="${anchor}">${escapeHtml(text)}</text>`;
+  const line = (x1, y1, x2, y2) =>
+    `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#94a3b8" stroke-width="1.2" />`;
+  const arrow = (x, y) =>
+    `<path d="M ${x - 6} ${y - 4} L ${x} ${y + 4} L ${x + 6} ${y - 4}" fill="none" stroke="#94a3b8" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" />`;
+
+  const bg = `<rect x="0" y="0" width="${width}" height="${height}" rx="12" ry="12" fill="#f8fafc" stroke="#dbe3ee" />`;
+
+  let y = paddingY + 12;
+  const tokensTitle = label(paddingX, y, "Token contracts", 11, "#334155");
+  y += topLabelH;
+
+  const tokenBlocks = tokens.length
+    ? tokens
+        .map((t, i) => {
+          const yy = y + i * (nodeH + gap);
+          const name = t?.name || "Token";
+          const addr = t?.address || "";
+          return (
+            rect(nodeX, yy, nodeW, nodeH, "#ffffff", "#dbe3ee") +
+            label(nodeX + 10, yy + 21, name, 11, "#0b1324") +
+            (addr ? mono(nodeX + 280, yy + 21, addr, 9, "#475569") : "")
+          );
+        })
+        .join("")
+    : rect(nodeX, y, nodeW, nodeH, "#ffffff", "#dbe3ee") +
+      label(nodeX + 10, y + 21, "No token contracts detected", 11, "#64748b");
+
+  const tokensBottomY = y + (tokenCount - 1) * (nodeH + gap) + nodeH;
+  const routerTopY = tokensBottomY + 16 + 16;
+  const routerW = 520;
+  const routerH = 54;
+  const routerX = centerX - Math.round(routerW / 2);
+
+  const routerBlock =
+    rect(routerX, routerTopY, routerW, routerH, "#eff6ff", "#93c5fd") +
+    label(centerX, routerTopY + 22, protocolLabel || "Protocol / Router", 12, "#1d4ed8", "middle") +
+    (protocolAddress ? mono(centerX, routerTopY + 40, protocolAddress, 9, "#1d4ed8", "middle") : "");
+
+  // Connect token block to router.
+  const tokensToRouter =
+    line(centerX, tokensBottomY + 10, centerX, routerTopY - 10) + arrow(centerX, routerTopY - 10);
+
+  const vaultsTopLabelY = routerTopY + routerH + 16 + 12;
+  const vaultsTitle = label(paddingX, vaultsTopLabelY, "Vaults / pools / markets", 11, "#334155");
+  const vaultsStartY = vaultsTopLabelY + vaultsLabelH;
+
+  const vaultBlocks = vaults.length
+    ? vaults
+        .map((v, i) => {
+          const yy = vaultsStartY + i * (nodeH + gap);
+          const name = v?.name || "Vault/Pool";
+          const addr = v?.address || "";
+          return (
+            rect(nodeX, yy, nodeW, nodeH, "#ffffff", "#dbe3ee") +
+            label(nodeX + 10, yy + 21, name, 11, "#0b1324") +
+            (addr ? mono(nodeX + 280, yy + 21, addr, 9, "#475569") : "")
+          );
+        })
+        .join("")
+    : rect(nodeX, vaultsStartY, nodeW, nodeH, "#ffffff", "#dbe3ee") +
+      label(nodeX + 10, vaultsStartY + 21, "No vault/pool contracts detected", 11, "#64748b");
+
+  const vaultsBottomY = vaultsStartY + (vaultCount - 1) * (nodeH + gap) + nodeH;
+  const routerToVaults =
+    line(centerX, routerTopY + routerH + 10, centerX, vaultsStartY - 10) +
+    arrow(centerX, vaultsStartY - 10);
+
+  const note = label(
+    width - paddingX,
+    height - 10,
+    "Best‑effort diagram from detected addresses (may be incomplete).",
+    9,
+    "#64748b",
+    "end"
+  );
+
+  return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+    ${bg}
+    ${tokensTitle}
+    ${tokenBlocks}
+    ${tokensToRouter}
+    ${routerBlock}
+    ${routerToVaults}
+    ${vaultsTitle}
+    ${vaultBlocks}
+    ${note}
+  </svg>`;
+}
+
 function buildPdfReportHtml({ analysis, riskAssessment, generatedAt }) {
   const a = analysis || {};
   const p = a.protocol || {};
@@ -987,6 +1126,45 @@ function buildPdfReportHtml({ analysis, riskAssessment, generatedAt }) {
       return { tokenName, tokenContract, liquidityText };
     })
     .slice(0, 120);
+
+  const protocolAddress =
+    (contracts.find((c) => isLikelyAddress(c?.address))?.address) ||
+    (isLikelyAddress(urlAnalysis?.poolAddress) ? urlAnalysis.poolAddress : "") ||
+    "";
+
+  const archTokens = tokenRows
+    .filter((r) => isLikelyAddress(r.tokenContract))
+    .map((r) => ({ name: r.tokenName, address: r.tokenContract }));
+
+  const vaultLabelHints = ["vault", "pool", "market", "lp", "staking", "gauge", "router"];
+  const archVaults = [
+    ...(isLikelyAddress(urlAnalysis?.poolAddress)
+      ? [{ name: urlAnalysis?.pageType ? String(urlAnalysis.pageType) : "Vault/Pool", address: urlAnalysis.poolAddress }]
+      : []),
+    ...contracts
+      .filter((c) => isLikelyAddress(c?.address))
+      .filter((c) => {
+        const lbl = String(c?.label || "").toLowerCase();
+        return vaultLabelHints.some((h) => lbl.includes(h));
+      })
+      .slice(0, 6)
+      .map((c) => ({ name: c.label || "Vault/Pool", address: c.address })),
+  ].slice(0, 6);
+
+  const maxTokensPerDiagram = 18;
+  const tokenChunks =
+    archTokens.length > 0 ? chunkArray(archTokens, maxTokensPerDiagram) : [[]];
+  const archSvgs = tokenChunks
+    .map((chunk, idx) => {
+      const title = tokenChunks.length > 1 ? `${p?.name || "Protocol"} (tokens ${idx * maxTokensPerDiagram + 1}–${Math.min((idx + 1) * maxTokensPerDiagram, archTokens.length)})` : (p?.name || "Protocol");
+      return buildArchitectureDiagramSvg({
+        protocolLabel: `${title} / Router`,
+        protocolAddress: protocolAddress || "",
+        tokenNodes: chunk,
+        vaultNodes: archVaults,
+      });
+    })
+    .join("");
 
   return `<!doctype html>
 <html>
@@ -1081,6 +1259,13 @@ function buildPdfReportHtml({ analysis, riskAssessment, generatedAt }) {
             <div class="label">Total Raised</div>
             <div class="value">${escapeHtml(fmtUsd(typeof totalRaisedUsd === "number" ? totalRaisedUsd : NaN))}</div>
           </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Architecture Diagram</h2>
+        <div class="summary">
+          ${archSvgs}
         </div>
       </section>
 
