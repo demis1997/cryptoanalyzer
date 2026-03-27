@@ -43,14 +43,16 @@ export function buildHeuristicRiskAssessment({ protocolName, url, analysis }) {
   const a = analysis || {};
   const tvl = a?.tvl?.valueUsd;
   const listedAt = a?.protocol?.listedAt;
-  const audits = a?.protocol?.audits;
+  const audits = a?.protocol?.auditsVerified?.count ?? a?.protocol?.audits;
+  const auditFirms = Array.isArray(a?.protocol?.auditsVerified?.firms) ? a.protocol.auditsVerified.firms : [];
   const auditLinks = Array.isArray(a?.protocol?.auditLinks) ? a.protocol.auditLinks : [];
   const totalRaisedUsd = typeof a?.protocol?.totalRaisedUsd === "number" ? a.protocol.totalRaisedUsd : null;
 
   const liquidityScore = heuristicLiquidityScore(tvl);
   const raisedScore = heuristicRaisedScore(totalRaisedUsd);
   const longevityScore = heuristicLongevityScore(listedAt);
-  const auditCount = Number.isFinite(audits) ? audits : auditLinks.length ? auditLinks.length : null;
+  const auditCount =
+    Number.isFinite(audits) ? audits : auditFirms.length ? auditFirms.length : (auditLinks.length ? auditLinks.length : null);
   const auditScore = heuristicAuditScore(auditCount);
 
   const scores = [liquidityScore, raisedScore, longevityScore, auditScore].filter(
@@ -73,7 +75,8 @@ export function buildHeuristicRiskAssessment({ protocolName, url, analysis }) {
       typeof tvl === "number" ? `Liquidity/TVL observed: ${tvl}` : "Liquidity/TVL not available.",
       typeof totalRaisedUsd === "number" ? `Total raised: ${totalRaisedUsd}` : "Total raised unknown.",
       typeof listedAt === "number" ? `DefiLlama listedAt: ${listedAt}` : "DefiLlama listedAt unknown.",
-      auditCount != null ? `DefiLlama audits detected: ${auditCount}` : "DefiLlama audit info unknown.",
+      auditFirms.length ? `Auditors (docs): ${auditFirms.join(", ")}` : "",
+      auditCount != null ? `Audits detected: ${auditCount}` : "Audit info unknown.",
     ],
   };
 }

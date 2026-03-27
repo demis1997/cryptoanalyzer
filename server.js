@@ -12,23 +12,42 @@ import {
   getDefiLlamaProtocolInformation as getDefiLlamaProtocolInformationFromModule,
   getDefiLlamaTokenLiquidityFromYields as getDefiLlamaTokenLiquidityFromYieldsFromModule,
 } from "./backend/services/defillama.js";
+import { getPendleMarketSnapshot as getPendleMarketSnapshotFromModule } from "./backend/services/pendle.js";
 import { buildHeuristicRiskAssessment as buildHeuristicRiskAssessmentFromModule } from "./backend/llm/riskHeuristics.js";
+import {
+  computeProtocolCacheHash,
+  protocolCacheGetLatest,
+  protocolCacheInit,
+  protocolCacheUpsert,
+  protocolKeyFrom,
+  stripWalletSpecificFields,
+} from "./backend/db/protocolCache.js";
+import { discoverContractConnections } from "./backend/services/contractConnections.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Local/dev fallback cache for report generation.
+// Vercel should rely on Postgres; local runs often don't have it configured.
+const inMemoryProtocolSnapshotCache = new Map(); // protocolKey -> { analysis, updatedAtMs }
 
 const app = express();
 export { app };
 export default app;
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
+// Some endpoints (e.g. report generation) may accept large JSON payloads locally.
+// Vercel callers should prefer sending {url/protocolKey} and using Postgres-backed cache.
+app.use(express.json({ limit: "25mb" }));
 
 // On Vercel, static assets are typically picked from `public/`.
 // Serve `public/` first, then fall back to repo root for local/dev.
 const publicDir = path.join(__dirname, "public");
 app.use(express.static(publicDir));
 app.use(express.static(__dirname));
+
+const PROTOCOL_CACHE_TTL_MS = Number(process.env.PROTOCOL_CACHE_TTL_MS || 6 * 60 * 60 * 1000);
+const ENABLE_PROTOCOL_DB_CACHE = String(process.env.ENABLE_PROTOCOL_DB_CACHE || "1") === "1";
 
 app.get("/api/health", (req, res) => {
   res.json({
@@ -93,10 +112,57 @@ app.post("/api/llm-analyze", async (req, res) => {
   const origin = normalizeUrl(url);
 
   try {
+    const hasPostgres = Boolean(process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL);
+    if (ENABLE_PROTOCOL_DB_CACHE && hasPostgres) {
+      // best-effort init (safe on repeated calls / cold starts)
+      await protocolCacheInit().catch(() => {});
+    }
+
     const defillama = await getDefiLlamaProtocolByUrlFromModule(origin).catch((err) => {
       console.warn("DefiLlama protocol match error:", err.message);
       return null;
     });
+
+    // Cache-first (protocol-level). Wallet allocations are never cached.
+    let { protocolKey, slug, originHost } = protocolKeyFrom({ defillama, origin });
+    if (!protocolKey) {
+      try {
+        const u = new URL(origin);
+        protocolKey = `origin:${u.host.toLowerCase()}`;
+        originHost = originHost || u.host.toLowerCase();
+      } catch {
+        protocolKey = `origin:${String(originHost || origin).toLowerCase()}`;
+      }
+    }
+    let cached = null;
+    let cacheMeta = null;
+    // Always surface a protocolKey so clients can request reports without resending full analysis.
+    cacheMeta = { protocolKey, hit: false, updatedAt: null, ageMs: null, stale: true };
+
+    if (ENABLE_PROTOCOL_DB_CACHE && hasPostgres) {
+      cached = await protocolCacheGetLatest({ protocolKey }).catch(() => null);
+      if (cached?.analysis_json) {
+        const updatedAtMs = cached.updated_at ? new Date(cached.updated_at).getTime() : 0;
+        const ageMs = updatedAtMs ? Date.now() - updatedAtMs : null;
+        const stale = typeof ageMs === "number" ? ageMs > PROTOCOL_CACHE_TTL_MS : true;
+        cacheMeta = { protocolKey, hit: true, updatedAt: cached.updated_at || null, ageMs, stale };
+
+        // If cache is fresh and no wallet is requested, return cached immediately (fast path)
+        // except when cached core data is clearly incomplete (empty token/contracts),
+        // in which case we refresh to heal stale/partial snapshots.
+        const cachedAnalysis = cached.analysis_json || {};
+        const cachedTokens = Array.isArray(cachedAnalysis?.tokenLiquidity) ? cachedAnalysis.tokenLiquidity : [];
+        const cachedContracts = Array.isArray(cachedAnalysis?.contracts) ? cachedAnalysis.contracts : [];
+        const cacheIncomplete = cachedTokens.length === 0 || cachedContracts.length === 0;
+        if (!stale && !cacheIncomplete && !(walletAddress && String(walletAddress).trim())) {
+          const out = { ...(cached.analysis_json || {}) };
+          out.cache = cacheMeta;
+          return res.json(out);
+        }
+      } else {
+        cacheMeta = { protocolKey, hit: false, updatedAt: null, ageMs: null, stale: true };
+      }
+    }
 
     const defiLlamaSlug =
       defillama?.slug ||
@@ -128,16 +194,45 @@ app.post("/api/llm-analyze", async (req, res) => {
       ? page.extracted.tokenLiquidity
       : extractTokenLiquidityFromHtml(html));
 
-    // Fallback: if the submitted page doesn't expose token liquidity,
+    // Fallback: if the submitted page doesn't expose token liquidity (or exposes too little),
     // pull a best-effort token+TVL list from DefiLlama yields.
     let tokenLiquidityFinal = tokenLiquidity;
+    const isPendleLike = /pendle/i.test(String(defillama?.name || "")) || /pendle\.finance/i.test(origin);
+    let pendleSnapshot = null;
+    if (isPendleLike) {
+      pendleSnapshot = await getPendleMarketSnapshotFromModule({ origin }).catch((err) => {
+        console.warn("Pendle markets snapshot error:", err?.message ? String(err.message) : String(err));
+        return null;
+      });
+      if (Array.isArray(pendleSnapshot?.tokenLiquidity) && pendleSnapshot.tokenLiquidity.length) {
+        tokenLiquidityFinal = pendleSnapshot.tokenLiquidity;
+      }
+    }
+
     if (
       Array.isArray(tokenLiquidity) &&
-      tokenLiquidity.length === 0 &&
+      tokenLiquidity.length <= 4 &&
       defiLlamaSlug
     ) {
       const fromYields = await getDefiLlamaTokenLiquidityFromYieldsFromModule(defiLlamaSlug).catch(() => null);
-      if (Array.isArray(fromYields) && fromYields.length) tokenLiquidityFinal = fromYields;
+      if (Array.isArray(fromYields) && fromYields.length) {
+        // Merge, prefer richer yield-derived list but keep any on-page rows too.
+        const seen = new Set();
+        const merged = [];
+        const add = (row) => {
+          if (!row) return;
+          const key = String(row?.token || row?.asset || "").toLowerCase();
+          const addr = String(row?.tokenAddress || row?.contractAddress || row?.address || "").toLowerCase();
+          const k = addr && addr.startsWith("0x") ? addr : key;
+          if (!k) return;
+          if (seen.has(k)) return;
+          seen.add(k);
+          merged.push(row);
+        };
+        fromYields.forEach(add);
+        tokenLiquidity.forEach(add);
+        tokenLiquidityFinal = merged;
+      }
     }
 
     // Investors are not extracted; we show DefiLlama "Total raised" instead.
@@ -149,7 +244,9 @@ app.post("/api/llm-analyze", async (req, res) => {
 
     // Website LLM analysis can be slow (and can block the request) on some hosts.
     // Default to heuristic/non-LLM behavior unless explicitly enabled.
-    const enableWebsiteLlm = String(process.env.ENABLE_WEBSITE_LLM || "").toLowerCase() === "1";
+    // Default ON: user prefers AI-assisted doc/architecture extraction.
+    // Set ENABLE_WEBSITE_LLM=0 to disable.
+    const enableWebsiteLlm = String(process.env.ENABLE_WEBSITE_LLM || "1").toLowerCase() === "1";
     const analysis = enableWebsiteLlm
       ? await runWebsiteAnalysisWithGpt4All(origin, snippet).catch((err) => {
           console.warn("LLM website analysis failed, falling back to non-LLM data:", err.message);
@@ -521,6 +618,26 @@ app.post("/api/llm-analyze", async (req, res) => {
       }
     }
 
+    // Pendle structured contracts (router/market/PT/YT/SY/underlying) from official API.
+    if (Array.isArray(pendleSnapshot?.contracts) && pendleSnapshot.contracts.length) {
+      if (!Array.isArray(enriched.contracts)) enriched.contracts = [];
+      const byAddr = new Map(
+        (enriched.contracts || []).map((c) => [String(c.address || "").toLowerCase(), c])
+      );
+      for (const c of pendleSnapshot.contracts) {
+        const key = String(c.address || "").toLowerCase();
+        if (!/^0x[a-f0-9]{40}$/.test(key)) continue;
+        if (byAddr.has(key)) continue;
+        enriched.contracts.push({
+          label: c.label || "Contract",
+          network: c.network || "Unknown",
+          address: c.address,
+          evidence: c.evidence || "Source: Pendle markets API",
+        });
+        byAddr.set(key, c);
+      }
+    }
+
     // Additional labeling: if rendered DOM provides context around an address, infer a role label.
     if (Array.isArray(page.extracted?.addressContexts) && page.extracted.addressContexts.length) {
       const byAddr = new Map(
@@ -540,6 +657,60 @@ app.post("/api/llm-analyze", async (req, res) => {
       }
     }
 
+    // AI-powered architecture inference (router/amm/vault/token graph).
+    // This uses only extracted facts + visible text; no web browsing.
+    try {
+      const visibleText = htmlToVisibleText(html);
+      const arch = await inferArchitectureWithGpt4All({
+        protocolName: enriched?.protocol?.name || defillama?.name || null,
+        origin,
+        tokens: enriched.tokenLiquidity || [],
+        contracts: enriched.contracts || [],
+        urlAnalysis: enriched.urlAnalysis || {},
+        visibleText,
+      });
+      if (arch) {
+        enriched.protocol.architecture = arch;
+      }
+    } catch (err) {
+      console.warn("Architecture inference failed:", err?.message ? String(err.message) : String(err));
+    }
+
+    // Final contract enrichment: ensure router/token/vault contracts are surfaced
+    // even when DOM render extraction is unavailable.
+    enrichContractsFromKnownSources({ enriched, origin });
+
+    // Connected contracts graph (Ethereum-only): vault/market -> underlying token (RPC) -> ecosystem routers (curated).
+    try {
+      const connections = await discoverContractConnections({
+        origin,
+        contracts: enriched.contracts || [],
+        tokenLiquidity: enriched.tokenLiquidity || [],
+      });
+      if (connections && typeof connections === "object") {
+        enriched.connections = connections;
+
+        // Merge discovered nodes into contracts list for UI visibility.
+        if (Array.isArray(connections.nodes) && connections.nodes.length) {
+          const byAddr = new Map((enriched.contracts || []).map((c) => [String(c.address || "").toLowerCase(), c]));
+          for (const n of connections.nodes) {
+            const key = String(n.address || "").toLowerCase();
+            if (!/^0x[a-f0-9]{40}$/.test(key)) continue;
+            if (byAddr.has(key)) continue;
+            enriched.contracts.push({
+              label: n.label || "Connected contract",
+              network: n.network || "Ethereum",
+              address: n.address,
+              evidence: Array.isArray(n.evidence) && n.evidence.length ? n.evidence.join(" | ") : "Source: connections graph",
+            });
+            byAddr.set(key, n);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("Connection discovery failed:", err?.message ? String(err.message) : String(err));
+    }
+
     // Surface where the HTML came from for debugging/evidence.
     enriched.page = {
       fetched: true,
@@ -555,6 +726,50 @@ app.post("/api/llm-analyze", async (req, res) => {
       enriched.page.notes.push(
         `Extracted tokenLiquidity=${Array.isArray(enriched.tokenLiquidity) ? enriched.tokenLiquidity.length : 0}, contracts=${Array.isArray(enriched.contracts) ? enriched.contracts.length : 0}`
       );
+    }
+
+    if (cacheMeta) enriched.cache = cacheMeta;
+
+    // Update in-memory snapshot cache (best-effort). Strip wallet-specific fields for safety.
+    try {
+      if (protocolKey) {
+        const toStore = stripWalletSpecificFields(enriched);
+        const updatedAtMs = Date.now();
+        inMemoryProtocolSnapshotCache.set(protocolKey, { analysis: toStore, updatedAtMs });
+        // Also key by origin host and origin URL for easy lookup without DefiLlama.
+        try {
+          const u = new URL(origin);
+          inMemoryProtocolSnapshotCache.set(`origin:${u.host.toLowerCase()}`, { analysis: toStore, updatedAtMs });
+          inMemoryProtocolSnapshotCache.set(`url:${origin}`, { analysis: toStore, updatedAtMs });
+        } catch {
+          // ignore
+        }
+        // Simple bounded size to avoid unbounded growth in dev.
+        if (inMemoryProtocolSnapshotCache.size > 30) {
+          const firstKey = inMemoryProtocolSnapshotCache.keys().next().value;
+          if (firstKey) inMemoryProtocolSnapshotCache.delete(firstKey);
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // Persist protocol snapshot (wallet stripped)
+    if (ENABLE_PROTOCOL_DB_CACHE && hasPostgres) {
+      const toStore = stripWalletSpecificFields(enriched);
+      const hash = computeProtocolCacheHash(toStore);
+      const cachedHash = cached?.analysis_hash || null;
+      if (!cachedHash || cachedHash !== hash) {
+        await protocolCacheUpsert({
+          protocolKey,
+          slug,
+          originHost,
+          protocolName: toStore?.protocol?.name || null,
+          protocolUrl: toStore?.protocol?.url || origin,
+          analysisJson: toStore,
+          analysisHash: hash,
+        }).catch(() => {});
+      }
     }
 
     res.json(enriched);
@@ -854,9 +1069,78 @@ app.get("/api/risk-schema", (req, res) => {
 });
 
 app.post("/api/report/pdf", async (req, res) => {
-  const { analysis, riskAssessment, generatedAt } = req.body || {};
+  const { analysis: analysisIn, riskAssessment, generatedAt, protocolKey, url } = req.body || {};
+
+  const hasPostgres = Boolean(process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL);
+  let analysis = analysisIn;
+
+  // Prefer loading from DB to avoid huge request payloads.
+  if ((!analysis || typeof analysis !== "object") && hasPostgres && (protocolKey || url)) {
+    await protocolCacheInit().catch(() => {});
+    let key = protocolKey || null;
+    if (!key && url) {
+      const defillama = await getDefiLlamaProtocolByUrlFromModule(normalizeUrl(url)).catch(() => null);
+      key = protocolKeyFrom({ defillama, origin: normalizeUrl(url) })?.protocolKey || null;
+      if (!key) {
+        try {
+          const u = new URL(normalizeUrl(url));
+          key = `origin:${u.host.toLowerCase()}`;
+        } catch {
+          key = null;
+        }
+      }
+    }
+    if (key) {
+      const cached = await protocolCacheGetLatest({ protocolKey: key }).catch(() => null);
+      if (cached?.analysis_json) analysis = cached.analysis_json;
+    }
+  }
+
+  // Local/dev fallback: use in-memory snapshot cache.
+  if ((!analysis || typeof analysis !== "object") && (protocolKey || url)) {
+    let key = protocolKey || null;
+    if (!key && url) {
+      try {
+        const defillama = await getDefiLlamaProtocolByUrlFromModule(normalizeUrl(url)).catch(() => null);
+        key = protocolKeyFrom({ defillama, origin: normalizeUrl(url) })?.protocolKey || null;
+        if (!key) {
+          try {
+            const u = new URL(normalizeUrl(url));
+            key = `origin:${u.host.toLowerCase()}`;
+          } catch {
+            key = null;
+          }
+        }
+      } catch {
+        key = null;
+      }
+    }
+    if (key) {
+      const cachedMem = inMemoryProtocolSnapshotCache.get(key);
+      if (cachedMem?.analysis) analysis = cachedMem.analysis;
+    }
+    if ((!analysis || typeof analysis !== "object") && url) {
+      try {
+        const origin = normalizeUrl(url);
+        const u = new URL(origin);
+        const candidates = [`origin:${u.host.toLowerCase()}`, `url:${origin}`];
+        for (const c of candidates) {
+          const cachedMem = inMemoryProtocolSnapshotCache.get(c);
+          if (cachedMem?.analysis) {
+            analysis = cachedMem.analysis;
+            break;
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   if (!analysis || typeof analysis !== "object") {
-    return res.status(400).json({ error: "Missing 'analysis' in request body." });
+    return res.status(400).json({
+      error: "Missing analysis. Run Analyze first (to populate cache), then download PDF again.",
+    });
   }
 
   const protocolName = analysis?.protocol?.name || "Protocol";
@@ -864,7 +1148,11 @@ app.post("/api/report/pdf", async (req, res) => {
 
   let browser;
   try {
-    browser = await chromium.launch({ headless: true });
+    const isVercel = String(process.env.VERCEL || "") !== "";
+    browser = await chromium.launch({
+      headless: true,
+      args: isVercel ? ["--no-sandbox", "--disable-setuid-sandbox"] : [],
+    });
     const context = await browser.newContext({ viewport: { width: 1240, height: 1754 } });
     const page = await context.newPage();
     await page.setContent(html, { waitUntil: "load" });
@@ -888,7 +1176,7 @@ app.post("/api/report/pdf", async (req, res) => {
 });
 
 app.post("/api/risk-assessment", async (req, res) => {
-  const { protocolName, url, analysis } = req.body || {};
+  const { protocolName, url, analysis: analysisIn, protocolKey } = req.body || {};
 
   if (!url && !protocolName) {
     return res
@@ -897,6 +1185,56 @@ app.post("/api/risk-assessment", async (req, res) => {
   }
 
   try {
+    const hasPostgres = Boolean(process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL);
+    let analysis = analysisIn;
+
+    // If client doesn't send analysis (preferred), load latest cached snapshot.
+    if ((!analysis || typeof analysis !== "object") && (protocolKey || url)) {
+      let key = protocolKey || null;
+      if (!key && url) {
+        const origin = normalizeUrl(url);
+        const defillama = await getDefiLlamaProtocolByUrlFromModule(origin).catch(() => null);
+        key = protocolKeyFrom({ defillama, origin })?.protocolKey || null;
+        if (!key) {
+          try {
+            const u = new URL(origin);
+            key = `origin:${u.host.toLowerCase()}`;
+          } catch {
+            key = null;
+          }
+        }
+      }
+
+      // DB cache (Vercel)
+      if (!analysis && hasPostgres && key) {
+        await protocolCacheInit().catch(() => {});
+        const cached = await protocolCacheGetLatest({ protocolKey: key }).catch(() => null);
+        if (cached?.analysis_json) analysis = cached.analysis_json;
+      }
+
+      // Local/dev in-memory cache
+      if (!analysis && key) {
+        const cachedMem = inMemoryProtocolSnapshotCache.get(key);
+        if (cachedMem?.analysis) analysis = cachedMem.analysis;
+      }
+      if (!analysis && url) {
+        try {
+          const origin = normalizeUrl(url);
+          const u = new URL(origin);
+          const candidates = [`origin:${u.host.toLowerCase()}`, `url:${origin}`];
+          for (const c of candidates) {
+            const cachedMem = inMemoryProtocolSnapshotCache.get(c);
+            if (cachedMem?.analysis) {
+              analysis = cachedMem.analysis;
+              break;
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+
     // Default: avoid crashing local models with oversized prompts.
     // Enable full LLM rubric scoring explicitly by setting ENABLE_LLM_RISK=1.
     const enableLlmRisk = String(process.env.ENABLE_LLM_RISK || "") === "1";
@@ -968,44 +1306,18 @@ function isLikelyAddress(v) {
 }
 
 function buildArchitectureDiagramSvg({ protocolLabel, protocolAddress, tokenNodes, vaultNodes }) {
-  // Vertical layout:
-  // [Token contracts...]
-  //          ↓
-  //   [Protocol/Router]
-  //          ↓
-  //   [Vaults/Pools...]
+  // Spider-web layout with router/protocol in the middle.
   const tokens = Array.isArray(tokenNodes) ? tokenNodes : [];
   const vaults = Array.isArray(vaultNodes) ? vaultNodes : [];
 
   const width = 980;
-  const paddingX = 18;
-  const paddingY = 18;
-  const centerX = Math.round(width / 2);
-
-  const nodeW = 720;
-  const nodeH = 34;
-  const gap = 10;
-
-  const tokenCount = Math.max(1, tokens.length);
-  const vaultCount = Math.max(1, vaults.length);
-
-  const topLabelH = 18;
-  const tokensBlockH = topLabelH + tokenCount * (nodeH + gap);
-  const routerBlockH = 76;
-  const vaultsLabelH = 18;
-  const vaultsBlockH = vaultsLabelH + vaultCount * (nodeH + gap);
-
-  const height =
-    paddingY +
-    tokensBlockH +
-    16 +
-    routerBlockH +
-    16 +
-    vaultsBlockH +
-    paddingY +
-    14;
-
-  const nodeX = centerX - Math.round(nodeW / 2);
+  const height = 760;
+  const padding = 18;
+  const cx = Math.round(width / 2);
+  const cy = Math.round(height / 2);
+  const nodeW = 210;
+  const nodeH = 44;
+  const outerR = 300;
 
   const rect = (x, y, w, h, fill, stroke) =>
     `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" ry="10" fill="${fill}" stroke="${stroke}" />`;
@@ -1013,75 +1325,65 @@ function buildArchitectureDiagramSvg({ protocolLabel, protocolAddress, tokenNode
     `<text x="${x}" y="${y}" font-size="${size}" fill="${color}" font-family="-apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif" text-anchor="${anchor}">${escapeHtml(text)}</text>`;
   const mono = (x, y, text, size = 9, color = "#475569", anchor = "start") =>
     `<text x="${x}" y="${y}" font-size="${size}" fill="${color}" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" text-anchor="${anchor}">${escapeHtml(text)}</text>`;
-  const line = (x1, y1, x2, y2) =>
-    `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#94a3b8" stroke-width="1.2" />`;
-  const arrow = (x, y) =>
-    `<path d="M ${x - 6} ${y - 4} L ${x} ${y + 4} L ${x + 6} ${y - 4}" fill="none" stroke="#94a3b8" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" />`;
+  const line = (x1, y1, x2, y2, stroke = "#94a3b8") =>
+    `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${stroke}" stroke-width="1.2" />`;
 
   const bg = `<rect x="0" y="0" width="${width}" height="${height}" rx="12" ry="12" fill="#f8fafc" stroke="#dbe3ee" />`;
+  const ring = `<circle cx="${cx}" cy="${cy}" r="${outerR}" fill="none" stroke="#e2e8f0" stroke-dasharray="4 4" />`;
 
-  let y = paddingY + 12;
-  const tokensTitle = label(paddingX, y, "Token contracts", 11, "#334155");
-  y += topLabelH;
-
-  const tokenBlocks = tokens.length
-    ? tokens
-        .map((t, i) => {
-          const yy = y + i * (nodeH + gap);
-          const name = t?.name || "Token";
-          const addr = t?.address || "";
-          return (
-            rect(nodeX, yy, nodeW, nodeH, "#ffffff", "#dbe3ee") +
-            label(nodeX + 10, yy + 21, name, 11, "#0b1324") +
-            (addr ? mono(nodeX + 280, yy + 21, addr, 9, "#475569") : "")
-          );
-        })
-        .join("")
-    : rect(nodeX, y, nodeW, nodeH, "#ffffff", "#dbe3ee") +
-      label(nodeX + 10, y + 21, "No token contracts detected", 11, "#64748b");
-
-  const tokensBottomY = y + (tokenCount - 1) * (nodeH + gap) + nodeH;
-  const routerTopY = tokensBottomY + 16 + 16;
-  const routerW = 520;
-  const routerH = 54;
-  const routerX = centerX - Math.round(routerW / 2);
-
+  const centerW = 280;
+  const centerH = 64;
+  const centerX = cx - Math.round(centerW / 2);
+  const centerY = cy - Math.round(centerH / 2);
   const routerBlock =
-    rect(routerX, routerTopY, routerW, routerH, "#eff6ff", "#93c5fd") +
-    label(centerX, routerTopY + 22, protocolLabel || "Protocol / Router", 12, "#1d4ed8", "middle") +
-    (protocolAddress ? mono(centerX, routerTopY + 40, protocolAddress, 9, "#1d4ed8", "middle") : "");
+    rect(centerX, centerY, centerW, centerH, "#eff6ff", "#93c5fd") +
+    label(cx, centerY + 24, protocolLabel || "Protocol / Router", 12, "#1d4ed8", "middle") +
+    (protocolAddress ? mono(cx, centerY + 44, protocolAddress, 9, "#1d4ed8", "middle") : "");
 
-  // Connect token block to router.
-  const tokensToRouter =
-    line(centerX, tokensBottomY + 10, centerX, routerTopY - 10) + arrow(centerX, routerTopY - 10);
+  const nodes = [
+    ...tokens.map((n) => ({ ...n, kind: "token" })),
+    ...vaults.map((n) => ({ ...n, kind: "vault" })),
+  ];
+  const count = nodes.length;
+  const placed = count
+    ? nodes.map((n, i) => {
+        const angle = -Math.PI / 2 + (2 * Math.PI * i) / count;
+        const x = cx + Math.cos(angle) * outerR;
+        const y = cy + Math.sin(angle) * outerR;
+        return { ...n, x, y };
+      })
+    : [];
 
-  const vaultsTopLabelY = routerTopY + routerH + 16 + 12;
-  const vaultsTitle = label(paddingX, vaultsTopLabelY, "Vaults / pools / markets", 11, "#334155");
-  const vaultsStartY = vaultsTopLabelY + vaultsLabelH;
+  const spokes = placed
+    .map((n) => line(cx, cy, n.x, n.y, n.kind === "token" ? "#60a5fa" : "#a78bfa"))
+    .join("");
 
-  const vaultBlocks = vaults.length
-    ? vaults
-        .map((v, i) => {
-          const yy = vaultsStartY + i * (nodeH + gap);
-          const name = v?.name || "Vault/Pool";
-          const addr = v?.address || "";
-          return (
-            rect(nodeX, yy, nodeW, nodeH, "#ffffff", "#dbe3ee") +
-            label(nodeX + 10, yy + 21, name, 11, "#0b1324") +
-            (addr ? mono(nodeX + 280, yy + 21, addr, 9, "#475569") : "")
-          );
-        })
-        .join("")
-    : rect(nodeX, vaultsStartY, nodeW, nodeH, "#ffffff", "#dbe3ee") +
-      label(nodeX + 10, vaultsStartY + 21, "No vault/pool contracts detected", 11, "#64748b");
+  const nodeBlocks = placed
+    .map((n) => {
+      const x = Math.max(padding, Math.min(width - padding - nodeW, Math.round(n.x - nodeW / 2)));
+      const y = Math.max(padding + 24, Math.min(height - padding - nodeH - 20, Math.round(n.y - nodeH / 2)));
+      const fill = n.kind === "token" ? "#f0f9ff" : "#faf5ff";
+      const stroke = n.kind === "token" ? "#93c5fd" : "#c4b5fd";
+      const name = n?.name || (n.kind === "token" ? "Token" : "Vault/Pool");
+      const addr = n?.address || "";
+      return (
+        rect(x, y, nodeW, nodeH, fill, stroke) +
+        label(x + 8, y + 17, name.slice(0, 24), 10, "#0b1324") +
+        (addr ? mono(x + 8, y + 34, addr.slice(0, 18) + "..." + addr.slice(-6), 8, "#475569") : "")
+      );
+    })
+    .join("");
 
-  const vaultsBottomY = vaultsStartY + (vaultCount - 1) * (nodeH + gap) + nodeH;
-  const routerToVaults =
-    line(centerX, routerTopY + routerH + 10, centerX, vaultsStartY - 10) +
-    arrow(centerX, vaultsStartY - 10);
+  const legend =
+    rect(padding, padding, 250, 54, "#ffffff", "#dbe3ee") +
+    label(padding + 10, padding + 16, "Router-Centered Spider Web", 11, "#334155") +
+    line(padding + 10, padding + 28, padding + 36, padding + 28, "#60a5fa") +
+    label(padding + 40, padding + 31, "Token contract", 10, "#475569") +
+    line(padding + 132, padding + 28, padding + 158, padding + 28, "#a78bfa") +
+    label(padding + 162, padding + 31, "Vault / pool", 10, "#475569");
 
   const note = label(
-    width - paddingX,
+    width - padding,
     height - 10,
     "Best‑effort diagram from detected addresses (may be incomplete).",
     9,
@@ -1091,13 +1393,157 @@ function buildArchitectureDiagramSvg({ protocolLabel, protocolAddress, tokenNode
 
   return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
     ${bg}
-    ${tokensTitle}
-    ${tokenBlocks}
-    ${tokensToRouter}
+    ${ring}
+    ${spokes}
+    ${nodeBlocks}
     ${routerBlock}
-    ${routerToVaults}
-    ${vaultsTitle}
-    ${vaultBlocks}
+    ${legend}
+    ${note}
+  </svg>`;
+}
+
+function buildArchitectureSpiderSvg({ protocolLabel, protocolAddress, tokenNodes, vaultNodes, routerNodes, edges }) {
+  const tokens = Array.isArray(tokenNodes) ? tokenNodes : [];
+  const vaults = Array.isArray(vaultNodes) ? vaultNodes : [];
+  const routers = Array.isArray(routerNodes) ? routerNodes : [];
+  const relEdges = Array.isArray(edges) ? edges : [];
+  const width = 980;
+  const height = 760;
+  const padding = 18;
+  const cx = Math.round(width / 2);
+  const cy = Math.round(height / 2);
+  const nodeW = 210;
+  const nodeH = 44;
+  const outerR = 300;
+
+  const rect = (x, y, w, h, fill, stroke) =>
+    `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" ry="10" fill="${fill}" stroke="${stroke}" />`;
+  const label = (x, y, text, size = 11, color = "#0f172a", anchor = "start") =>
+    `<text x="${x}" y="${y}" font-size="${size}" fill="${color}" font-family="-apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif" text-anchor="${anchor}">${escapeHtml(text)}</text>`;
+  const mono = (x, y, text, size = 9, color = "#475569", anchor = "start") =>
+    `<text x="${x}" y="${y}" font-size="${size}" fill="${color}" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace" text-anchor="${anchor}">${escapeHtml(text)}</text>`;
+  const line = (x1, y1, x2, y2, stroke = "#94a3b8", dash = null, widthPx = 1.2, opacity = 1) => {
+    const dashAttr = dash ? ` stroke-dasharray="${dash}"` : "";
+    const opAttr = opacity !== 1 ? ` opacity="${opacity}"` : "";
+    return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${stroke}" stroke-width="${widthPx}"${dashAttr}${opAttr} />`;
+  };
+
+  const bg = `<rect x="0" y="0" width="${width}" height="${height}" rx="12" ry="12" fill="#f8fafc" stroke="#dbe3ee" />`;
+  const ring = `<circle cx="${cx}" cy="${cy}" r="${outerR}" fill="none" stroke="#e2e8f0" stroke-dasharray="4 4" />`;
+
+  const centerW = 280;
+  const centerH = 64;
+  const centerX = cx - Math.round(centerW / 2);
+  const centerY = cy - Math.round(centerH / 2);
+  const routerBlock =
+    rect(centerX, centerY, centerW, centerH, "#eff6ff", "#93c5fd") +
+    label(cx, centerY + 24, protocolLabel || "Protocol / Router", 12, "#1d4ed8", "middle") +
+    (protocolAddress ? mono(cx, centerY + 44, protocolAddress, 9, "#1d4ed8", "middle") : "");
+
+  const nodes = [
+    ...tokens.map((n) => ({ ...n, kind: "token" })),
+    ...vaults.map((n) => ({ ...n, kind: "vault" })),
+    ...routers.map((n) => ({ ...n, kind: "router2" })),
+  ];
+  const count = nodes.length;
+  const placed = count
+    ? nodes.map((n, i) => {
+        const angle = -Math.PI / 2 + (2 * Math.PI * i) / count;
+        const x = cx + Math.cos(angle) * outerR;
+        const y = cy + Math.sin(angle) * outerR;
+        return { ...n, x, y };
+      })
+    : [];
+
+  const spokeColor = (k) => {
+    if (k === "token") return "#60a5fa";
+    if (k === "router2") return "#34d399";
+    return "#a78bfa";
+  };
+
+  // If we have explicit relationship edges, avoid implying everything connects to the center.
+  // In that case, only draw center spokes for vault/pool/market-like nodes; tokens/eco-routers connect via relEdges.
+  const hasExplicitEdges = relEdges.length > 0;
+  const spokes = placed
+    .filter((n) => {
+      if (!hasExplicitEdges) return true;
+      return n.kind === "vault";
+    })
+    .map((n) => line(cx, cy, n.x, n.y, spokeColor(n.kind), null, 1.2, 0.9))
+    .join("");
+
+  // Additional relationship edges between outer nodes (e.g. Vault->Token, Token->Ecosystem router).
+  const posByAddr = new Map(
+    placed
+      .filter((n) => n && n.address)
+      .map((n) => [String(n.address).toLowerCase(), { x: n.x, y: n.y, kind: n.kind }])
+  );
+  const relColor = (rel) => {
+    const r = String(rel || "").toLowerCase();
+    if (r.includes("underlying")) return "#7c3aed"; // purple
+    if (r.includes("router")) return "#10b981"; // green
+    return "#94a3b8";
+  };
+  const relDash = (rel) => {
+    const r = String(rel || "").toLowerCase();
+    if (r.includes("router")) return "4 3";
+    return "3 3";
+  };
+  const relationshipLines = relEdges
+    .slice(0, 80)
+    .map((e) => {
+      const from = posByAddr.get(String(e?.from || "").toLowerCase());
+      const to = posByAddr.get(String(e?.to || "").toLowerCase());
+      if (!from || !to) return "";
+      return line(from.x, from.y, to.x, to.y, relColor(e?.relation), relDash(e?.relation), 1.6, 0.85);
+    })
+    .join("");
+
+  const nodeBlocks = placed
+    .map((n) => {
+      const x = Math.max(padding, Math.min(width - padding - nodeW, Math.round(n.x - nodeW / 2)));
+      const y = Math.max(padding + 24, Math.min(height - padding - nodeH - 20, Math.round(n.y - nodeH / 2)));
+      const fill = n.kind === "token" ? "#f0f9ff" : (n.kind === "router2" ? "#ecfdf5" : "#faf5ff");
+      const stroke = n.kind === "token" ? "#93c5fd" : (n.kind === "router2" ? "#6ee7b7" : "#c4b5fd");
+      const name =
+        n?.name ||
+        (n.kind === "token" ? "Token" : (n.kind === "router2" ? "Router" : "Vault/Pool"));
+      const addr = n?.address || "";
+      return (
+        rect(x, y, nodeW, nodeH, fill, stroke) +
+        label(x + 8, y + 17, name.slice(0, 24), 10, "#0b1324") +
+        (addr ? mono(x + 8, y + 34, addr.slice(0, 18) + "..." + addr.slice(-6), 8, "#475569") : "")
+      );
+    })
+    .join("");
+
+  const legend =
+    rect(padding, padding, 250, 54, "#ffffff", "#dbe3ee") +
+    label(padding + 10, padding + 16, "Router-Centered Spider Web", 11, "#334155") +
+    line(padding + 10, padding + 28, padding + 36, padding + 28, "#60a5fa") +
+    label(padding + 40, padding + 31, "Token contract", 10, "#475569") +
+    line(padding + 132, padding + 28, padding + 158, padding + 28, "#a78bfa") +
+    label(padding + 162, padding + 31, "Vault / pool", 10, "#475569") +
+    line(padding + 10, padding + 44, padding + 36, padding + 44, "#34d399") +
+    label(padding + 40, padding + 47, "Ecosystem router", 10, "#475569");
+
+  const note = label(
+    width - padding,
+    height - 10,
+    "Best-effort diagram from detected addresses (may be incomplete).",
+    9,
+    "#64748b",
+    "end"
+  );
+
+  return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+    ${bg}
+    ${ring}
+    ${spokes}
+    ${relationshipLines}
+    ${nodeBlocks}
+    ${routerBlock}
+    ${legend}
     ${note}
   </svg>`;
 }
@@ -1145,12 +1591,46 @@ function buildPdfReportHtml({ analysis, riskAssessment, generatedAt }) {
     (isLikelyAddress(urlAnalysis?.poolAddress) ? urlAnalysis.poolAddress : "") ||
     "";
 
-  const archTokens = tokenRows
+  const archFromAi = p?.architecture && typeof p.architecture === "object" ? p.architecture : null;
+  const aiNodes = Array.isArray(archFromAi?.nodes) ? archFromAi.nodes : [];
+  const conn = a?.connections && typeof a.connections === "object" ? a.connections : null;
+  const connNodes = Array.isArray(conn?.nodes) ? conn.nodes : [];
+
+  const aiTokens = aiNodes
+    .filter((n) => n && n.type === "token" && isLikelyAddress(n.address))
+    .map((n) => ({ name: n.label || "Token", address: n.address }));
+
+  const aiVaults = aiNodes
+    .filter((n) => n && ["vault", "pool", "market"].includes(n.type) && isLikelyAddress(n.address))
+    .map((n) => ({ name: n.label || "Vault/Pool", address: n.address }));
+
+  const aiRouter = aiNodes.find((n) => n && ["router", "amm"].includes(n.type) && isLikelyAddress(n.address));
+
+  const connTokens = connNodes
+    .filter((n) => n && n.type === "token" && isLikelyAddress(n.address))
+    .slice(0, 60)
+    .map((n) => ({ name: n.label || "Token", address: n.address }));
+
+  const connRouters = connNodes
+    .filter((n) => n && (n.type === "protocol_router" || n.type === "router") && isLikelyAddress(n.address))
+    .slice(0, 30)
+    .map((n) => ({ name: n.label || "Router", address: n.address }));
+
+  const connEdges = Array.isArray(conn?.edges) ? conn.edges : [];
+  const diagramEdges = connEdges
+    .filter((e) => e && isLikelyAddress(e.from) && isLikelyAddress(e.to))
+    .filter((e) => {
+      const r = String(e.relation || "").toLowerCase();
+      return r.includes("underlying") || r.includes("router");
+    })
+    .slice(0, 80);
+
+  const heurTokens = tokenRows
     .filter((r) => isLikelyAddress(r.tokenContract))
     .map((r) => ({ name: r.tokenName, address: r.tokenContract }));
 
   const vaultLabelHints = ["vault", "pool", "market", "lp", "staking", "gauge", "router"];
-  const archVaults = [
+  const heurVaults = [
     ...(isLikelyAddress(urlAnalysis?.poolAddress)
       ? [{ name: urlAnalysis?.pageType ? String(urlAnalysis.pageType) : "Vault/Pool", address: urlAnalysis.poolAddress }]
       : []),
@@ -1160,9 +1640,12 @@ function buildPdfReportHtml({ analysis, riskAssessment, generatedAt }) {
         const lbl = String(c?.label || "").toLowerCase();
         return vaultLabelHints.some((h) => lbl.includes(h));
       })
-      .slice(0, 6)
+      .slice(0, 40)
       .map((c) => ({ name: c.label || "Vault/Pool", address: c.address })),
-  ].slice(0, 6);
+  ];
+
+  const archTokens = connTokens.length ? connTokens : (aiTokens.length ? aiTokens : heurTokens);
+  const archVaults = aiVaults.length ? aiVaults : heurVaults;
 
   const maxTokensPerDiagram = 18;
   const tokenChunks =
@@ -1170,11 +1653,13 @@ function buildPdfReportHtml({ analysis, riskAssessment, generatedAt }) {
   const archSvgs = tokenChunks
     .map((chunk, idx) => {
       const title = tokenChunks.length > 1 ? `${p?.name || "Protocol"} (tokens ${idx * maxTokensPerDiagram + 1}–${Math.min((idx + 1) * maxTokensPerDiagram, archTokens.length)})` : (p?.name || "Protocol");
-      return buildArchitectureDiagramSvg({
+      return buildArchitectureSpiderSvg({
         protocolLabel: `${title} / Router`,
-        protocolAddress: protocolAddress || "",
+        protocolAddress: (aiRouter?.address || protocolAddress || ""),
         tokenNodes: chunk,
-        vaultNodes: archVaults,
+        vaultNodes: archVaults.slice(0, 12),
+        routerNodes: connRouters.slice(0, 10),
+        edges: diagramEdges,
       });
     })
     .join("");
@@ -1450,6 +1935,16 @@ function buildRubricSectionLite(section) {
 function estimateTokens(prompt) {
   // Very rough: 1 token ~= 4 chars in English-ish text.
   return Math.ceil(String(prompt || "").length / 4);
+}
+
+function clampPrompt(prompt, { maxTokens = 1500, maxChars = 6000 } = {}) {
+  const p = String(prompt || "");
+  // Keep both char and token budgets conservative to avoid GPT4All crashes.
+  const hard = p.slice(0, Math.max(0, maxChars));
+  if (estimateTokens(hard) <= maxTokens) return hard;
+  // If still too large, shrink further.
+  const targetChars = Math.max(800, Math.floor(maxTokens * 4));
+  return hard.slice(0, targetChars);
 }
 
 function chunkArray(arr, size) {
@@ -1797,7 +2292,7 @@ async function verifyAuditsFromProtocolDocs({ origin, protocolName }) {
   }
 
   // Optional AI normalization (docs-first).
-  const enableWebsiteLlm = String(process.env.ENABLE_WEBSITE_LLM || "").toLowerCase() === "1";
+  const enableWebsiteLlm = String(process.env.ENABLE_WEBSITE_LLM || "1").toLowerCase() === "1";
   if (enableWebsiteLlm && allSnippets.length) {
     const prompt = `
 Extract security audit firms from protocol docs text.
@@ -1810,7 +2305,7 @@ URL: ${base}
 Snippets:
 ${allSnippets.map((s, i) => `${i + 1}. ${s}`).join("\n")}
 `.trim();
-    const parsed = await runWebsiteAnalysisWithGpt4All(base, prompt.slice(0, 1800)).catch(() => null);
+    const parsed = await runJsonPromptWithGpt4All(prompt).catch(() => null);
     const auditors = Array.isArray(parsed?.auditors) ? parsed.auditors : [];
     auditors
       .map((x) => String(x?.name || "").trim())
@@ -2062,7 +2557,7 @@ async function fetchHtmlWithOptionalRender(url) {
 
   const html = await resp.text();
   const force = String(process.env.FORCE_RENDER || "").toLowerCase() === "1";
-  const should = force || shouldRenderHtml(html);
+  const should = force || shouldRenderHtml({ html, url });
   if (!should) {
     return { ok: true, status: resp.status, html, rendered: false };
   }
@@ -2073,7 +2568,19 @@ async function fetchHtmlWithOptionalRender(url) {
   }
 
   let renderError = null;
-  const renderTimeoutMs = Number(process.env.PLAYWRIGHT_RENDER_TIMEOUT_MS || 45_000);
+  // Some SPAs (e.g. app subdomains) can hang or take very long to fully render.
+  // Use a shorter default timeout for those so we fall back quickly.
+  let defaultRenderTimeoutMs = 45_000;
+  try {
+    const u = new URL(String(url || ""));
+    const host = u.hostname.toLowerCase();
+    if (host.startsWith("app.") || host.includes("pendle.finance")) {
+      defaultRenderTimeoutMs = 12_000;
+    }
+  } catch {
+    // ignore
+  }
+  const renderTimeoutMs = Number(process.env.PLAYWRIGHT_RENDER_TIMEOUT_MS || defaultRenderTimeoutMs);
   const rendered = await Promise.race([
     renderHtmlWithPlaywright(url),
     new Promise((_, reject) =>
@@ -2105,9 +2612,30 @@ async function fetchHtmlWithOptionalRender(url) {
   };
 }
 
-function shouldRenderHtml(html) {
+function shouldRenderHtml({ html, url }) {
   if (!html) return true;
-  const lower = html.toLowerCase();
+  const lower = String(html).toLowerCase();
+
+  // URL-based hints: many protocol pages are JS-heavy SPAs where important tables
+  // (tokens/contracts/markets) appear only after rendering.
+  try {
+    const u = new URL(String(url || ""));
+    const host = u.hostname.toLowerCase();
+    const path = u.pathname.toLowerCase();
+    const isAppSubdomain = host.startsWith("app.") || host.startsWith("trade.") || host.startsWith("vault.") || host.startsWith("markets.");
+    const isKnownAppPath =
+      path.includes("market") ||
+      path.includes("markets") ||
+      path.includes("vault") ||
+      path.includes("pools") ||
+      path.includes("pool") ||
+      path.includes("swap") ||
+      path.includes("stake") ||
+      path.includes("dashboard");
+    if (isAppSubdomain || isKnownAppPath) return true;
+  } catch {
+    // ignore
+  }
 
   // Common SPA shells / error states.
   if (lower.includes("failed to load app")) return true;
@@ -2130,6 +2658,9 @@ function shouldRenderHtml(html) {
   const scriptCount = (lower.match(/<script\b/g) || []).length;
   if (hasRoot && scriptCount >= 5) return true;
 
+  // Next.js/SPA hint: Next data + script-heavy documents.
+  if (lower.includes("__next_data__") && scriptCount >= 8) return true;
+
   return false;
 }
 
@@ -2147,6 +2678,16 @@ async function renderHtmlWithPlaywright(url) {
       viewport: { width: 1280, height: 720 },
     });
     const page = await context.newPage();
+
+    // Speed up SPAs: skip heavy resources that don't affect text extraction.
+    // This helps prevent timeouts on apps like Pendle/Morpho.
+    await page.route("**/*", (route) => {
+      const type = route.request().resourceType();
+      if (type === "image" || type === "media" || type === "font") {
+        return route.abort();
+      }
+      return route.continue();
+    });
 
     // Don’t hang forever on slow/non-responsive pages.
     const navTimeoutMs = Number(process.env.PLAYWRIGHT_NAV_TIMEOUT_MS || (isVercel ? 60_000 : 25_000));
@@ -2269,7 +2810,8 @@ async function extractFromRenderedDom(page) {
     // 1) Metric extraction: find a label like "Total Liquidity" and the nearest money value in its container.
     const metricLabels = ["total liquidity", "liquidity", "tvl", "total value locked"];
     const metricCandidates = [];
-    const all = Array.from(document.querySelectorAll("body *")).slice(0, 8000);
+    // Keep evaluation cheap; scanning huge DOMs can time out on SPAs.
+    const all = Array.from(document.querySelectorAll("body *")).slice(0, 2500);
     for (const el of all) {
       const t = textOf(el);
       if (!t || t.length > 80) continue;
@@ -2972,7 +3514,13 @@ IMPORTANT:
   limitation in the evidence/summary. Do NOT invent contract addresses or TVL from prior knowledge.
 `.trim();
 
-    const completion = await createCompletion(model, prompt);
+    const safePrompt = clampPrompt(prompt, { maxTokens: 1500, maxChars: 6500 });
+    if (estimateTokens(safePrompt) > 1700) {
+      // Safety valve: never send oversized prompts into GPT4All.
+      return null;
+    }
+
+    const completion = await createCompletion(model, safePrompt);
     const message = completion.choices?.[0]?.message;
     const text = typeof message === "string" ? message : message?.content ?? "";
 
@@ -2990,6 +3538,91 @@ IMPORTANT:
     console.error("runWebsiteAnalysisWithGpt4All error:", err);
     return null;
   }
+}
+
+async function runJsonPromptWithGpt4All(prompt) {
+  // Minimal wrapper for JSON-only tasks (audits/architecture) to avoid nesting a
+  // large prompt inside the website-analysis template.
+  try {
+    const gpt4all = await import("gpt4all");
+    const { loadModel, createCompletion } = gpt4all;
+
+    const modelName = process.env.GPT4ALL_MODEL || "orca-mini-3b-gguf2-q4_0.gguf";
+    const model = await loadModel(modelName, {
+      verbose: true,
+      device: process.env.GPT4ALL_DEVICE || "cpu",
+    });
+
+    const safePrompt = clampPrompt(prompt, { maxTokens: 1400, maxChars: 6000 });
+    if (estimateTokens(safePrompt) > 1700) return null;
+
+    const completion = await createCompletion(model, safePrompt);
+    const message = completion.choices?.[0]?.message;
+    const text = typeof message === "string" ? message : message?.content ?? "";
+
+    if (typeof model.dispose === "function") model.dispose();
+    if (!text) return null;
+    return parseLikelyJson(text);
+  } catch (err) {
+    console.error("runJsonPromptWithGpt4All error:", err);
+    return null;
+  }
+}
+
+async function inferArchitectureWithGpt4All({ protocolName, origin, tokens, contracts, urlAnalysis, visibleText }) {
+  const enable = String(process.env.ENABLE_WEBSITE_LLM || "1").toLowerCase() === "1";
+  if (!enable) return null;
+
+  const tokenLite = (Array.isArray(tokens) ? tokens : [])
+    .slice(0, 200)
+    .map((t) => ({
+      name: t?.token || t?.asset || t?.symbol || null,
+      address: t?.contractAddress || t?.tokenAddress || t?.address || null,
+      liquidityUsd: typeof t?.liquidityUsd === "number" ? t.liquidityUsd : null,
+      liquidityLabel: t?.liquidityLabel || null,
+    }));
+
+  const contractLite = (Array.isArray(contracts) ? contracts : [])
+    .slice(0, 200)
+    .map((c) => ({
+      label: c?.label || null,
+      network: c?.network || null,
+      address: c?.address || null,
+      evidence: c?.evidence || null,
+    }));
+
+  const textSnippet = String(visibleText || "").slice(0, 1800);
+  const prompt = `
+You are mapping a DeFi protocol on-chain architecture from provided facts only.
+Do NOT browse the web. Do NOT invent addresses.
+
+Protocol: ${protocolName || "unknown"}
+Origin: ${origin}
+
+URL analysis:
+${JSON.stringify(urlAnalysis || {}, null, 2)}
+
+Detected token contracts (may be incomplete):
+${JSON.stringify(tokenLite, null, 2)}
+
+Detected protocol-related contracts (may be incomplete):
+${JSON.stringify(contractLite, null, 2)}
+
+Visible text snippet (may help label roles like router/amm/vault/market):
+${textSnippet}
+
+Return JSON only:
+{
+  "nodes": [{"id": string, "label": string, "type": "token"|"router"|"amm"|"vault"|"pool"|"market"|"contract"|"unknown", "address": string|null}],
+  "edges": [{"from": string, "to": string, "label": string}]
+}
+Use addresses only if present above. If unsure, type="unknown" and omit edges.
+`.trim();
+
+  const parsed = await runJsonPromptWithGpt4All(prompt).catch(() => null);
+  if (!parsed || typeof parsed !== "object") return null;
+  if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) return null;
+  return parsed;
 }
 
 function extractContractsFromHtml(html, opts = {}) {
@@ -3095,6 +3728,92 @@ function inferContractLabelFromText(context) {
   }
 
   return null;
+}
+
+function enrichContractsFromKnownSources({ enriched, origin }) {
+  if (!enriched || typeof enriched !== "object") return;
+  const existing = Array.isArray(enriched.contracts) ? enriched.contracts : [];
+  const byAddr = new Map();
+  for (const c of existing) {
+    const a = String(c?.address || "").toLowerCase();
+    if (/^0x[a-f0-9]{40}$/.test(a)) byAddr.set(a, c);
+  }
+  const add = ({ label, network, address, evidence }) => {
+    const a = String(address || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(a)) return;
+    if (byAddr.has(a)) return;
+    const row = {
+      label: label || "Contract",
+      network: network || inferNetworkFromUrl(origin) || "Unknown",
+      address: address,
+      evidence: evidence || undefined,
+    };
+    byAddr.set(a, row);
+    existing.push(row);
+  };
+
+  // 1) Router fallback (protocol-specific known router map, easy to expand).
+  const pname = String(enriched?.protocol?.name || "").toLowerCase();
+  if (pname.includes("pendle")) {
+    add({
+      label: "Router contract",
+      network: "Ethereum",
+      address: "0x00000000005BBB0EF59571E58418F9a4357B68A0",
+      evidence: "Known Pendle Router V3",
+    });
+  }
+
+  // 2) Token contracts from token liquidity list (DefiLlama yields / extraction).
+  const toks = Array.isArray(enriched?.tokenLiquidity) ? enriched.tokenLiquidity : [];
+  for (const t of toks) {
+    const addr = t?.tokenAddress || t?.contractAddress || t?.address || null;
+    const sym = t?.token || t?.asset || t?.symbol || "Token";
+    if (!addr) continue;
+    add({
+      label: `${sym} token contract`,
+      network: inferNetworkFromUrl(origin) || "Unknown",
+      address: addr,
+      evidence: "Derived from token liquidity data",
+    });
+  }
+
+  // 3) Pool/vault contracts from pools data.
+  const pools = Array.isArray(enriched?.pools) ? enriched.pools : [];
+  for (const p of pools) {
+    const addr = p?.poolContract || p?.address || null;
+    if (!addr) continue;
+    add({
+      label: "Pool/Vault contract",
+      network: p?.network || inferNetworkFromUrl(origin) || "Unknown",
+      address: addr,
+      evidence: Array.isArray(p?.evidence) ? p.evidence[0] : "Derived from pools data",
+    });
+  }
+
+  // 4) AI architecture nodes (router/vault/pool/market/token).
+  const archNodes = Array.isArray(enriched?.protocol?.architecture?.nodes)
+    ? enriched.protocol.architecture.nodes
+    : [];
+  for (const n of archNodes) {
+    const addr = n?.address || null;
+    if (!addr) continue;
+    const t = String(n?.type || "contract").toLowerCase();
+    const typeLabel =
+      t === "router" ? "Router contract"
+        : t === "vault" ? "Vault contract"
+        : t === "pool" ? "Pool contract"
+        : t === "market" ? "Market contract"
+        : t === "token" ? "Token contract"
+        : "Contract";
+    add({
+      label: n?.label ? `${n.label}` : typeLabel,
+      network: inferNetworkFromUrl(origin) || "Unknown",
+      address: addr,
+      evidence: "Derived from AI architecture map",
+    });
+  }
+
+  enriched.contracts = existing;
 }
 
 function mapScanHostToNetwork(host) {

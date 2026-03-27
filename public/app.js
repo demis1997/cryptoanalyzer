@@ -35,6 +35,9 @@ const protocolInformationEl = document.getElementById("protocol-information");
 const contractList = document.getElementById("contract-list");
 const contractsEmpty = document.getElementById("contracts-empty");
 
+const connectionsList = document.getElementById("connections-list");
+const connectionsEmpty = document.getElementById("connections-empty");
+
 const tvlValue = document.getElementById("tvl-value");
 const tvlChange = document.getElementById("tvl-change");
 
@@ -95,6 +98,44 @@ function renderContracts(contracts) {
   });
 }
 
+function renderConnections(connections) {
+  if (!connectionsList || !connectionsEmpty) return;
+  connectionsList.innerHTML = "";
+  const edges = Array.isArray(connections?.edges) ? connections.edges : [];
+  const nodes = Array.isArray(connections?.nodes) ? connections.nodes : [];
+  if (!edges.length || !nodes.length) {
+    connectionsEmpty.style.display = "block";
+    return;
+  }
+  connectionsEmpty.style.display = "none";
+
+  const byAddr = new Map(nodes.map((n) => [String(n.address || "").toLowerCase(), n]));
+  const fmt = (a) => (a ? `${String(a).slice(0, 10)}…${String(a).slice(-8)}` : "—");
+
+  edges.slice(0, 120).forEach((e) => {
+    const from = byAddr.get(String(e.from || "").toLowerCase());
+    const to = byAddr.get(String(e.to || "").toLowerCase());
+    const rel = e.relation || "connected";
+    const li = document.createElement("li");
+    li.innerHTML = `
+      <div>${(from?.label || "Contract")} <span style="color:#9ca3af;">→</span> ${(to?.label || "Contract")}</div>
+      <div class="tag" style="margin-top:6px;">
+        <span class="tag__label">Relation</span>
+        <span class="tag__value">${rel}</span>
+      </div>
+      <div class="tag" style="margin-top:6px;">
+        <span class="tag__label">From</span>
+        <span class="tag__value" title="${e.from || ""}">${fmt(e.from)}</span>
+      </div>
+      <div class="tag" style="margin-top:6px;">
+        <span class="tag__label">To</span>
+        <span class="tag__value" title="${e.to || ""}">${fmt(e.to)}</span>
+      </div>
+    `;
+    connectionsList.appendChild(li);
+  });
+}
+
 function renderTotalRaised(data) {
   investorList.innerHTML = "";
   const raised = data?.protocol?.totalRaisedUsd;
@@ -124,7 +165,10 @@ function renderProtocolMeta(data) {
   protocolChainsEl.textContent = Array.isArray(chains) && chains.length ? `Chains: ${chains.join(", ")}` : "";
 
   if (protocolAuditsEl) {
-    if (Number.isFinite(protocol?.audits)) {
+    const verifiedFirms = Array.isArray(protocol?.auditsVerified?.firms) ? protocol.auditsVerified.firms : [];
+    if (verifiedFirms.length) {
+      protocolAuditsEl.textContent = `Audited by: ${verifiedFirms.join(", ")}.`;
+    } else if (Number.isFinite(protocol?.audits)) {
       protocolAuditsEl.textContent = `DefiLlama audits: ${protocol.audits}`;
     } else if (Array.isArray(protocol?.auditLinks) && protocol.auditLinks.length) {
       protocolAuditsEl.textContent = `DefiLlama audits: ${protocol.auditLinks.length}`;
@@ -323,7 +367,8 @@ async function runRiskScore(url) {
   const resp = await fetch("/api/risk-assessment", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url, protocolName, analysis: lastAnalysis }),
+    // Keep payload small (analysis can be huge for large protocols).
+    body: JSON.stringify({ url, protocolName }),
   });
 
   if (!resp.ok) {
@@ -365,6 +410,7 @@ if (form && urlInput) {
         lastRubric = null;
         renderProtocolMeta(data);
         renderContracts(data.contracts || []);
+        renderConnections(data.connections || null);
         renderTotalRaised(data);
         renderMetrics(data);
         renderTokenLiquidity(data.tokenLiquidity || data.tokens || []);
@@ -443,7 +489,9 @@ reportPdfBtn?.addEventListener("click", async () => {
   try {
     await downloadPdf(`${safeFilenamePart(name)}-report.pdf`, {
       generatedAt: new Date().toISOString(),
-      analysis: lastAnalysis,
+      // Avoid huge payloads: server loads latest analysis from DB cache when available.
+      protocolKey: lastAnalysis?.cache?.protocolKey || null,
+      url: lastAnalysis?.protocol?.url || lastAnalysis?.origin || null,
       riskAssessment: lastRubric,
     });
   } catch (e) {

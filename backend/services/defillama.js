@@ -23,6 +23,17 @@ function safeHost(u) {
   try {
     return new URL(u).hostname.replace(/^www\./, "").toLowerCase();
   } catch {
+    // DefiLlama protocol entries sometimes have URLs without a scheme.
+    // Try again by assuming https:// so we can still match by host/base-domain.
+    try {
+      const s = String(u || "").trim();
+      if (!s) return "";
+      if (!/^https?:\/\//i.test(s) && s.includes(".")) {
+        return new URL(`https://${s}`).hostname.replace(/^www\./, "").toLowerCase();
+      }
+    } catch {
+      // ignore
+    }
     return "";
   }
 }
@@ -330,53 +341,74 @@ export async function getDefiLlamaTokenLiquidityFromYields(slugOrName) {
     projects.push(String(slugOrName));
   }
 
-  // Construct: https://defillama.com/yields?project=A&project=B...
-  const url = `https://defillama.com/yields?${projects
-    .map((p) => `project=${encodeURIComponent(p)}`)
-    .join("&")}`;
+  // Prefer the yields API (fast + structured) over scraping HTML.
+  // Endpoint commonly used by DefiLlama yields frontend.
+  const apiUrl = "https://yields.llama.fi/pools";
+  let pools = null;
+  try {
+    const resp = await fetch(apiUrl, { headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" } });
+    if (resp.ok) {
+      const json = await resp.json().catch(() => null);
+      const data = Array.isArray(json?.data) ? json.data : Array.isArray(json) ? json : null;
+      if (Array.isArray(data)) pools = data;
+    }
+  } catch {
+    // ignore, try HTML fallback below
+  }
 
-  const html = await fetchTextLimited(url).catch(() => null);
-  if (!html) return null;
-  const text = htmlToVisibleText(html);
-
-  // Heuristic extraction:
-  // Try to find lines that include both a token symbol and "TVL", plus a $ amount.
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-  const tokenRe = /\$?\s*([\d.,]+)\s*([kKmMbB])?/;
-  const out = new Map();
-
-  for (const line of lines) {
-    const lower = line.toLowerCase();
-    if (!lower.includes("tvl")) continue;
-    // Find a token-ish word before/near the money.
-    const tokenMatch = line.match(/\b([A-Z][A-Z0-9]{1,12})\b/);
-    if (!tokenMatch) continue;
-
-    const moneyMatch = tokenRe.exec(line);
-    if (!moneyMatch) continue;
-
-    const raw = moneyMatch[1];
-    const suffix = (moneyMatch[2] || "").toLowerCase();
-    let v = parseFloat(String(raw).replace(/,/g, ""));
-    if (!isFinite(v)) continue;
-    if (suffix === "k") v *= 1e3;
-    else if (suffix === "m") v *= 1e6;
-    else if (suffix === "b") v *= 1e9;
-
-    const token = tokenMatch[1];
-    // Keep the max TVL if a token appears multiple times.
-    const key = token.toLowerCase();
-    const current = out.get(key);
-    if (!current || v > current.liquidityUsd) {
-      out.set(key, {
-        token,
-        liquidityUsd: v,
-        evidence: [`DefiLlama yields TVL (best-effort)`, url, line.slice(0, 120)],
-      });
+  // Fallback: scrape yields page __NEXT_DATA__ (can be large).
+  let yieldsUrl = `https://defillama.com/yields?${projects.map((p) => `project=${encodeURIComponent(p)}`).join("&")}`;
+  if (!pools) {
+    try {
+      const resp = await fetch(yieldsUrl, { headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" } });
+      if (resp.ok) {
+        const html = await resp.text();
+        const m = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+        if (m && m[1]) {
+          const next = JSON.parse(m[1]);
+          const pp = next?.props?.pageProps;
+          if (Array.isArray(pp?.pools)) pools = pp.pools;
+        }
+      }
+    } catch {
+      // ignore
     }
   }
 
-  const items = Array.from(out.values()).sort((a, b) => (b.liquidityUsd || 0) - (a.liquidityUsd || 0));
-  return items.length ? items.slice(0, 25) : null;
+  if (!Array.isArray(pools) || pools.length === 0) return null;
+
+  const projectSet = new Set(projects.map((p) => String(p).toLowerCase()));
+  const matching = pools.filter((p) => {
+    const proj = String(p?.project || p?.projectName || "").toLowerCase();
+    return proj && (projectSet.has(proj) || Array.from(projectSet).some((x) => proj.includes(x)));
+  });
+  if (!matching.length) return null;
+
+  // Aggregate TVL by underlying token address when possible; fall back to symbol.
+  const byKey = new Map();
+  for (const pool of matching) {
+    const tvlUsd = typeof pool?.tvlUsd === "number" ? pool.tvlUsd : null;
+    if (!tvlUsd || !isFinite(tvlUsd) || tvlUsd <= 0) continue;
+    const symbol = String(pool?.symbol || "TOKEN");
+    const under = Array.isArray(pool?.underlyingTokens) ? pool.underlyingTokens : [];
+    const addr = under.length === 1 ? String(under[0] || "").toLowerCase() : "";
+    const key = addr && addr.startsWith("0x") ? addr : symbol.toLowerCase();
+    const cur = byKey.get(key);
+    const tokenAddress = addr && addr.startsWith("0x") ? addr : null;
+    if (!cur) {
+      byKey.set(key, {
+        token: symbol,
+        tokenAddress,
+        liquidityUsd: tvlUsd,
+        evidence: ["DefiLlama yields pools API (best-effort)", apiUrl, yieldsUrl],
+      });
+    } else {
+      cur.liquidityUsd += tvlUsd;
+      if (!cur.tokenAddress && tokenAddress) cur.tokenAddress = tokenAddress;
+    }
+  }
+
+  const items = Array.from(byKey.values()).sort((a, b) => (b.liquidityUsd || 0) - (a.liquidityUsd || 0));
+  return items.length ? items.slice(0, 50) : null;
 }
 

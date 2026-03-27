@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "chain": "ethereum",
+  "tokens": {
+    "0xae7ab96520de3a18e5e111b5eaab095312d7fe84": {
+      "symbol": "stETH",
+      "mappingId": "lido",
+      "connectedContracts": [
+        {
+          "address": "0xb9d7934878b5fb9610b3fe8a5e441e8fad7e293f",
+          "label": "Lido: WithdrawalQueue",
+          "type": "protocol_router",
+          "relation": "token_protocol_router"
+        },
+        {
+          "address": "0xf95f069f9ad107938f6ba802a3da878922c90b82",
+          "label": "Lido: StakingRouter",
+          "type": "protocol_router",
+          "relation": "token_protocol_router"
+        },
+        {
+          "address": "0x3e40d73eb977dc6a537af587d48316fee66e9c8c",
+          "label": "Lido: stETH Token (self)",
+          "type": "token",
+          "relation": "token_contract"
+        }
+      ]
+    },
+    "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0": {
+      "symbol": "wstETH",
+      "mappingId": "lido",
+      "connectedContracts": [
+        {
+          "address": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+          "label": "Lido: wstETH Token (self)",
+          "type": "token",
+          "relation": "token_contract"
+        },
+        {
+          "address": "0xae7ab96520de3a18e5e111b5eaab095312d7fe84",
+          "label": "Lido: stETH Token",
+          "type": "token",
+          "relation": "wrapped_underlying_token"
+        }
+      ]
+    }
+  }
+}
+
