@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -23,6 +24,18 @@ import {
   stripWalletSpecificFields,
 } from "./backend/db/protocolCache.js";
 import { discoverContractConnections } from "./backend/services/contractConnections.js";
+import {
+  localGraphInit,
+  getProtocolGraph,
+  upsertProtocolGraph,
+  protocolIdFrom,
+} from "./backend/db/localGraph.js";
+import { fetchDocsSnippets } from "./backend/services/docsSnippets.js";
+import {
+  extractAuditorsWithHostedLlm,
+  inferContractGraphWithHostedLlm,
+  inferArchitectureWithHostedLlm,
+} from "./backend/services/aiEnrich.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -112,6 +125,9 @@ app.post("/api/llm-analyze", async (req, res) => {
   const origin = normalizeUrl(url);
 
   try {
+    // Local graph DB init (always local file). No credentials needed.
+    await localGraphInit().catch(() => {});
+
     const hasPostgres = Boolean(process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL);
     if (ENABLE_PROTOCOL_DB_CACHE && hasPostgres) {
       // best-effort init (safe on repeated calls / cold starts)
@@ -122,6 +138,41 @@ app.post("/api/llm-analyze", async (req, res) => {
       console.warn("DefiLlama protocol match error:", err.message);
       return null;
     });
+
+    // Graph-first: if protocol graph exists and no wallet requested, return it.
+    const defillamaSlug = defillama?.slug || null;
+    const graph = await getProtocolGraph({ origin, defillamaSlug }).catch(() => null);
+    if (graph?.ok && graph?.hit && !(walletAddress && String(walletAddress).trim())) {
+      const p = graph.protocol || {};
+      const out = {
+        origin,
+        protocol: {
+          name: p.name || null,
+          url: p.url || origin,
+          auditsVerified: p.auditors?.length ? { count: p.auditors.length, firms: p.auditors.map((a) => a.name) } : null,
+        },
+        tokenLiquidity: (p.tokens || []).map((t) => ({
+          token: t.symbol || "Token",
+          tokenAddress: t.address,
+          liquidityUsd: null,
+          evidence: ["Source: graph cache"],
+        })),
+        contracts: (p.contracts || []).map((c) => ({
+          label: c.label || "Contract",
+          network: "Ethereum",
+          address: c.address,
+          evidence: "Source: graph cache",
+        })),
+      };
+      // Persist connection/architecture json if present
+      try {
+        if (p.connectionsJson) out.connections = JSON.parse(p.connectionsJson);
+      } catch {}
+      try {
+        if (p.architectureJson) out.protocol.architecture = JSON.parse(p.architectureJson);
+      } catch {}
+      return res.json(out);
+    }
 
     // Cache-first (protocol-level). Wallet allocations are never cached.
     let { protocolKey, slug, originHost } = protocolKeyFrom({ defillama, origin });
@@ -153,7 +204,9 @@ app.post("/api/llm-analyze", async (req, res) => {
         const cachedAnalysis = cached.analysis_json || {};
         const cachedTokens = Array.isArray(cachedAnalysis?.tokenLiquidity) ? cachedAnalysis.tokenLiquidity : [];
         const cachedContracts = Array.isArray(cachedAnalysis?.contracts) ? cachedAnalysis.contracts : [];
-        const cacheIncomplete = cachedTokens.length === 0 || cachedContracts.length === 0;
+        const cacheIncomplete =
+          cachedTokens.length === 0 ||
+          cachedContracts.length === 0;
         if (!stale && !cacheIncomplete && !(walletAddress && String(walletAddress).trim())) {
           const out = { ...(cached.analysis_json || {}) };
           out.cache = cacheMeta;
@@ -178,15 +231,34 @@ app.post("/api/llm-analyze", async (req, res) => {
           })()
         : null);
 
-    const page = await fetchHtmlWithOptionalRender(origin);
-    if (!page.ok) {
-      return res.status(502).json({
-        error: "Failed to fetch protocol website.",
-        status: page.status,
-      });
-    }
+    const page = await Promise.race([
+      fetchHtmlWithOptionalRender(origin),
+      new Promise((resolve) =>
+        setTimeout(
+          () =>
+            resolve({
+              ok: false,
+              status: 0,
+              html: "",
+              extracted: {},
+              rendered: false,
+              renderError: "HTML fetch timeout",
+            }),
+          8000
+        )
+      ),
+    ]).catch((err) => ({
+      ok: false,
+      status: 0,
+      html: "",
+      extracted: {},
+      rendered: false,
+      renderError: err?.message ? String(err.message) : String(err),
+    }));
 
-    const html = page.html;
+    // Some protocols (or local networks) can block/timeout HTML fetches.
+    // Continue best-effort using structured sources (DefiLlama/Pendle/etc.) instead of failing the whole analysis.
+    const html = page?.ok && page.html ? page.html : "";
 
     // Heuristic extraction directly from the full HTML (no LLM).
     const tvlFromHtml = extractTvlFromHtml(html);
@@ -691,9 +763,9 @@ app.post("/api/llm-analyze", async (req, res) => {
         enriched.connections = connections;
 
         // Merge discovered nodes into contracts list for UI visibility.
-        if (Array.isArray(connections.nodes) && connections.nodes.length) {
+        if (Array.isArray(enriched.connections?.nodes) && enriched.connections.nodes.length) {
           const byAddr = new Map((enriched.contracts || []).map((c) => [String(c.address || "").toLowerCase(), c]));
-          for (const n of connections.nodes) {
+          for (const n of enriched.connections.nodes) {
             const key = String(n.address || "").toLowerCase();
             if (!/^0x[a-f0-9]{40}$/.test(key)) continue;
             if (byAddr.has(key)) continue;
@@ -709,6 +781,91 @@ app.post("/api/llm-analyze", async (req, res) => {
       }
     } catch (err) {
       console.warn("Connection discovery failed:", err?.message ? String(err.message) : String(err));
+    }
+
+    // Hosted LLM enrichment (Cursor Composer 2): docs-first; persists to local graph (sql.js).
+    try {
+      const enableHostedEnrich = String(process.env.ENABLE_HOSTED_ENRICH || "0") === "1";
+      if (enableHostedEnrich) {
+        const docs = await fetchDocsSnippets({ origin }).catch(() => null);
+        if (docs?.ok) {
+          const auditorsRes = await extractAuditorsWithHostedLlm({
+            protocolName: enriched?.protocol?.name || defillama?.name || null,
+            origin,
+            docs,
+          }).catch(() => null);
+
+          const graphRes = await inferContractGraphWithHostedLlm({
+            protocolName: enriched?.protocol?.name || defillama?.name || null,
+            origin,
+            docs,
+            knownTokens: enriched.tokenLiquidity || [],
+            knownContracts: enriched.contracts || [],
+          }).catch(() => null);
+
+          const archRes = await inferArchitectureWithHostedLlm({
+            protocolName: enriched?.protocol?.name || defillama?.name || null,
+            origin,
+            docs,
+            knownTokens: enriched.tokenLiquidity || [],
+            knownContracts: enriched.contracts || [],
+          }).catch(() => null);
+
+          if (auditorsRes?.auditors?.length) {
+            enriched.protocol.auditsVerified = {
+              count: auditorsRes.auditors.length,
+              firms: auditorsRes.auditors.map((a) => a.name),
+              evidence: auditorsRes.evidence || [],
+            };
+          }
+
+          if (graphRes && (graphRes.nodes?.length || graphRes.edges?.length)) {
+            const existing = enriched.connections || { nodes: [], edges: [], evidence: [] };
+            enriched.connections = {
+              ...existing,
+              nodes: [...(existing.nodes || []), ...(graphRes.nodes || [])],
+              edges: [...(existing.edges || []), ...(graphRes.edges || [])],
+              evidence: Array.from(new Set([...(existing.evidence || []), ...(graphRes.evidence || [])])).slice(0, 18),
+            };
+          }
+
+          if (archRes?.architecture) {
+            enriched.protocol.architecture = archRes.architecture;
+          }
+
+          // Upsert into local graph
+          const graphProtocol = {
+            id: protocolIdFrom({ origin, defillamaSlug: defillama?.slug || null }),
+            name: enriched?.protocol?.name || defillama?.name || null,
+            url: enriched?.protocol?.url || origin,
+            defillamaSlug: defillama?.slug || null,
+          };
+          const tokensForGraph = (Array.isArray(enriched.tokenLiquidity) ? enriched.tokenLiquidity : [])
+            .slice(0, 200)
+            .map((t) => ({
+              address: t?.tokenAddress || t?.contractAddress || t?.address || null,
+              symbol: t?.token || t?.symbol || t?.asset || null,
+            }));
+          const contractsForGraph = (Array.isArray(enriched.contracts) ? enriched.contracts : [])
+            .slice(0, 800)
+            .map((c) => ({
+              address: c?.address || null,
+              label: c?.label || null,
+              type: c?.type || null,
+            }));
+          await upsertProtocolGraph({
+            protocol: graphProtocol,
+            tokens: tokensForGraph,
+            contracts: contractsForGraph,
+            auditors: auditorsRes?.auditors || [],
+            docPages: (docs?.pages || []).map((p) => ({ url: p.url, hash: docs.hash, fetchedAt: p.fetchedAt })),
+            connections: enriched.connections || null,
+            architecture: enriched.protocol.architecture || null,
+          }).catch(() => {});
+        }
+      }
+    } catch (err) {
+      console.warn("Hosted enrichment failed:", err?.message ? String(err.message) : String(err));
     }
 
     // Surface where the HTML came from for debugging/evidence.
@@ -1621,7 +1778,13 @@ function buildPdfReportHtml({ analysis, riskAssessment, generatedAt }) {
     .filter((e) => e && isLikelyAddress(e.from) && isLikelyAddress(e.to))
     .filter((e) => {
       const r = String(e.relation || "").toLowerCase();
-      return r.includes("underlying") || r.includes("router");
+      return (
+        r.includes("underlying") ||
+        r.includes("router") ||
+        r.includes("staking") ||
+        r.includes("pool") ||
+        r === "connected"
+      );
     })
     .slice(0, 80);
 
