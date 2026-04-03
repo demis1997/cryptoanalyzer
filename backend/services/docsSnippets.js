@@ -54,6 +54,7 @@ export function buildDocsCandidates(origin) {
     const registrable = parts.length >= 2 ? `${parts[parts.length - 2]}.${parts[parts.length - 1]}` : host;
     const docsOrigin = `${u.protocol}//docs.${registrable}`;
     const candidates = [
+      `${u.origin}/`,
       `${u.origin}/security`,
       `${u.origin}/audits`,
       `${u.origin}/docs`,
@@ -116,6 +117,8 @@ export async function fetchDocsSnippets({
   origin,
   maxPages = 8,
   timeoutMsPerPage = 10_000,
+  /** When doc URLs fail (SPA/403), use visible text already extracted during analyze. */
+  fallbackVisibleText = "",
 } = {}) {
   const candidates = buildDocsCandidates(origin).slice(0, maxPages);
   const pages = [];
@@ -133,6 +136,18 @@ export async function fetchDocsSnippets({
     extractKeywordLines(r.text, { max: 18 }).forEach((x) => allLines.push(x));
 
     if (allLines.length >= 24 && allAddrContexts.length >= 18) break;
+  }
+
+  const fb = String(fallbackVisibleText || "").trim();
+  if (!evidence.length && fb.length >= 120) {
+    evidence.push("Used analyze HTML snapshot (no standalone docs pages returned usable text).");
+    pages.push({
+      url: `${normalizeOrigin(origin)}#analyze-snapshot`,
+      fetchedAt: new Date().toISOString(),
+      textLen: fb.length,
+    });
+    extractAddressContexts(fb, { max: 40 }).forEach((x) => allAddrContexts.push(x));
+    extractKeywordLines(fb, { max: 40 }).forEach((x) => allLines.push(x));
   }
 
   const payload = {

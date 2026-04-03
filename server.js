@@ -27,6 +27,7 @@ import { discoverContractConnections } from "./backend/services/contractConnecti
 import {
   localGraphInit,
   getProtocolGraph,
+  getLocalGraphOverview,
   upsertProtocolGraph,
   protocolIdFrom,
 } from "./backend/db/localGraph.js";
@@ -53,12 +54,6 @@ const PORT = process.env.PORT || 3000;
 // Vercel callers should prefer sending {url/protocolKey} and using Postgres-backed cache.
 app.use(express.json({ limit: "25mb" }));
 
-// On Vercel, static assets are typically picked from `public/`.
-// Serve `public/` first, then fall back to repo root for local/dev.
-const publicDir = path.join(__dirname, "public");
-app.use(express.static(publicDir));
-app.use(express.static(__dirname));
-
 const PROTOCOL_CACHE_TTL_MS = Number(process.env.PROTOCOL_CACHE_TTL_MS || 6 * 60 * 60 * 1000);
 const ENABLE_PROTOCOL_DB_CACHE = String(process.env.ENABLE_PROTOCOL_DB_CACHE || "1") === "1";
 
@@ -69,9 +64,33 @@ app.get("/api/health", (req, res) => {
       analyze: "GET /api/analyze?url=...",
       riskSchema: "GET /api/risk-schema",
       riskAssessment: "POST /api/risk-assessment",
+      localGraph: "GET /api/local-graph?limit=20",
+      reportHtml: "POST /api/report/html",
     },
   });
 });
+
+app.get("/api/local-graph", async (req, res) => {
+  try {
+    await localGraphInit().catch(() => {});
+    const limit = Number(req.query.limit || 40);
+    const overview = await getLocalGraphOverview({ limit });
+    res.json({
+      ok: true,
+      hostedEnrich: String(process.env.ENABLE_HOSTED_ENRICH || "0") === "1",
+      llmProvider: String(process.env.LLM_PROVIDER || "cursor"),
+      ...overview,
+    });
+  } catch (err) {
+    console.error("/api/local-graph error:", err);
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+// Static assets after explicit /api/health and /api/local-graph.
+const publicDir = path.join(__dirname, "public");
+app.use(express.static(publicDir));
+app.use(express.static(__dirname));
 
 app.get("/api/analyze", async (req, res) => {
   const url = req.query.url;
@@ -115,8 +134,15 @@ app.get("/api/analyze", async (req, res) => {
   }
 });
 
+function bodyTruthyFlag(v) {
+  if (v === true || v === 1) return true;
+  if (typeof v === "string") return /^(1|true|yes|on)$/i.test(v.trim());
+  return false;
+}
+
 app.post("/api/llm-analyze", async (req, res) => {
   const { url, walletAddress } = req.body || {};
+  const forceRefresh = bodyTruthyFlag((req.body || {}).forceRefresh);
 
   if (!url || typeof url !== "string") {
     return res.status(400).json({ error: "Missing 'url' in request body." });
@@ -142,10 +168,17 @@ app.post("/api/llm-analyze", async (req, res) => {
     // Graph-first: if protocol graph exists and no wallet requested, return it.
     const defillamaSlug = defillama?.slug || null;
     const graph = await getProtocolGraph({ origin, defillamaSlug }).catch(() => null);
-    if (graph?.ok && graph?.hit && !(walletAddress && String(walletAddress).trim())) {
+    if (!forceRefresh && graph?.ok && graph?.hit && !(walletAddress && String(walletAddress).trim())) {
       const p = graph.protocol || {};
       const out = {
         origin,
+        cache: { protocolKey: graph.id, hit: true, source: "local_graph" },
+        llmEnrich: {
+          enabled: false,
+          source: "local_graph",
+          note:
+            "Served from SQLite graph cache (fast path). Enable “Full refresh” in the UI or POST forceRefresh: true to re-crawl the site and run hosted LLM.",
+        },
         protocol: {
           name: p.name || null,
           url: p.url || origin,
@@ -207,7 +240,7 @@ app.post("/api/llm-analyze", async (req, res) => {
         const cacheIncomplete =
           cachedTokens.length === 0 ||
           cachedContracts.length === 0;
-        if (!stale && !cacheIncomplete && !(walletAddress && String(walletAddress).trim())) {
+        if (!forceRefresh && !stale && !cacheIncomplete && !(walletAddress && String(walletAddress).trim())) {
           const out = { ...(cached.analysis_json || {}) };
           out.cache = cacheMeta;
           return res.json(out);
@@ -783,33 +816,71 @@ app.post("/api/llm-analyze", async (req, res) => {
       console.warn("Connection discovery failed:", err?.message ? String(err.message) : String(err));
     }
 
-    // Hosted LLM enrichment (Cursor Composer 2): docs-first; persists to local graph (sql.js).
+    // Hosted LLM (Cursor Cloud Agents): docs + optional analyze-page fallback. Graph DB is always persisted below.
+    let fetchedDocs = null;
     try {
       const enableHostedEnrich = String(process.env.ENABLE_HOSTED_ENRICH || "0") === "1";
+      const analyzeVisible = html ? htmlToVisibleText(html) : "";
       if (enableHostedEnrich) {
-        const docs = await fetchDocsSnippets({ origin }).catch(() => null);
-        if (docs?.ok) {
-          const auditorsRes = await extractAuditorsWithHostedLlm({
-            protocolName: enriched?.protocol?.name || defillama?.name || null,
-            origin,
-            docs,
-          }).catch(() => null);
+        enriched.llmEnrich = {
+          enabled: true,
+          provider: process.env.LLM_PROVIDER || null,
+          docsFetched: false,
+        };
+        fetchedDocs = await fetchDocsSnippets({
+          origin,
+          fallbackVisibleText: analyzeVisible.slice(0, 25_000),
+        }).catch(() => null);
+        enriched.llmEnrich.docsFetched = Boolean(fetchedDocs?.ok);
+        if (Array.isArray(fetchedDocs?.evidence) && fetchedDocs.evidence.some((e) => String(e).includes("snapshot"))) {
+          enriched.llmEnrich.usedAnalyzeHtmlFallback = true;
+        }
+        if (!fetchedDocs?.ok) {
+          enriched.llmEnrich.hostedPipelineSkipped = "no_usable_docs_text";
+        }
+
+        if (fetchedDocs?.ok) {
+          enriched.llmEnrich.hostedPipelineRan = true;
+          const llmStepErrors = [];
+          const catchLlm = (step) => (err) => {
+            const msg = String(err?.message || err).slice(0, 800);
+            llmStepErrors.push({ step, message: msg });
+            console.warn(`Hosted LLM step "${step}" failed:`, msg);
+            return null;
+          };
+          const haveAuditorsAlready =
+            Array.isArray(enriched.protocol.auditsVerified?.firms) &&
+            enriched.protocol.auditsVerified.firms.length > 0;
+          const auditorsRes = haveAuditorsAlready
+            ? {
+                auditors: enriched.protocol.auditsVerified.firms.map((n) => ({ name: String(n) })),
+                evidence: Array.isArray(enriched.protocol.auditsVerified?.evidence)
+                  ? enriched.protocol.auditsVerified.evidence
+                  : [],
+              }
+            : await extractAuditorsWithHostedLlm({
+                protocolName: enriched?.protocol?.name || defillama?.name || null,
+                origin,
+                docs: fetchedDocs,
+              }).catch(catchLlm("auditors"));
+          enriched.llmEnrich.reusedAuditorsFromEarlyPass = haveAuditorsAlready;
 
           const graphRes = await inferContractGraphWithHostedLlm({
             protocolName: enriched?.protocol?.name || defillama?.name || null,
             origin,
-            docs,
+            docs: fetchedDocs,
             knownTokens: enriched.tokenLiquidity || [],
             knownContracts: enriched.contracts || [],
-          }).catch(() => null);
+          }).catch(catchLlm("contractGraph"));
 
           const archRes = await inferArchitectureWithHostedLlm({
             protocolName: enriched?.protocol?.name || defillama?.name || null,
             origin,
-            docs,
+            docs: fetchedDocs,
             knownTokens: enriched.tokenLiquidity || [],
             knownContracts: enriched.contracts || [],
-          }).catch(() => null);
+          }).catch(catchLlm("architecture"));
+          if (llmStepErrors.length) enriched.llmEnrich.llmStepErrors = llmStepErrors;
 
           if (auditorsRes?.auditors?.length) {
             enriched.protocol.auditsVerified = {
@@ -833,39 +904,68 @@ app.post("/api/llm-analyze", async (req, res) => {
             enriched.protocol.architecture = archRes.architecture;
           }
 
-          // Upsert into local graph
-          const graphProtocol = {
-            id: protocolIdFrom({ origin, defillamaSlug: defillama?.slug || null }),
-            name: enriched?.protocol?.name || defillama?.name || null,
-            url: enriched?.protocol?.url || origin,
-            defillamaSlug: defillama?.slug || null,
-          };
-          const tokensForGraph = (Array.isArray(enriched.tokenLiquidity) ? enriched.tokenLiquidity : [])
-            .slice(0, 200)
-            .map((t) => ({
-              address: t?.tokenAddress || t?.contractAddress || t?.address || null,
-              symbol: t?.token || t?.symbol || t?.asset || null,
-            }));
-          const contractsForGraph = (Array.isArray(enriched.contracts) ? enriched.contracts : [])
-            .slice(0, 800)
-            .map((c) => ({
-              address: c?.address || null,
-              label: c?.label || null,
-              type: c?.type || null,
-            }));
-          await upsertProtocolGraph({
-            protocol: graphProtocol,
-            tokens: tokensForGraph,
-            contracts: contractsForGraph,
-            auditors: auditorsRes?.auditors || [],
-            docPages: (docs?.pages || []).map((p) => ({ url: p.url, hash: docs.hash, fetchedAt: p.fetchedAt })),
-            connections: enriched.connections || null,
-            architecture: enriched.protocol.architecture || null,
-          }).catch(() => {});
+          enriched.llmEnrich.auditors = auditorsRes?.auditors?.length ?? 0;
+          enriched.llmEnrich.graphNodes = graphRes?.nodes?.length ?? 0;
+          enriched.llmEnrich.graphEdges = graphRes?.edges?.length ?? 0;
+          enriched.llmEnrich.architecture = Boolean(archRes?.architecture);
         }
+      } else {
+        enriched.llmEnrich = { enabled: false, provider: null, docsFetched: false };
       }
     } catch (err) {
+      enriched.llmEnrich = {
+        ...(enriched.llmEnrich || {}),
+        enabled: true,
+        error: err?.message ? String(err.message) : String(err),
+      };
       console.warn("Hosted enrichment failed:", err?.message ? String(err.message) : String(err));
+    }
+
+    try {
+      const graphProtocol = {
+        id: protocolIdFrom({ origin, defillamaSlug: defillama?.slug || null }),
+        name: enriched?.protocol?.name || defillama?.name || null,
+        url: enriched?.protocol?.url || origin,
+        defillamaSlug: defillama?.slug || null,
+      };
+      const tokensForGraph = (Array.isArray(enriched.tokenLiquidity) ? enriched.tokenLiquidity : [])
+        .slice(0, 200)
+        .map((t) => ({
+          address: t?.tokenAddress || t?.contractAddress || t?.address || null,
+          symbol: t?.token || t?.symbol || t?.asset || null,
+        }));
+      const contractsForGraph = (Array.isArray(enriched.contracts) ? enriched.contracts : [])
+        .slice(0, 800)
+        .map((c) => ({
+          address: c?.address || null,
+          label: c?.label || null,
+          type: c?.type || null,
+        }));
+      const firmList = Array.isArray(enriched.protocol?.auditsVerified?.firms) ? enriched.protocol.auditsVerified.firms : [];
+      const auditorsForGraph = firmList.map((n) => ({ name: String(n) }));
+      await upsertProtocolGraph({
+        protocol: graphProtocol,
+        tokens: tokensForGraph,
+        contracts: contractsForGraph,
+        auditors: auditorsForGraph,
+        docPages: (fetchedDocs?.ok ? fetchedDocs.pages || [] : []).map((p) => ({
+          url: p.url,
+          hash: fetchedDocs.hash,
+          fetchedAt: p.fetchedAt,
+        })),
+        connections: enriched.connections || null,
+        architecture: enriched.protocol.architecture || null,
+      });
+      enriched.localGraph = { persisted: true, protocolId: graphProtocol.id };
+      if (enriched.llmEnrich && typeof enriched.llmEnrich === "object") {
+        enriched.llmEnrich.graphPersisted = true;
+      }
+    } catch (persistErr) {
+      enriched.localGraph = { persisted: false, error: String(persistErr?.message || persistErr) };
+      if (enriched.llmEnrich && typeof enriched.llmEnrich === "object") {
+        enriched.llmEnrich.graphPersisted = false;
+      }
+      console.warn("Local graph persist failed:", persistErr?.message ? String(persistErr.message) : String(persistErr));
     }
 
     // Surface where the HTML came from for debugging/evidence.
@@ -885,7 +985,9 @@ app.post("/api/llm-analyze", async (req, res) => {
       );
     }
 
-    if (cacheMeta) enriched.cache = cacheMeta;
+    if (cacheMeta) {
+      enriched.cache = forceRefresh ? { ...cacheMeta, fullRefresh: true } : cacheMeta;
+    }
 
     // Update in-memory snapshot cache (best-effort). Strip wallet-specific fields for safety.
     try {
@@ -896,7 +998,9 @@ app.post("/api/llm-analyze", async (req, res) => {
         // Also key by origin host and origin URL for easy lookup without DefiLlama.
         try {
           const u = new URL(origin);
-          inMemoryProtocolSnapshotCache.set(`origin:${u.host.toLowerCase()}`, { analysis: toStore, updatedAtMs });
+          const h = u.host.toLowerCase();
+          inMemoryProtocolSnapshotCache.set(`origin:${h}`, { analysis: toStore, updatedAtMs });
+          inMemoryProtocolSnapshotCache.set(`host:${h}`, { analysis: toStore, updatedAtMs });
           inMemoryProtocolSnapshotCache.set(`url:${origin}`, { analysis: toStore, updatedAtMs });
         } catch {
           // ignore
@@ -1213,25 +1317,44 @@ function analyzeInputUrl(url) {
   }
 }
 
-app.get("/api/risk-schema", (req, res) => {
-  try {
-    const schemaPath = path.join(__dirname, "risk_schema.json");
-    const schemaRaw = fs.readFileSync(schemaPath, "utf8");
-    const schema = JSON.parse(schemaRaw);
-    res.json(schema);
-  } catch (err) {
-    console.error("Failed to load risk_schema.json:", err);
-    res.status(500).json({ error: "Failed to load risk schema." });
+function defaultSystemChromeCandidates() {
+  const out = [];
+  if (process.platform === "darwin") {
+    out.push(
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+      "/Applications/Chromium.app/Contents/MacOS/Chromium",
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+    );
+  } else if (process.platform === "linux") {
+    out.push(
+      "/usr/bin/google-chrome-stable",
+      "/usr/bin/google-chrome",
+      "/usr/bin/chromium-browser",
+      "/usr/bin/chromium"
+    );
+  } else if (process.platform === "win32") {
+    const pf = process.env.PROGRAMFILES || "C:\\Program Files";
+    out.push(`${pf}\\Google\\Chrome\\Application\\chrome.exe`, `${pf}\\Microsoft\\Edge\\Application\\msedge.exe`);
   }
-});
+  return out;
+}
 
-app.post("/api/report/pdf", async (req, res) => {
-  const { analysis: analysisIn, riskAssessment, generatedAt, protocolKey, url } = req.body || {};
+function firstExistingChromeExecutable() {
+  for (const p of defaultSystemChromeCandidates()) {
+    try {
+      if (p && fs.existsSync(p)) return p;
+    } catch {
+      // ignore
+    }
+  }
+  return "";
+}
 
+async function loadCachedAnalysisForReport({ analysisIn, protocolKey, url }) {
   const hasPostgres = Boolean(process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL);
   let analysis = analysisIn;
 
-  // Prefer loading from DB to avoid huge request payloads.
   if ((!analysis || typeof analysis !== "object") && hasPostgres && (protocolKey || url)) {
     await protocolCacheInit().catch(() => {});
     let key = protocolKey || null;
@@ -1253,7 +1376,6 @@ app.post("/api/report/pdf", async (req, res) => {
     }
   }
 
-  // Local/dev fallback: use in-memory snapshot cache.
   if ((!analysis || typeof analysis !== "object") && (protocolKey || url)) {
     let key = protocolKey || null;
     if (!key && url) {
@@ -1280,7 +1402,8 @@ app.post("/api/report/pdf", async (req, res) => {
       try {
         const origin = normalizeUrl(url);
         const u = new URL(origin);
-        const candidates = [`origin:${u.host.toLowerCase()}`, `url:${origin}`];
+        const h = u.host.toLowerCase();
+        const candidates = [`origin:${h}`, `host:${h}`, `url:${origin}`];
         for (const c of candidates) {
           const cachedMem = inMemoryProtocolSnapshotCache.get(c);
           if (cachedMem?.analysis) {
@@ -1294,6 +1417,66 @@ app.post("/api/report/pdf", async (req, res) => {
     }
   }
 
+  return analysis;
+}
+
+async function renderPdfBufferWithPlaywright(html) {
+  const isVercel = String(process.env.VERCEL || "") !== "";
+  const forceNoSandbox = String(process.env.PLAYWRIGHT_PDF_NO_SANDBOX || "").toLowerCase() === "1";
+  const launchArgs =
+    isVercel || forceNoSandbox
+      ? ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+      : ["--disable-dev-shm-usage"];
+
+  const candidates = [];
+  const envExe = String(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "").trim();
+  if (envExe) candidates.push(envExe);
+  const sys = firstExistingChromeExecutable();
+  if (sys) candidates.push(sys);
+  candidates.push(null);
+
+  let lastErr = null;
+  for (const executablePath of candidates) {
+    let browser;
+    try {
+      const launchOpts = { headless: true, args: launchArgs };
+      if (executablePath) launchOpts.executablePath = executablePath;
+      browser = await chromium.launch(launchOpts);
+      const context = await browser.newContext({ viewport: { width: 1240, height: 1754 } });
+      const page = await context.newPage();
+      await page.setContent(html, { waitUntil: "load" });
+      const pdf = await page.pdf({
+        format: "A4",
+        printBackground: true,
+        margin: { top: "18mm", right: "14mm", bottom: "18mm", left: "14mm" },
+      });
+      await context.close();
+      await browser.close().catch(() => {});
+      return pdf;
+    } catch (e) {
+      lastErr = e;
+      if (browser) await browser.close().catch(() => {});
+    }
+  }
+  throw lastErr || new Error("Playwright PDF generation failed.");
+}
+
+app.get("/api/risk-schema", (req, res) => {
+  try {
+    const schemaPath = path.join(__dirname, "risk_schema.json");
+    const schemaRaw = fs.readFileSync(schemaPath, "utf8");
+    const schema = JSON.parse(schemaRaw);
+    res.json(schema);
+  } catch (err) {
+    console.error("Failed to load risk_schema.json:", err);
+    res.status(500).json({ error: "Failed to load risk schema." });
+  }
+});
+
+app.post("/api/report/pdf", async (req, res) => {
+  const { analysis: analysisIn, riskAssessment, generatedAt, protocolKey, url } = req.body || {};
+  const analysis = await loadCachedAnalysisForReport({ analysisIn, protocolKey, url });
+
   if (!analysis || typeof analysis !== "object") {
     return res.status(400).json({
       error: "Missing analysis. Run Analyze first (to populate cache), then download PDF again.",
@@ -1301,35 +1484,59 @@ app.post("/api/report/pdf", async (req, res) => {
   }
 
   const protocolName = analysis?.protocol?.name || "Protocol";
-  const html = buildPdfReportHtml({ analysis, riskAssessment, generatedAt });
-
-  let browser;
+  let html;
   try {
-    const isVercel = String(process.env.VERCEL || "") !== "";
-    browser = await chromium.launch({
-      headless: true,
-      args: isVercel ? ["--no-sandbox", "--disable-setuid-sandbox"] : [],
+    html = buildPdfReportHtml({ analysis, riskAssessment, generatedAt });
+  } catch (err) {
+    console.error("PDF HTML build error:", err);
+    return res.status(500).json({
+      error: "Failed to build PDF HTML.",
+      detail: String(err?.message || err),
     });
-    const context = await browser.newContext({ viewport: { width: 1240, height: 1754 } });
-    const page = await context.newPage();
-    await page.setContent(html, { waitUntil: "load" });
-    const pdf = await page.pdf({
-      format: "A4",
-      printBackground: true,
-      margin: { top: "18mm", right: "14mm", bottom: "18mm", left: "14mm" },
-    });
-    await context.close();
+  }
 
+  try {
+    const pdf = await renderPdfBufferWithPlaywright(html);
     const filename = `${safePdfFilename(protocolName)}-report.pdf`;
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     return res.send(pdf);
   } catch (err) {
     console.error("PDF report generation error:", err);
-    return res.status(500).json({ error: "Failed to generate PDF report." });
-  } finally {
-    if (browser) await browser.close().catch(() => {});
+    const detail = String(err?.message || err);
+    let hint = null;
+    if (/executable doesn't exist|browserType\.launch/i.test(detail)) {
+      hint =
+        "Tried Playwright + system Chrome/Edge if installed. Run: npm run browsers — or use Download PDF (HTML fallback) or POST /api/report/html.";
+    }
+    return res.status(500).json({
+      error: "Failed to generate PDF report.",
+      detail,
+      hint,
+    });
   }
+});
+
+app.post("/api/report/html", async (req, res) => {
+  const { analysis: analysisIn, riskAssessment, generatedAt, protocolKey, url } = req.body || {};
+  const analysis = await loadCachedAnalysisForReport({ analysisIn, protocolKey, url });
+  if (!analysis || typeof analysis !== "object") {
+    return res.status(400).json({
+      error: "Missing analysis. Run Analyze first (to populate cache), then try again.",
+    });
+  }
+  const protocolName = analysis?.protocol?.name || "Protocol";
+  let html;
+  try {
+    html = buildPdfReportHtml({ analysis, riskAssessment, generatedAt });
+  } catch (err) {
+    console.error("Report HTML build error:", err);
+    return res.status(500).json({ error: "Failed to build report HTML.", detail: String(err?.message || err) });
+  }
+  const filename = `${safePdfFilename(protocolName)}-report.html`;
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  return res.send(html);
 });
 
 app.post("/api/risk-assessment", async (req, res) => {
@@ -1378,7 +1585,8 @@ app.post("/api/risk-assessment", async (req, res) => {
         try {
           const origin = normalizeUrl(url);
           const u = new URL(origin);
-          const candidates = [`origin:${u.host.toLowerCase()}`, `url:${origin}`];
+          const h = u.host.toLowerCase();
+          const candidates = [`origin:${h}`, `host:${h}`, `url:${origin}`];
           for (const c of candidates) {
             const cachedMem = inMemoryProtocolSnapshotCache.get(c);
             if (cachedMem?.analysis) {
@@ -2259,7 +2467,7 @@ function buildHeuristicRiskAssessment({ protocolName, url, analysis }) {
     ],
     overallTotal,
     evidence: [
-      "Heuristic fallback: GPT4All did not return valid JSON for full rubric scoring.",
+      "Heuristic fallback: structured LLM rubric scoring was not available for this run.",
       typeof tvl === "number" ? `Liquidity/TVL observed: ${tvl}` : "Liquidity/TVL not available.",
       typeof totalRaisedUsd === "number" ? `Total raised: ${totalRaisedUsd}` : "Total raised unknown.",
       typeof listedAt === "number" ? `DefiLlama listedAt: ${listedAt}` : "DefiLlama listedAt unknown.",
@@ -2454,9 +2662,23 @@ async function verifyAuditsFromProtocolDocs({ origin, protocolName }) {
     if (allSnippets.length >= 18) break;
   }
 
-  // Optional AI normalization (docs-first).
+  // Optional AI normalization: Cursor Cloud Agents when ENABLE_HOSTED_ENRICH=1, else local GPT4All.
+  const enableHostedEnrich = String(process.env.ENABLE_HOSTED_ENRICH || "0") === "1";
   const enableWebsiteLlm = String(process.env.ENABLE_WEBSITE_LLM || "1").toLowerCase() === "1";
-  if (enableWebsiteLlm && allSnippets.length) {
+  if (enableHostedEnrich && allSnippets.length) {
+    const auditorsRes = await extractAuditorsWithHostedLlm({
+      protocolName: protocolName || null,
+      origin: base,
+      docs: {
+        lines: allSnippets.slice(0, 55),
+        evidence: ["verifyAuditsFromProtocolDocs (hosted)", ...evidence.slice(0, 3)],
+      },
+    }).catch(() => null);
+    for (const a of auditorsRes?.auditors || []) {
+      const n = String(a?.name || "").trim();
+      if (n) firmSet.add(n);
+    }
+  } else if (enableWebsiteLlm && allSnippets.length) {
     const prompt = `
 Extract security audit firms from protocol docs text.
 Return JSON only: {"auditors":[{"name":string}]}.

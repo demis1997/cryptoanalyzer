@@ -84,11 +84,24 @@ function lastAssistantMessageText(conversation) {
  * - CURSOR_CLOUD_AGENTS_MODEL (default: default)
  * - CURSOR_CLOUD_AGENTS_BASE_URL (default: https://api.cursor.com)
  */
+function normalizeRepoUrl(raw) {
+  const u = String(raw || "").trim().replace(/\/+$/, "");
+  return u;
+}
+
+function launchErrorDetail(status, text, json) {
+  const j = json && typeof json === "object" ? json : null;
+  const msg = [j?.message, j?.error, typeof j?.detail === "string" ? j.detail : null].filter(Boolean).join("; ");
+  const tail = msg || String(text || "").trim().slice(0, 1500) || "empty response body";
+  return `Cursor Cloud Agent launch failed (${status}): ${tail}`;
+}
+
 export function createCursorCloudAgentsProvider() {
   const apiKey = required("CURSOR_API_KEY");
-  const repository = required("CURSOR_CLOUD_AGENTS_REPOSITORY");
+  const repository = normalizeRepoUrl(required("CURSOR_CLOUD_AGENTS_REPOSITORY"));
   const ref = env("CURSOR_CLOUD_AGENTS_REF", "main");
-  const model = env("CURSOR_CLOUD_AGENTS_MODEL", "default");
+  // API often rejects model="default"; leave unset unless CURSOR_CLOUD_AGENTS_MODEL is a real id from GET /v0/models.
+  const model = env("CURSOR_CLOUD_AGENTS_MODEL", "");
   const baseUrl = env("CURSOR_CLOUD_AGENTS_BASE_URL", "https://api.cursor.com").replace(/\/+$/, "");
 
   const headers = basicAuthHeader(apiKey);
@@ -108,22 +121,27 @@ export function createCursorCloudAgentsProvider() {
         .join("\n\n");
 
       // 1) Launch agent
+      const launchBody = {
+        prompt: { text: promptText },
+        source: { repository, ref },
+        target: { autoCreatePr: false },
+      };
+      if (model && !/^default$/i.test(model)) {
+        launchBody.model = model;
+      }
+
       const launch = await fetchJson(`${baseUrl}/v0/agents`, {
         method: "POST",
         headers,
         timeoutMs: Math.min(25_000, timeoutMs),
-        body: {
-          prompt: { text: promptText },
-          model,
-          source: { repository, ref },
-          target: { autoCreatePr: false },
-        },
+        body: launchBody,
       });
 
       if (!launch.ok) {
-        throw new LlmProviderError(`Cursor Cloud Agent launch failed (${launch.status})`, {
+        console.warn("[cursor_cloud_agents] launch response:", launch.status, launch.text?.slice(0, 2000));
+        throw new LlmProviderError(launchErrorDetail(launch.status, launch.text, launch.json), {
           code: "http_error",
-          cause: launch.text?.slice(0, 800),
+          cause: launch.text?.slice(0, 2500),
         });
       }
       const agentId = launch.json?.id;

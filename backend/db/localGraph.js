@@ -89,6 +89,27 @@ export function protocolIdFrom({ origin, defillamaSlug }) {
   }
 }
 
+/** Inspect DB: path, counts, recent protocols. */
+export async function getLocalGraphOverview({ limit = 40 } = {}) {
+  const db = await getDb();
+  const lim = Math.min(200, Math.max(1, Number(limit) || 40));
+  const countRow = get(db, `select count(*) as n from protocols`, []);
+  const protocols = all(
+    db,
+    `select id, name, url, updated_at as updatedAt from protocols order by updated_at desc limit ?`,
+    [lim]
+  );
+  const tokenRows = get(db, `select count(*) as n from protocol_tokens`, []);
+  const auditorRows = get(db, `select count(*) as n from protocol_auditors`, []);
+  return {
+    dbPath: dbPath(),
+    protocolCount: Number(countRow?.n || 0),
+    protocolTokenLinks: Number(tokenRows?.n || 0),
+    protocolAuditorLinks: Number(auditorRows?.n || 0),
+    protocols,
+  };
+}
+
 export async function localGraphInit() {
   const db = await getDb();
   db.exec(`

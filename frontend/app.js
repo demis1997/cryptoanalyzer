@@ -569,7 +569,11 @@ form.addEventListener("submit", (event) => {
   fetch("/api/llm-analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url, walletAddress }),
+    body: JSON.stringify({
+      url,
+      walletAddress,
+      forceRefresh: document.getElementById("force-refresh")?.checked === true,
+    }),
   })
     .then(async (resp) => {
       if (!resp.ok) {
@@ -581,6 +585,14 @@ form.addEventListener("submit", (event) => {
     .then((data) => {
       lastAnalysis = data;
       lastRubric = null;
+      console.info("[llm-analyze] llmEnrich + localGraph (expand object)", {
+        llmEnrich: data?.llmEnrich ?? null,
+        localGraph: data?.localGraph ?? null,
+      });
+      data?.llmEnrich?.error && console.warn("[llm-analyze] llmEnrich.error:", data.llmEnrich.error);
+      Array.isArray(data?.llmEnrich?.llmStepErrors) &&
+        data.llmEnrich.llmStepErrors.length &&
+        console.warn("[llm-analyze] llmStepErrors:", data.llmEnrich.llmStepErrors);
       renderProtocolMeta(data);
       renderContracts(data.contracts || []);
       renderConnections(data.connections || null);

@@ -167,14 +167,47 @@ function renderProtocolMeta(data) {
   if (protocolAuditsEl) {
     const verifiedFirms = Array.isArray(protocol?.auditsVerified?.firms) ? protocol.auditsVerified.firms : [];
     if (verifiedFirms.length) {
-      protocolAuditsEl.textContent = `Audited by: ${verifiedFirms.join(", ")}.`;
+      const n = verifiedFirms.length;
+      protocolAuditsEl.textContent = `Security audits (${n} firm${n === 1 ? "" : "s"}): ${verifiedFirms.join(", ")}.`;
     } else if (Number.isFinite(protocol?.audits)) {
-      protocolAuditsEl.textContent = `DefiLlama audits: ${protocol.audits}`;
+      protocolAuditsEl.textContent = `Index audit field: ${protocol.audits} (often incomplete—prefer protocol docs).`;
     } else if (Array.isArray(protocol?.auditLinks) && protocol.auditLinks.length) {
-      protocolAuditsEl.textContent = `DefiLlama audits: ${protocol.auditLinks.length}`;
+      protocolAuditsEl.textContent = `Index lists ${protocol.auditLinks.length} audit link(s) (not always firms).`;
     } else {
       protocolAuditsEl.textContent = "";
     }
+  }
+
+  const llmMeta = document.getElementById("llm-enrich-meta");
+  if (llmMeta) {
+    const g = data?.localGraph;
+    const le = data?.llmEnrich;
+    const parts = [];
+    if (g?.persisted) parts.push(`Graph DB saved (${g.protocolId || "ok"}).`);
+    if (g?.error) parts.push(`Graph DB error: ${g.error}`);
+    if (le?.error) parts.push(`Cursor: ${le.error}`);
+    if (le?.enabled) {
+      if (le.hostedPipelineRan) {
+        parts.push(
+          `Cursor ran: auditors ${le.auditors ?? 0}, +${le.graphEdges ?? 0} LLM edges${le.usedAnalyzeHtmlFallback ? " (from page text)" : ""}.`
+        );
+      } else if (le.hostedPipelineSkipped) {
+        parts.push(`Cursor skipped (${le.hostedPipelineSkipped}).`);
+      }
+      if (Array.isArray(le.llmStepErrors) && le.llmStepErrors.length) {
+        parts.push(le.llmStepErrors.map((e) => `${e.step}: ${e.message}`).join(" | "));
+      }
+    } else if (le && le.enabled === false) {
+      if (le.source === "local_graph") {
+        parts.push(le.note || "Loaded from SQLite graph cache (fast path). Enable Full refresh to run Playwright + hosted LLM.");
+      } else {
+        parts.push("Cursor off (ENABLE_HOSTED_ENRICH).");
+      }
+    }
+    if (!(le?.enabled === false && le?.source === "local_graph")) {
+      parts.push("Playwright = page fetch only; Cursor = separate Cloud Agents step.");
+    }
+    llmMeta.textContent = parts.filter(Boolean).join(" ");
   }
 
   if (protocolMethodologyEl) {
@@ -335,6 +368,11 @@ function renderEvidence(data) {
   if (Array.isArray(data?.protocol?.totalRaisedEvidence)) {
     data.protocol.totalRaisedEvidence.forEach((e) => lines.push({ label: "Total raised", text: e || "" }));
   }
+  if (Array.isArray(data?.protocol?.auditsVerified?.evidence)) {
+    data.protocol.auditsVerified.evidence.forEach((e) =>
+      lines.push({ label: "Audits / verification", text: e || "" })
+    );
+  }
   if (Array.isArray(data?.contracts)) {
     data.contracts.forEach((c) => {
       if (c.evidence) lines.push({ label: `Contract: ${c.address}`, text: c.evidence });
@@ -396,7 +434,11 @@ if (form && urlInput) {
     fetch("/api/llm-analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, walletAddress }),
+      body: JSON.stringify({
+      url,
+      walletAddress,
+      forceRefresh: document.getElementById("force-refresh")?.checked === true,
+    }),
     })
       .then(async (resp) => {
         if (!resp.ok) {
@@ -408,6 +450,14 @@ if (form && urlInput) {
       .then((data) => {
         lastAnalysis = data;
         lastRubric = null;
+        console.info("[llm-analyze] llmEnrich + localGraph (expand object)", {
+          llmEnrich: data?.llmEnrich ?? null,
+          localGraph: data?.localGraph ?? null,
+        });
+        data?.llmEnrich?.error && console.warn("[llm-analyze] llmEnrich.error:", data.llmEnrich.error);
+        Array.isArray(data?.llmEnrich?.llmStepErrors) &&
+          data.llmEnrich.llmStepErrors.length &&
+          console.warn("[llm-analyze] llmStepErrors:", data.llmEnrich.llmStepErrors);
         renderProtocolMeta(data);
         renderContracts(data.contracts || []);
         renderConnections(data.connections || null);
@@ -463,7 +513,26 @@ async function downloadPdf(filename, body) {
   });
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
-    throw new Error(err.error || `PDF request failed with status ${resp.status}`);
+    const htmlResp = await fetch("/api/report/html", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (htmlResp.ok) {
+      const blob = await htmlResp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename.replace(/\.pdf$/i, "") + ".html";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+      alert("PDF engine unavailable; downloaded HTML—open it and use Print → Save as PDF.");
+      return;
+    }
+    const msg = [err.error, err.detail, err.hint].filter(Boolean).join(" — ");
+    throw new Error(msg || `PDF request failed with status ${resp.status}`);
   }
   const blob = await resp.blob();
   const url = URL.createObjectURL(blob);

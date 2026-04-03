@@ -58,6 +58,10 @@
             View this wallet on
             <a id="debank-link" href="#" target="_blank" rel="noopener noreferrer">Debank</a>
           </div>
+          <label class="field__hint" style="display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; cursor: pointer; max-width: 42rem;">
+            <input type="checkbox" id="force-refresh" name="force-refresh" style="margin-top: 3px;" />
+            <span>Full refresh — ignore graph/DB cache, re-crawl the site, run hosted LLM, update SQLite graph.</span>
+          </label>
         </form>
       </section>
 
@@ -68,6 +72,7 @@
           <div id="protocol-url-display" class="metric metric--muted">Paste a URL and click Analyze.</div>
           <div id="protocol-chains" class="metric metric--muted"></div>
           <div id="protocol-audits" class="metric metric--muted"></div>
+          <div id="llm-enrich-meta" class="metric metric--muted" style="font-size: 12px;"></div>
           <div id="protocol-methodology" class="metric metric--muted"></div>
           <div class="small muted" style="margin-top:10px;">
             Protocol information
@@ -151,8 +156,7 @@
           <h2 class="card__title">Evidence & notes</h2>
           <ul id="evidence-list" class="list"></ul>
           <p class="card__empty" id="evidence-empty">
-            After Analyze, this will summarize where each number comes from
-            (DefiLlama, HTML snippets, funding sources, etc).
+            After Analyze, sources for key metrics appear here.
           </p>
         </article>
       </section>

@@ -71,11 +71,11 @@ export function buildHeuristicRiskAssessment({ protocolName, url, analysis }) {
     ],
     overallTotal,
     evidence: [
-      "Heuristic fallback: GPT4All did not return valid JSON for full rubric scoring.",
+      "Heuristic risk scoring (full LLM rubric not used or did not return structured scores).",
       typeof tvl === "number" ? `Liquidity/TVL observed: ${tvl}` : "Liquidity/TVL not available.",
       typeof totalRaisedUsd === "number" ? `Total raised: ${totalRaisedUsd}` : "Total raised unknown.",
-      typeof listedAt === "number" ? `DefiLlama listedAt: ${listedAt}` : "DefiLlama listedAt unknown.",
-      auditFirms.length ? `Auditors (docs): ${auditFirms.join(", ")}` : "",
+      typeof listedAt === "number" ? `Protocol listedAt (index): ${listedAt}` : "listedAt unknown.",
+      auditFirms.length ? `Auditors (verification): ${auditFirms.join(", ")}` : "",
       auditCount != null ? `Audits detected: ${auditCount}` : "Audit info unknown.",
     ],
   };
