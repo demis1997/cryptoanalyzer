@@ -1,4 +1,4 @@
-import { createLlmProvider } from "../llm/provider.js";
+import { runHostedLlmJson } from "../llm/provider.js";
 
 function okAddr(a) {
   return /^0x[a-fA-F0-9]{40}$/.test(String(a || "").trim());
@@ -54,7 +54,6 @@ function dedupeAuditors(auditors) {
 }
 
 export async function extractAuditorsWithHostedLlm({ protocolName, origin, docs } = {}) {
-  const provider = await createLlmProvider();
   const system = `You extract auditor firm names from protocol documentation snippets. Return JSON only.`;
   const user = `
 Return JSON only:
@@ -66,13 +65,16 @@ Origin: ${origin || ""}
 Lines:
 ${(docs?.lines || []).map((l, i) => `${i + 1}. ${l}`).join("\n")}
 `.trim();
-  const r = await provider.runJson({ system, user });
+  const r = await runHostedLlmJson({ system, user });
   const auditors = dedupeAuditors(r?.json?.auditors || []);
-  return { auditors, evidence: ["cursor_llm", ...(docs?.evidence || [])] };
+  return {
+    auditors,
+    evidence: ["cursor_llm", ...(docs?.evidence || [])],
+    llmRoute: { usedComposerFallback: Boolean(r?.meta?.usedComposerFallback) },
+  };
 }
 
 export async function inferContractGraphWithHostedLlm({ protocolName, origin, docs, knownTokens, knownContracts } = {}) {
-  const provider = await createLlmProvider();
   const system =
     `You infer an Ethereum contract connection graph from snippets. Output JSON only; only include valid addresses.`;
   const user = `
@@ -103,14 +105,18 @@ ${(docs?.addressContexts || []).slice(0, 25).map((x, i) => `${i + 1}. ${x.addres
 Lines:
 ${(docs?.lines || []).slice(0, 25).map((l, i) => `${i + 1}. ${l}`).join("\n")}
 `.trim();
-  const r = await provider.runJson({ system, user });
+  const r = await runHostedLlmJson({ system, user });
   const nodes = dedupeByAddress(r?.json?.nodes || []);
   const edges = dedupeEdges(r?.json?.edges || []);
-  return { nodes, edges, evidence: ["cursor_llm", ...(docs?.evidence || [])] };
+  return {
+    nodes,
+    edges,
+    evidence: ["cursor_llm", ...(docs?.evidence || [])],
+    llmRoute: { usedComposerFallback: Boolean(r?.meta?.usedComposerFallback) },
+  };
 }
 
 export async function inferArchitectureWithHostedLlm({ protocolName, origin, docs, knownTokens, knownContracts } = {}) {
-  const provider = await createLlmProvider();
   const system = `You infer high-level protocol architecture. Return JSON only.`;
   const user = `
 Return JSON only:
@@ -142,10 +148,14 @@ ${(docs?.addressContexts || []).slice(0, 18).map((x, i) => `${i + 1}. ${x.addres
 Lines:
 ${(docs?.lines || []).slice(0, 18).map((l, i) => `${i + 1}. ${l}`).join("\n")}
 `.trim();
-  const r = await provider.runJson({ system, user });
+  const r = await runHostedLlmJson({ system, user });
   const nodes = dedupeByAddress(r?.json?.nodes || []);
   const edges = dedupeEdges((r?.json?.edges || []).map((e) => ({ ...e, relation: e.relation || "connected" })));
   const routerAddress = okAddr(r?.json?.routerAddress) ? String(r.json.routerAddress).trim() : null;
-  return { architecture: { nodes, edges, routerAddress }, evidence: ["cursor_llm", ...(docs?.evidence || [])] };
+  return {
+    architecture: { nodes, edges, routerAddress },
+    evidence: ["cursor_llm", ...(docs?.evidence || [])],
+    llmRoute: { usedComposerFallback: Boolean(r?.meta?.usedComposerFallback) },
+  };
 }
 

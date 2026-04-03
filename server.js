@@ -37,6 +37,7 @@ import {
   inferContractGraphWithHostedLlm,
   inferArchitectureWithHostedLlm,
 } from "./backend/services/aiEnrich.js";
+import { resetHostedLlmRoute } from "./backend/llm/provider.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -822,6 +823,7 @@ app.post("/api/llm-analyze", async (req, res) => {
       const enableHostedEnrich = String(process.env.ENABLE_HOSTED_ENRICH || "0") === "1";
       const analyzeVisible = html ? htmlToVisibleText(html) : "";
       if (enableHostedEnrich) {
+        resetHostedLlmRoute();
         enriched.llmEnrich = {
           enabled: true,
           provider: process.env.LLM_PROVIDER || null,
@@ -908,6 +910,14 @@ app.post("/api/llm-analyze", async (req, res) => {
           enriched.llmEnrich.graphNodes = graphRes?.nodes?.length ?? 0;
           enriched.llmEnrich.graphEdges = graphRes?.edges?.length ?? 0;
           enriched.llmEnrich.architecture = Boolean(archRes?.architecture);
+          if (
+            auditorsRes?.llmRoute?.usedComposerFallback ||
+            graphRes?.llmRoute?.usedComposerFallback ||
+            archRes?.llmRoute?.usedComposerFallback
+          ) {
+            enriched.llmEnrich.usedComposerApiFallback = true;
+            enriched.llmEnrich.effectiveProvider = "cursor_composer_api";
+          }
         }
       } else {
         enriched.llmEnrich = { enabled: false, provider: null, docsFetched: false };

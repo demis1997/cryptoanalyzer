@@ -81,7 +81,8 @@ function lastAssistantMessageText(conversation) {
  *
  * Optional:
  * - CURSOR_CLOUD_AGENTS_REF (default: main)
- * - CURSOR_CLOUD_AGENTS_MODEL (default: default)
+ * - CURSOR_CLOUD_AGENTS_REPOSITORY_SLUG (owner/repo) if auto-detection from URL is wrong
+ * - CURSOR_CLOUD_AGENTS_MODEL — omit or use id from GET /v0/models
  * - CURSOR_CLOUD_AGENTS_BASE_URL (default: https://api.cursor.com)
  */
 function normalizeRepoUrl(raw) {
@@ -89,10 +90,66 @@ function normalizeRepoUrl(raw) {
   return u;
 }
 
+/** Strip refs/heads/ for building alternate ref forms. */
+function shortRefName(r) {
+  const s = String(r || "").trim();
+  const m = s.match(/^refs\/heads\/(.+)$/);
+  return m ? m[1] : s;
+}
+
+/** owner/repo from https://github.com/owner/repo — Cloud Agents sometimes accept only this form. */
+function githubSlugFromRepository(repo) {
+  const forced = env("CURSOR_CLOUD_AGENTS_REPOSITORY_SLUG", "");
+  if (forced) return forced.replace(/^\/+/, "").replace(/\.git$/i, "");
+  const m = String(repo).match(/^https?:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/i);
+  return m ? m[1] : "";
+}
+
+function isBranchVerifyFailure(launch) {
+  return Number(launch?.status) === 400 && /verify existence of branch/i.test(String(launch?.text || ""));
+}
+
+function isInvalidAgentModelFailure(launch) {
+  return Number(launch?.status) === 400 && /not available or invalid/i.test(String(launch?.text || ""));
+}
+
+function uniqueSourceAttempts(repository, ref) {
+  const refShort = shortRefName(ref);
+  const refsHeads = `refs/heads/${refShort}`;
+  const slug = githubSlugFromRepository(repository);
+  const variants = [
+    { repository, ref },
+    { repository, ref: refsHeads },
+  ];
+  if (slug) {
+    variants.push({ repository: slug, ref: refShort }, { repository: slug, ref: refsHeads });
+  }
+  const seen = new Set();
+  const out = [];
+  for (const src of variants) {
+    const key = `${src.repository}\0${src.ref}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(src);
+  }
+  return out;
+}
+
 function launchErrorDetail(status, text, json) {
   const j = json && typeof json === "object" ? json : null;
   const msg = [j?.message, j?.error, typeof j?.detail === "string" ? j.detail : null].filter(Boolean).join("; ");
-  const tail = msg || String(text || "").trim().slice(0, 1500) || "empty response body";
+  let tail = msg || String(text || "").trim().slice(0, 1500) || "empty response body";
+  if (/verify existence of branch/i.test(tail)) {
+    tail +=
+      " — Confirm branch with: git ls-remote --heads <repo-url>; Cloud Agents still need GitHub linked in Cursor + Cursor GitHub App access to that repo (not only “public on GitHub”).";
+  }
+  if (/storage mode is disabled/i.test(tail)) {
+    tail += " — Or set CURSOR_API_ENDPOINT (composer chat) in .env: the app will fall back automatically.";
+  }
+  if (/not available or invalid/i.test(tail)) {
+    tail +=
+      " — Unset CURSOR_CLOUD_AGENTS_MODEL or pick an id from GET /v0/models; chat/composer names are often invalid for Agents.";
+  }
   return `Cursor Cloud Agent launch failed (${status}): ${tail}`;
 }
 
@@ -120,24 +177,59 @@ export function createCursorCloudAgentsProvider() {
         .filter(Boolean)
         .join("\n\n");
 
-      // 1) Launch agent
-      const launchBody = {
-        prompt: { text: promptText },
-        source: { repository, ref },
-        target: { autoCreatePr: false },
+      // 1) Launch agent (retry source/ref shapes; retry without model if CURSOR_CLOUD_AGENTS_MODEL is invalid for Agents)
+      const runSourceLaunchLoop = async (includeModelInBody) => {
+        const sourceAttempts = uniqueSourceAttempts(repository, ref);
+        let launch = null;
+        for (let i = 0; i < sourceAttempts.length; i++) {
+          const src = sourceAttempts[i];
+          const launchBody = {
+            prompt: { text: promptText },
+            source: src,
+            target: { autoCreatePr: false },
+          };
+          if (includeModelInBody && model && !/^default$/i.test(model)) {
+            launchBody.model = model;
+          }
+
+          launch = await fetchJson(`${baseUrl}/v0/agents`, {
+            method: "POST",
+            headers,
+            timeoutMs: Math.min(25_000, timeoutMs),
+            body: launchBody,
+          });
+
+          if (launch.ok) return launch;
+          if (
+            isInvalidAgentModelFailure(launch) &&
+            includeModelInBody &&
+            model &&
+            !/^default$/i.test(model)
+          ) {
+            return { __stripAgentModel: true };
+          }
+          if (!isBranchVerifyFailure(launch) || i === sourceAttempts.length - 1) {
+            console.warn("[cursor_cloud_agents] launch response:", launch.status, launch.text?.slice(0, 2000));
+            throw new LlmProviderError(launchErrorDetail(launch.status, launch.text, launch.json), {
+              code: "http_error",
+              cause: launch.text?.slice(0, 2500),
+            });
+          }
+          console.warn(
+            `[cursor_cloud_agents] branch verify 400; retry ${i + 2}/${sourceAttempts.length} with repository=${JSON.stringify(src.repository)} ref=${JSON.stringify(src.ref)}`
+          );
+        }
+        return launch;
       };
-      if (model && !/^default$/i.test(model)) {
-        launchBody.model = model;
+
+      let launch = await runSourceLaunchLoop(true);
+      if (launch && launch.__stripAgentModel) {
+        console.warn(
+          "[cursor_cloud_agents] model not valid for Cloud Agents; retrying without model field (API default)."
+        );
+        launch = await runSourceLaunchLoop(false);
       }
-
-      const launch = await fetchJson(`${baseUrl}/v0/agents`, {
-        method: "POST",
-        headers,
-        timeoutMs: Math.min(25_000, timeoutMs),
-        body: launchBody,
-      });
-
-      if (!launch.ok) {
+      if (!launch?.ok) {
         console.warn("[cursor_cloud_agents] launch response:", launch.status, launch.text?.slice(0, 2000));
         throw new LlmProviderError(launchErrorDetail(launch.status, launch.text, launch.json), {
           code: "http_error",

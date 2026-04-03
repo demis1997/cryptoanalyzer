@@ -187,9 +187,12 @@ function renderProtocolMeta(data) {
     if (g?.error) parts.push(`Graph DB error: ${g.error}`);
     if (le?.error) parts.push(`Cursor: ${le.error}`);
     if (le?.enabled) {
+      if (le.usedComposerApiFallback) {
+        parts.push("Used composer API (CURSOR_API_ENDPOINT) — Cloud Agents need storage enabled in Cursor.");
+      }
       if (le.hostedPipelineRan) {
         parts.push(
-          `Cursor ran: auditors ${le.auditors ?? 0}, +${le.graphEdges ?? 0} LLM edges${le.usedAnalyzeHtmlFallback ? " (from page text)" : ""}.`
+          `Cursor ran: auditors ${le.auditors ?? 0}, +${le.graphEdges ?? 0} LLM edges${le.usedAnalyzeHtmlFallback ? " (from page text)" : ""}${le.effectiveProvider ? ` [${le.effectiveProvider}]` : ""}.`
         );
       } else if (le.hostedPipelineSkipped) {
         parts.push(`Cursor skipped (${le.hostedPipelineSkipped}).`);
