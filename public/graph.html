@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <div class="app">
+    <div class="app app--wide">
       <header class="app__header">
         <h1>Graph</h1>
         <p class="app__subtitle">Search a protocol/pool/token and explore exposures + weakest links visually.</p>
@@ -25,6 +25,38 @@
           <input id="g-q" class="field__input" placeholder="pendle / usdc / mre7yield / yieldpool:…" />
           <button id="g-search-btn" class="btn btn--ghost" type="button">Search</button>
         </div>
+        <div class="summary" style="margin-top:12px;">
+          <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+            <label class="field__hint">Depth
+              <select id="g-depth" class="field__input" style="padding:8px 10px; width:auto;">
+                <option value="1">1</option>
+                <option value="2" selected>2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
+              </select>
+            </label>
+            <label class="field__hint">Chain
+              <select id="g-chain" class="field__input" style="padding:8px 10px; width:auto;">
+                <option value="">Any</option>
+                <option value="ethereum">Ethereum</option>
+                <option value="base">Base</option>
+                <option value="arbitrum">Arbitrum</option>
+                <option value="optimism">Optimism</option>
+                <option value="polygon">Polygon</option>
+              </select>
+            </label>
+            <label class="field__hint">Type
+              <select id="g-type" class="field__input" style="padding:8px 10px; width:auto;">
+                <option value="">Any</option>
+                <option value="protocol">Protocol</option>
+                <option value="pool">Pool</option>
+                <option value="token">Token</option>
+                <option value="yield_pool">Yield pool</option>
+              </select>
+            </label>
+          </div>
+        </div>
         <div id="g-meta" class="field__hint"></div>
         <ul id="g-results" class="list" style="margin-top: 10px;"></ul>
       </section>
@@ -32,7 +64,7 @@
       <section class="grid">
         <article class="card">
           <h2 class="card__title">Graph</h2>
-          <div id="g-canvas" class="summary" style="display:none;"></div>
+          <div id="g-canvas" class="summary graph-canvas" style="display:none;"></div>
           <p id="g-empty" class="card__empty">Search to load a node graph.</p>
         </article>
         <article class="card">

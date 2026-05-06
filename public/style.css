@@ -19,6 +19,20 @@ body {
   padding: 32px 16px 40px;
 }
 
+.app--wide {
+  max-width: 1440px;
+}
+
+.graph-canvas {
+  height: 720px;
+  overflow: hidden;
+  padding: 0;
+}
+
+.graph-canvas svg {
+  height: 100%;
+}
+
 .app__header {
   text-align: left;
   margin-bottom: 24px;

@@ -7,6 +7,10 @@ const emptyEl = document.getElementById("g-empty");
 const detailsEl = document.getElementById("g-details");
 const securityEl = document.getElementById("g-security");
 
+const depthEl = document.getElementById("g-depth");
+const chainEl = document.getElementById("g-chain");
+const typeEl = document.getElementById("g-type");
+
 const fProtocol = document.getElementById("f-protocol");
 const fYield = document.getElementById("f-yield");
 const fAsset = document.getElementById("f-asset");
@@ -15,6 +19,7 @@ const fToken = document.getElementById("f-token");
 
 let lastGraph = null;
 let lastRef = null;
+let currentDepth = 2;
 
 function escapeHtml(v) {
   return String(v ?? "")
@@ -67,16 +72,16 @@ function renderStarGraph({ ref, nodes, edges }) {
     return;
   }
 
-  const others = nodesFiltered.filter((n) => n.ref !== root.ref).slice(0, 42);
-  const width = 980;
-  const height = 520;
+  const others = nodesFiltered.filter((n) => n.ref !== root.ref).slice(0, 120);
+  const width = 1800;
+  const height = 860;
   const cx = Math.floor(width / 2);
-  const cy = 80;
+  const cy = 88;
 
-  const cols = 7;
+  const cols = 10;
   const colW = Math.floor(width / cols);
   const padX = 16;
-  const padY = 180;
+  const padY = 220;
 
   const pts = others.map((n, i) => {
     const c = i % cols;
@@ -119,16 +124,41 @@ function renderStarGraph({ ref, nodes, edges }) {
       ${lines}
       ${pts.map((p) => bubble(p.x, p.y, p.label, p.kind, p.ref)).join("")}
       <text x="${width - 16}" y="${height - 14}" text-anchor="end" font-size="10" fill="#64748b" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
-        Nodes: ${nodesFiltered.length} • Edges: ${edgesFiltered.length} • Hops: 2
+        Nodes: ${nodesFiltered.length} • Edges: ${edgesFiltered.length} • Depth: ${currentDepth}
       </text>
     </svg>
   `;
 }
 
+function setQueryParam(k, v) {
+  const u = new URL(window.location.href);
+  if (v == null || v === "") u.searchParams.delete(k);
+  else u.searchParams.set(k, String(v));
+  history.replaceState(null, "", u.toString());
+}
+
+function applyFiltersFromUrl() {
+  const u = new URL(window.location.href);
+  const depth = Number(u.searchParams.get("depth") || u.searchParams.get("hops") || 2);
+  currentDepth = Math.min(5, Math.max(1, depth || 2));
+  if (depthEl) depthEl.value = String(currentDepth);
+  if (chainEl) chainEl.value = String(u.searchParams.get("chain") || "");
+  if (typeEl) typeEl.value = String(u.searchParams.get("type") || "");
+
+  const protocol = u.searchParams.get("protocol");
+  if (protocol && qEl) {
+    qEl.value = protocol;
+    // auto-run search
+    setTimeout(() => doSearch(), 0);
+  }
+}
+
 async function openRef(ref) {
   lastRef = ref;
   metaEl.textContent = "Loading neighborhood…";
-  const r = await apiGet(`/api/graph/neighborhood?ref=${encodeURIComponent(ref)}&hops=2`);
+  setQueryParam("protocol", ref);
+  setQueryParam("depth", currentDepth);
+  const r = await apiGet(`/api/graph/neighborhood?ref=${encodeURIComponent(ref)}&hops=${encodeURIComponent(String(currentDepth))}`);
   lastGraph = r;
   const nodes = Array.isArray(r?.graph?.nodes) ? r.graph.nodes : [];
   const edges = Array.isArray(r?.graph?.edges) ? r.graph.edges : [];
@@ -199,7 +229,19 @@ async function doSearch() {
       }
     }
     const r = await apiGet(`/api/graph/search?q=${encodeURIComponent(q)}&limit=25`);
-    const rows = Array.isArray(r.results) ? r.results : [];
+    let rows = Array.isArray(r.results) ? r.results : [];
+
+    // Client-side filtering by chain/type (best-effort).
+    const chain = String(chainEl?.value || "").trim().toLowerCase();
+    const type = String(typeEl?.value || "").trim().toLowerCase();
+    if (type) rows = rows.filter((x) => String(x.kind || "").toLowerCase() === type);
+    if (chain) {
+      rows = rows.filter((x) => {
+        const ref = String(x.ref || "").toLowerCase();
+        return ref.includes(`:${chain}:`) || String(x.kind || "") === "protocol";
+      });
+    }
+
     if (rows.length === 1) {
       await openRef(rows[0].ref);
       resultsEl.innerHTML = "";
@@ -238,4 +280,14 @@ for (const el of [fProtocol, fYield, fAsset, fContract, fToken]) {
     if (lastRef && nodes.length) renderStarGraph({ ref: lastRef, nodes, edges });
   });
 }
+
+depthEl?.addEventListener("change", () => {
+  currentDepth = Math.min(5, Math.max(1, Number(depthEl.value) || 2));
+  setQueryParam("depth", currentDepth);
+  if (lastRef) openRef(lastRef);
+});
+chainEl?.addEventListener("change", () => setQueryParam("chain", chainEl.value || ""));
+typeEl?.addEventListener("change", () => setQueryParam("type", typeEl.value || ""));
+
+applyFiltersFromUrl();
 

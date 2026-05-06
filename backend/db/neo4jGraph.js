@@ -403,10 +403,10 @@ export async function searchGraphNeo4j({ q, limit = 25 } = {}) {
   }
 }
 
-export async function getNeighborhoodGraphNeo4j({ ref, hops = 2, limitNodes = 160, limitEdges = 320 } = {}) {
+export async function getNeighborhoodGraphNeo4j({ ref, hops = 2, limitNodes = 260, limitEdges = 520 } = {}) {
   const startRef = String(ref || "").trim();
   if (!startRef) return { ok: false, error: "Missing ref" };
-  const maxHops = Math.min(4, Math.max(1, Number(hops) || 2));
+  const maxHops = Math.min(6, Math.max(1, Number(hops) || 2));
   const { driver } = getDriver();
   const cfg = neo4jConfig();
   const session = driver.session({ database: cfg.database });
