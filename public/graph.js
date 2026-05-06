@@ -21,6 +21,16 @@ let lastGraph = null;
 let lastRef = null;
 let currentDepth = 2;
 
+const panZoom = {
+  x: 0,
+  y: 0,
+  k: 1,
+  isDown: false,
+  lastPt: null,
+  didPan: false,
+  didPanAt: 0,
+};
+
 function escapeHtml(v) {
   return String(v ?? "")
     .replace(/&/g, "&amp;")
@@ -118,16 +128,103 @@ function renderStarGraph({ ref, nodes, edges }) {
   canvasEl.style.display = "block";
   if (emptyEl) emptyEl.style.display = "none";
   canvasEl.innerHTML = `
-    <svg width="100%" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Risk graph">
+    <svg id="g-svg" width="100%" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Risk graph">
       <rect x="0" y="0" width="${width}" height="${height}" fill="#020617" rx="18" />
-      ${bubble(cx, cy, String(root.label || root.ref).slice(0, 26), root.kind, root.ref)}
-      ${lines}
-      ${pts.map((p) => bubble(p.x, p.y, p.label, p.kind, p.ref)).join("")}
+      <g id="g-viewport">
+        ${bubble(cx, cy, String(root.label || root.ref).slice(0, 26), root.kind, root.ref)}
+        ${lines}
+        ${pts.map((p) => bubble(p.x, p.y, p.label, p.kind, p.ref)).join("")}
+      </g>
       <text x="${width - 16}" y="${height - 14}" text-anchor="end" font-size="10" fill="#64748b" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
         Nodes: ${nodesFiltered.length} • Edges: ${edgesFiltered.length} • Depth: ${currentDepth}
       </text>
     </svg>
   `;
+
+  setupPanZoom();
+}
+
+function setupPanZoom() {
+  const svg = canvasEl?.querySelector?.("#g-svg");
+  const viewport = canvasEl?.querySelector?.("#g-viewport");
+  if (!svg || !viewport) return;
+
+  const apply = () => {
+    viewport.setAttribute("transform", `translate(${panZoom.x} ${panZoom.y}) scale(${panZoom.k})`);
+  };
+
+  const clientToSvg = (evt) => {
+    const pt = svg.createSVGPoint();
+    pt.x = evt.clientX;
+    pt.y = evt.clientY;
+    const m = svg.getScreenCTM();
+    if (!m) return { x: 0, y: 0 };
+    const p = pt.matrixTransform(m.inverse());
+    return { x: p.x, y: p.y };
+  };
+
+  apply();
+
+  // prevent duplicating listeners on rerender
+  if (svg.__panzoomBound) return;
+  svg.__panzoomBound = true;
+
+  svg.style.cursor = "grab";
+
+  svg.addEventListener("pointerdown", (e) => {
+    // only left click / primary touch
+    if (e.button != null && e.button !== 0) return;
+    panZoom.isDown = true;
+    panZoom.didPan = false;
+    panZoom.lastPt = clientToSvg(e);
+    svg.setPointerCapture?.(e.pointerId);
+    svg.style.cursor = "grabbing";
+  });
+
+  svg.addEventListener("pointermove", (e) => {
+    if (!panZoom.isDown || !panZoom.lastPt) return;
+    const p = clientToSvg(e);
+    const dx = p.x - panZoom.lastPt.x;
+    const dy = p.y - panZoom.lastPt.y;
+    if (Math.abs(dx) + Math.abs(dy) > 0.5) panZoom.didPan = true;
+    panZoom.x += dx;
+    panZoom.y += dy;
+    panZoom.lastPt = p;
+    apply();
+  });
+
+  const end = (e) => {
+    if (!panZoom.isDown) return;
+    panZoom.isDown = false;
+    panZoom.lastPt = null;
+    panZoom.didPanAt = Date.now();
+    svg.releasePointerCapture?.(e.pointerId);
+    svg.style.cursor = "grab";
+  };
+
+  svg.addEventListener("pointerup", end);
+  svg.addEventListener("pointercancel", end);
+  svg.addEventListener("pointerleave", (e) => {
+    if (panZoom.isDown) end(e);
+  });
+
+  svg.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      const oldK = panZoom.k;
+      const dir = e.deltaY > 0 ? 0.9 : 1.1;
+      const next = Math.min(3.5, Math.max(0.35, oldK * dir));
+
+      const p = clientToSvg(e);
+      // keep the wheel point stable while zooming
+      panZoom.x = p.x - ((p.x - panZoom.x) * next) / oldK;
+      panZoom.y = p.y - ((p.y - panZoom.y) * next) / oldK;
+      panZoom.k = next;
+      apply();
+    },
+    { passive: false }
+  );
 }
 
 function setQueryParam(k, v) {
@@ -268,6 +365,8 @@ resultsEl?.addEventListener("click", (e) => {
 });
 
 canvasEl?.addEventListener("click", (e) => {
+  // ignore click right after dragging/panning
+  if (panZoom.didPan || Date.now() - panZoom.didPanAt < 250) return;
   const g = e.target?.closest?.("g[data-ref]");
   const ref = g?.getAttribute?.("data-ref");
   if (ref) openRef(ref);

@@ -61,26 +61,25 @@
         <ul id="g-results" class="list" style="margin-top: 10px;"></ul>
       </section>
 
-      <section class="grid">
-        <article class="card">
-          <h2 class="card__title">Graph</h2>
-          <div id="g-canvas" class="summary graph-canvas" style="display:none;"></div>
-          <p id="g-empty" class="card__empty">Search to load a node graph.</p>
-        </article>
-        <article class="card">
-          <h2 class="card__title">Details</h2>
-          <div id="g-details" class="metric metric--muted">–</div>
-          <div id="g-security" class="metric metric--muted" style="margin-top:10px;"></div>
-          <div class="summary" style="margin-top:12px;">
-            <div style="display:flex; gap:10px; flex-wrap:wrap;">
-              <label class="field__hint" style="cursor:pointer;"><input type="checkbox" id="f-protocol" checked /> Protocols</label>
-              <label class="field__hint" style="cursor:pointer;"><input type="checkbox" id="f-yield" checked /> Yield pools</label>
-              <label class="field__hint" style="cursor:pointer;"><input type="checkbox" id="f-asset" checked /> Assets</label>
-              <label class="field__hint" style="cursor:pointer;"><input type="checkbox" id="f-contract" checked /> Contracts</label>
-              <label class="field__hint" style="cursor:pointer;"><input type="checkbox" id="f-token" checked /> Tokens</label>
-            </div>
+      <section class="card">
+        <h2 class="card__title">Details</h2>
+        <div id="g-details" class="metric metric--muted">–</div>
+        <div id="g-security" class="metric metric--muted" style="margin-top:10px;"></div>
+        <div class="summary" style="margin-top:12px;">
+          <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            <label class="field__hint" style="cursor:pointer;"><input type="checkbox" id="f-protocol" checked /> Protocols</label>
+            <label class="field__hint" style="cursor:pointer;"><input type="checkbox" id="f-yield" checked /> Yield pools</label>
+            <label class="field__hint" style="cursor:pointer;"><input type="checkbox" id="f-asset" checked /> Assets</label>
+            <label class="field__hint" style="cursor:pointer;"><input type="checkbox" id="f-contract" checked /> Contracts</label>
+            <label class="field__hint" style="cursor:pointer;"><input type="checkbox" id="f-token" checked /> Tokens</label>
           </div>
-        </article>
+        </div>
+      </section>
+
+      <section class="card" style="margin-top:18px;">
+        <h2 class="card__title">Graph</h2>
+        <div id="g-canvas" class="summary graph-canvas" style="display:none;"></div>
+        <p id="g-empty" class="card__empty">Search to load a node graph.</p>
       </section>
     </div>
 
