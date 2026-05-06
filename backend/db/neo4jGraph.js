@@ -294,6 +294,197 @@ export async function searchPoolsNeo4j({ q, limit = 25 } = {}) {
   }
 }
 
+export async function searchYieldPoolsNeo4j({ q, limit = 25 } = {}) {
+  const { driver } = getDriver();
+  const cfg = neo4jConfig();
+  const query = String(q || "").trim().toLowerCase();
+  if (!query) return [];
+  const lim = Math.trunc(Math.min(100, Math.max(1, Number(limit) || 25)));
+  const session = driver.session({ database: cfg.database });
+  try {
+    const like = `(?i).*${query.replace(/[^a-z0-9_-]+/g, ".*")}.*`;
+    const res = await session.run(
+      `
+      MATCH (a:Asset)
+      WHERE a.kind = "yield_pool" AND (a.label =~ $like OR coalesce(a.project,"") =~ $like OR coalesce(a.network,"") =~ $like)
+      RETURN a.id AS id, a.label AS label, a.network AS chain, a.project AS project, a.tvlUsd AS tvlUsd, a.apy AS apy
+      ORDER BY coalesce(a.tvlUsd, 0) DESC
+      LIMIT $limit
+      `,
+      { like, limit: neo4j.int(lim) }
+    );
+    return res.records.map((r) => ({
+      kind: "yield_pool",
+      id: r.get("id"),
+      label: r.get("label") || null,
+      chain: r.get("chain") || null,
+      project: r.get("project") || null,
+      tvlUsd: r.get("tvlUsd") == null ? null : Number(r.get("tvlUsd")),
+      apy: r.get("apy") == null ? null : Number(r.get("apy")),
+      protocolId: r.get("project") ? `defillama:${String(r.get("project")).toLowerCase()}` : null,
+      protocolName: r.get("project") || null,
+    }));
+  } finally {
+    await session.close();
+  }
+}
+
+function refForNode(node) {
+  const labels = Array.isArray(node?.labels) ? node.labels : [];
+  const p = node?.properties || {};
+  if (labels.includes("Protocol")) return { ref: String(p.id), kind: "protocol", label: String(p.name || p.id || "") };
+  if (labels.includes("Token")) return { ref: `token:${p.chain}:${p.address}`, kind: "token", label: String(p.label || p.symbol || p.address || "") };
+  if (labels.includes("Contract")) return { ref: `contract:${p.chain}:${p.address}`, kind: "contract", label: String(p.label || p.address || "") };
+  if (labels.includes("Asset")) return { ref: String(p.id), kind: String(p.kind || "asset"), label: String(p.label || p.id || "") };
+  return { ref: String(p.id || p.address || ""), kind: "unknown", label: String(p.label || p.name || p.id || "") };
+}
+
+export async function searchGraphNeo4j({ q, limit = 25 } = {}) {
+  const query = String(q || "").trim().toLowerCase();
+  if (!query) return [];
+  const lim = Math.trunc(Math.min(50, Math.max(1, Number(limit) || 25)));
+  const { driver } = getDriver();
+  const cfg = neo4jConfig();
+  const session = driver.session({ database: cfg.database });
+  try {
+    const res = await session.run(
+      `
+      CALL {
+        WITH $q AS q
+        MATCH (p:Protocol)
+        WHERE toLower(coalesce(p.name,'')) CONTAINS q OR toLower(coalesce(p.id,'')) CONTAINS q
+        RETURN p AS n, 3 AS score
+        LIMIT 20
+      }
+      UNION ALL
+      CALL {
+        WITH $q AS q
+        MATCH (c:Contract)
+        WHERE toLower(coalesce(c.label,'')) CONTAINS q
+        RETURN c AS n, 2 AS score
+        LIMIT 20
+      }
+      UNION ALL
+      CALL {
+        WITH $q AS q
+        MATCH (t:Token)
+        WHERE toLower(coalesce(t.symbol,'')) CONTAINS q OR toLower(coalesce(t.label,'')) CONTAINS q
+        RETURN t AS n, 2 AS score
+        LIMIT 20
+      }
+      UNION ALL
+      CALL {
+        WITH $q AS q
+        MATCH (a:Asset)
+        WHERE toLower(coalesce(a.label,'')) CONTAINS q OR toLower(coalesce(a.id,'')) CONTAINS q OR toLower(coalesce(a.project,'')) CONTAINS q
+        RETURN a AS n, 1 AS score
+        LIMIT 20
+      }
+      RETURN n, score
+      ORDER BY score DESC
+      LIMIT $limit
+      `,
+      { q: query, limit: neo4j.int(lim) }
+    );
+    const out = [];
+    const seen = new Set();
+    for (const r of res.records) {
+      const n = r.get("n");
+      const info = refForNode(n);
+      if (!info.ref) continue;
+      const k = info.ref.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(info);
+    }
+    return out;
+  } finally {
+    await session.close();
+  }
+}
+
+export async function getNeighborhoodGraphNeo4j({ ref, hops = 2, limitNodes = 160, limitEdges = 320 } = {}) {
+  const startRef = String(ref || "").trim();
+  if (!startRef) return { ok: false, error: "Missing ref" };
+  const maxHops = Math.min(4, Math.max(1, Number(hops) || 2));
+  const { driver } = getDriver();
+  const cfg = neo4jConfig();
+  const session = driver.session({ database: cfg.database });
+
+  const match = (() => {
+    if (startRef.startsWith("contract:")) {
+      const m = startRef.match(/^contract:([^:]+):(0x[a-f0-9]{40})$/i);
+      if (!m) return null;
+      return { cypher: "MATCH (s:Contract {chain:$chain, address:$address})", params: { chain: m[1].toLowerCase(), address: m[2].toLowerCase() } };
+    }
+    if (startRef.startsWith("token:")) {
+      const m = startRef.match(/^token:([^:]+):(0x[a-f0-9]{40})$/i);
+      if (!m) return null;
+      return { cypher: "MATCH (s:Token {chain:$chain, address:$address})", params: { chain: m[1].toLowerCase(), address: m[2].toLowerCase() } };
+    }
+    // Asset nodes include yieldpool:uuid and asset:token:symbol etc
+    if (startRef.startsWith("yieldpool:") || startRef.startsWith("asset:")) {
+      return { cypher: "MATCH (s:Asset {id:$id})", params: { id: startRef.toLowerCase() } };
+    }
+    // Protocol ids (defillama:slug, protocol:slug, url:...)
+    return { cypher: "MATCH (s:Protocol {id:$id})", params: { id: startRef } };
+  })();
+  if (!match) return { ok: false, error: "Bad ref" };
+
+  try {
+    const res = await session.run(
+      `
+      ${match.cypher}
+      OPTIONAL MATCH p = (s)-[:ECOSYSTEM_LINK*1..${maxHops}]-(n)
+      WITH s, collect(p) AS paths
+      WITH s,
+           reduce(ns=[s], x IN paths | ns + nodes(x)) AS nodesRaw,
+           reduce(rs=[], x IN paths | rs + relationships(x)) AS relsRaw
+      WITH s,
+           [n IN nodesRaw | n] AS nodesAll,
+           [r IN relsRaw | r] AS relsAll
+      RETURN s AS start, nodesAll AS nodesAll, relsAll AS relsAll
+      `,
+      match.params
+    );
+    if (!res.records.length) return { ok: true, hit: false, ref: startRef, graph: { nodes: [], edges: [] } };
+
+    const rec = res.records[0];
+    const nodesAll = Array.isArray(rec.get("nodesAll")) ? rec.get("nodesAll") : [];
+    const relsAll = Array.isArray(rec.get("relsAll")) ? rec.get("relsAll") : [];
+
+    const nodeMap = new Map();
+    for (const n of nodesAll) {
+      const info = refForNode(n);
+      if (!info.ref) continue;
+      nodeMap.set(info.ref, info);
+      if (nodeMap.size >= limitNodes) break;
+    }
+
+    const edges = [];
+    for (const r of relsAll) {
+      const sp = r?.startNodeElementId ? r.startNodeElementId : null;
+      const ep = r?.endNodeElementId ? r.endNodeElementId : null;
+      // Use elementId mapping: build a reverse map from elementId -> ref
+      // Neo4j driver returns Node objects in nodesAll with elementId
+      // We scan nodesAll for matching elementId (bounded by limitNodes).
+      if (!sp || !ep) continue;
+      const fromNode = nodesAll.find((n) => n.elementId === sp);
+      const toNode = nodesAll.find((n) => n.elementId === ep);
+      const from = fromNode ? refForNode(fromNode).ref : null;
+      const to = toNode ? refForNode(toNode).ref : null;
+      if (!from || !to) continue;
+      if (!nodeMap.has(from) || !nodeMap.has(to)) continue;
+      edges.push({ from, to, relation: String(r?.properties?.relation || "linked") });
+      if (edges.length >= limitEdges) break;
+    }
+
+    return { ok: true, hit: true, ref: startRef, graph: { nodes: [...nodeMap.values()], edges } };
+  } finally {
+    await session.close();
+  }
+}
+
 export async function getPoolNeighborhoodNeo4j({ chain = "ethereum", address, hops = 4, limitProtocols = 160, limitPools = 120 } = {}) {
   const ch = String(chain || "ethereum").trim().toLowerCase() || "ethereum";
   const addr = String(address || "").trim().toLowerCase();
@@ -733,9 +924,25 @@ export async function upsertConnectionsGraphNeo4j({ rootProtocolId, subjectProto
     await tx.run(
       `
       MERGE (a:Asset {id:$id})
-      SET a.label = coalesce($label, a.label), a.kind = coalesce($kind, a.kind), a.network = coalesce($network, a.network), a.updatedAt = $now
+      SET
+        a.label = coalesce($label, a.label),
+        a.kind = coalesce($kind, a.kind),
+        a.network = coalesce($network, a.network),
+        a.project = coalesce($project, a.project),
+        a.tvlUsd = coalesce($tvlUsd, a.tvlUsd),
+        a.apy = coalesce($apy, a.apy),
+        a.updatedAt = $now
       `,
-      { id, label, kind: kind || null, network, now }
+      {
+        id,
+        label,
+        kind: kind || null,
+        network,
+        project: n.raw?.project ? String(n.raw.project).slice(0, 64) : null,
+        tvlUsd: typeof n.raw?.tvlUsd === "number" ? n.raw.tvlUsd : null,
+        apy: typeof n.raw?.apy === "number" ? n.raw.apy : null,
+        now,
+      }
     );
   };
 

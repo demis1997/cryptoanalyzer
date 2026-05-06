@@ -52,6 +52,9 @@ import {
   findProtocolIdByUrlNeo4j,
   searchPoolsNeo4j,
   getPoolNeighborhoodNeo4j,
+  searchYieldPoolsNeo4j,
+  searchGraphNeo4j,
+  getNeighborhoodGraphNeo4j,
 } from "./backend/db/neo4jGraph.js";
 import { fetchDocsSnippets } from "./backend/services/docsSnippets.js";
 import { ingestAuditPdfsIntoDocsPack } from "./backend/services/auditPdfIngest.js";
@@ -64,6 +67,113 @@ import {
   subjectProtocolNodeId,
 } from "./backend/services/aiEnrich.js";
 import { resetHostedLlmRoute } from "./backend/llm/provider.js";
+
+let hacksCache = { fetchedAtMs: 0, rows: null };
+async function getDefiLlamaHacksCached() {
+  const now = Date.now();
+  if (hacksCache.rows && now - hacksCache.fetchedAtMs < 6 * 60 * 60 * 1000) return hacksCache.rows;
+  const resp = await fetch("https://api.llama.fi/hacks", { headers: { "User-Agent": "cryptoanalyzer/hacks" } });
+  if (!resp.ok) return hacksCache.rows || [];
+  const rows = await resp.json().catch(() => null);
+  const list = Array.isArray(rows) ? rows : [];
+  hacksCache = { fetchedAtMs: now, rows: list };
+  return list;
+}
+
+function normName(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function findHacksForNames(hacks, names) {
+  const keys = (Array.isArray(names) ? names : [])
+    .map((n) => normName(n))
+    .filter((n) => n && n.length >= 3);
+  if (!keys.length) return [];
+  const out = [];
+  for (const h of Array.isArray(hacks) ? hacks : []) {
+    const hn = normName(h?.name);
+    if (!hn) continue;
+    if (!keys.some((k) => hn.includes(k) || k.includes(hn))) continue;
+    out.push({
+      name: h?.name || null,
+      date: h?.date || null,
+      classification: h?.classification || null,
+      technique: h?.technique || null,
+      amount: typeof h?.amount === "number" ? h.amount : null,
+      chain: Array.isArray(h?.chain) ? h.chain : [],
+    });
+  }
+  out.sort((a, b) => (Number(b.amount) || 0) - (Number(a.amount) || 0));
+  return out.slice(0, 8);
+}
+
+function normalizeChainSegment(seg) {
+  const s = String(seg || "").trim().toLowerCase();
+  if (!s) return "ethereum";
+  if (s === "eth" || s === "mainnet" || s === "ethereum") return "ethereum";
+  if (s === "arb" || s === "arbitrum") return "arbitrum";
+  if (s === "op" || s === "optimism") return "optimism";
+  if (s === "base") return "base";
+  if (s === "polygon" || s === "matic") return "polygon";
+  return s.replace(/[^a-z0-9_-]+/g, "_").slice(0, 24);
+}
+
+function tryResolveUrlToGraphRef(rawUrl) {
+  const s = String(rawUrl || "").trim();
+  if (!s) return null;
+  let u = null;
+  try {
+    u = new URL(s);
+  } catch {
+    return null;
+  }
+  const host = u.hostname.replace(/^www\./, "").toLowerCase();
+
+  // Morpho vaults: https://app.morpho.org/base/vault/0x.../name#...
+  if (host === "app.morpho.org") {
+    const parts = u.pathname.split("/").filter(Boolean);
+    // [chain, "vault", address, ...]
+    const chainSeg = parts[0];
+    const kind = parts[1];
+    const addr = parts[2];
+    if (kind === "vault" && /^0x[a-fA-F0-9]{40}$/.test(String(addr || ""))) {
+      const chain = normalizeChainSegment(chainSeg);
+      const address = String(addr).toLowerCase();
+      return {
+        kind: "pool",
+        ref: `contract:${chain}:${address}`,
+        poolKey: `${chain}:${address}`,
+        protocolHint: "defillama:morpho",
+      };
+    }
+  }
+
+  // Aave reserve overview: underlying token + marketName
+  // https://app.aave.com/reserve-overview/?underlyingAsset=0x...&marketName=proto_mainnet_v3
+  if (host === "app.aave.com" && u.pathname.includes("reserve-overview")) {
+    const underlying = u.searchParams.get("underlyingAsset");
+    const marketName = String(u.searchParams.get("marketName") || "").toLowerCase();
+    const chain =
+      marketName.includes("base") ? "base"
+        : marketName.includes("arb") || marketName.includes("arbitrum") ? "arbitrum"
+        : marketName.includes("op") || marketName.includes("optimism") ? "optimism"
+        : marketName.includes("polygon") ? "polygon"
+        : "ethereum";
+    if (underlying && /^0x[a-fA-F0-9]{40}$/.test(underlying)) {
+      const addr = underlying.toLowerCase();
+      return {
+        kind: "token",
+        ref: `token:${chain}:${addr}`,
+        protocolHint: marketName.includes("v3") ? "defillama:aave-v3" : "defillama:aave",
+      };
+    }
+  }
+
+  return null;
+}
 
 function extractAuditorsHeuristic({ docsPack, defillamaApi } = {}) {
   const lines = Array.isArray(docsPack?.lines) ? docsPack.lines.join("\n") : "";
@@ -891,6 +1001,22 @@ app.get("/api/db/protocol", async (req, res) => {
     try {
       if (p.extraJson) out.extra = JSON.parse(p.extraJson);
     } catch {}
+
+    // Hacked / weakest link (protocol-level)
+    try {
+      const hacks = await getDefiLlamaHacksCached().catch(() => []);
+      const names = [p.name, out.extra?.protocol?.name, out.extra?.protocol?.slug].filter(Boolean);
+      const incidents = findHacksForNames(hacks, names);
+      out.security = incidents.length
+        ? {
+            hacked: true,
+            incidents,
+            weakestLink: { kind: "protocol", name: incidents[0]?.name || p.name || "Protocol", evidence: "DefiLlama hacks DB" },
+          }
+        : { hacked: false, incidents: [], weakestLink: null };
+    } catch {
+      out.security = { hacked: false, incidents: [], weakestLink: null };
+    }
     return res.json(out);
   } catch (err) {
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
@@ -920,14 +1046,24 @@ app.get("/api/db/pool/search", async (req, res) => {
     await localGraphInit().catch(() => {});
 
     // Prefer Neo4j pool contracts when available
+    let neo4jError = null;
     if (neo4jEnabled()) {
-      const results = await searchPoolsNeo4j({ q, limit }).catch(() => []);
-      if (results.length) return res.json({ ok: true, source: "neo4j", results });
+      try {
+        await neo4jInit();
+        const results = await searchPoolsNeo4j({ q, limit }).catch(() => []);
+        if (results.length) return res.json({ ok: true, source: "neo4j", results });
+
+        // If no address-based pools matched, try yield pools materialized as Asset nodes
+        const yieldPoolsNeo = await searchYieldPoolsNeo4j({ q, limit }).catch(() => []);
+        if (yieldPoolsNeo.length) return res.json({ ok: true, source: "neo4j", results: yieldPoolsNeo });
+      } catch (e) {
+        neo4jError = String(e?.message || e);
+      }
     }
 
     // Fallback: coworker-friendly pools stored in local_graph extra_json (DefiLlama yields)
     const yieldPools = await searchYieldPoolsLocal({ q, limit }).catch(() => []);
-    return res.json({ ok: true, source: "local_graph", results: yieldPools });
+    return res.json({ ok: true, source: "local_graph", neo4jError, results: yieldPools });
   } catch (err) {
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
@@ -941,7 +1077,78 @@ app.get("/api/db/pool/neighborhood", async (req, res) => {
     if (!neo4jEnabled()) return res.json({ ok: true, source: "local_graph", hit: false });
     const r = await getPoolNeighborhoodNeo4j({ chain, address, hops });
     if (!r.ok) return res.status(400).json(r);
-    return res.json({ ok: true, source: "neo4j", ...r });
+    const out = { ok: true, source: "neo4j", ...r };
+    try {
+      const hacks = await getDefiLlamaHacksCached().catch(() => []);
+      const protos = Array.isArray(r.protocols) ? r.protocols : [];
+      const names = protos.map((p) => p?.name || p?.id).filter(Boolean);
+      const incidents = findHacksForNames(hacks, names);
+      out.security = incidents.length
+        ? {
+            hacked: true,
+            incidents,
+            weakestLink: { kind: "related_protocol", name: incidents[0]?.name || "Related protocol", evidence: "DefiLlama hacks DB" },
+          }
+        : { hacked: false, incidents: [], weakestLink: null };
+    } catch {
+      out.security = { hacked: false, incidents: [], weakestLink: null };
+    }
+    return res.json(out);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+// Interactive graph API (Neo4j only)
+app.get("/api/graph/search", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    const limit = Number(req.query.limit || 25);
+    if (!neo4jEnabled()) return res.json({ ok: true, source: "local_graph", results: [] });
+    await neo4jInit();
+    const results = await searchGraphNeo4j({ q, limit }).catch(() => []);
+    return res.json({ ok: true, source: "neo4j", results });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.get("/api/graph/neighborhood", async (req, res) => {
+  try {
+    const ref = String(req.query.ref || "").trim();
+    const hops = Number(req.query.hops || 2);
+    if (!neo4jEnabled()) return res.json({ ok: true, source: "local_graph", hit: false, graph: { nodes: [], edges: [] } });
+    await neo4jInit();
+    const r = await getNeighborhoodGraphNeo4j({ ref, hops }).catch((e) => ({ ok: false, error: String(e?.message || e) }));
+    if (!r.ok) return res.status(400).json({ ok: false, error: r.error || "Neighborhood failed" });
+    // Attach security summary by matching hacked protocol names within returned nodes
+    const out = { ok: true, source: "neo4j", ...r };
+    try {
+      const hacks = await getDefiLlamaHacksCached().catch(() => []);
+      const names = (Array.isArray(r.graph?.nodes) ? r.graph.nodes : [])
+        .filter((n) => n?.kind === "protocol")
+        .map((n) => n?.label)
+        .filter(Boolean);
+      const incidents = findHacksForNames(hacks, names);
+      out.security = incidents.length
+        ? { hacked: true, incidents, weakestLink: { kind: "graph_node", name: incidents[0]?.name || "Unknown", evidence: "DefiLlama hacks DB" } }
+        : { hacked: false, incidents: [], weakestLink: null };
+    } catch {
+      out.security = { hacked: false, incidents: [], weakestLink: null };
+    }
+    return res.json(out);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.get("/api/resolve", async (req, res) => {
+  try {
+    const url = String(req.query.url || "").trim();
+    if (!url) return res.status(400).json({ ok: false, error: "Missing url" });
+    const r = tryResolveUrlToGraphRef(url);
+    if (!r) return res.json({ ok: true, hit: false });
+    return res.json({ ok: true, hit: true, ...r });
   } catch (err) {
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }

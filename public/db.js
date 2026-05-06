@@ -24,6 +24,7 @@ const poolResultsEl = document.getElementById("pool-results");
 const poolMetaEl = document.getElementById("pool-meta");
 const poolSelectedEl = document.getElementById("pool-selected");
 const poolGraphEl = document.getElementById("pool-graph");
+const poolSecurityEl = document.getElementById("pool-security");
 const poolRelatedEl = document.getElementById("pool-related");
 const poolRelatedEmpty = document.getElementById("pool-related-empty");
 
@@ -49,6 +50,8 @@ function clearProtocol() {
   auditorsEl.textContent = "";
   summaryEl.textContent = "";
   if (auditLinksEl) auditLinksEl.innerHTML = "";
+  const secEl = document.getElementById("p-security");
+  if (secEl) secEl.innerHTML = "";
   statsEl.textContent = "–";
   docsEl.innerHTML = "";
   rawEl.textContent = "";
@@ -66,6 +69,7 @@ function clearPool() {
     poolGraphEl.style.display = "none";
     poolGraphEl.innerHTML = "";
   }
+  if (poolSecurityEl) poolSecurityEl.innerHTML = "";
   if (poolRelatedEl) poolRelatedEl.innerHTML = "";
   if (poolRelatedEmpty) poolRelatedEmpty.style.display = "block";
 }
@@ -237,6 +241,21 @@ async function openPool(poolKey) {
     protocols: protos,
     pools: pools.filter((x) => !(String(x.address || "").toLowerCase() === parsed.address && String(x.chain || "").toLowerCase() === parsed.chain)),
   });
+
+  if (poolSecurityEl) {
+    const sec = r.security || {};
+    if (sec?.hacked && Array.isArray(sec.incidents) && sec.incidents.length) {
+      const items = sec.incidents
+        .slice(0, 4)
+        .map((x) => `${escapeHtml(x.name)} <span style="color:#94a3b8;">(${escapeHtml(String(x.classification || "incident"))})</span>`)
+        .join("<br/>");
+      poolSecurityEl.innerHTML = `<div><b>Hacks</b>: Found ${sec.incidents.length} related incident(s). Weakest link: <b>${escapeHtml(
+        sec.weakestLink?.name || "unknown"
+      )}</b><br/>${items}</div>`;
+    } else {
+      poolSecurityEl.innerHTML = `<div><b>Hacks</b>: No known incidents found in related protocols (DefiLlama hacks DB).</div>`;
+    }
+  }
 
   if (poolRelatedEl) {
     poolRelatedEl.innerHTML = "";
@@ -421,6 +440,22 @@ async function openProtocol(id) {
       : "";
   }
 
+  const secEl = document.getElementById("p-security");
+  if (secEl) {
+    const sec = proto.security || {};
+    if (sec?.hacked && Array.isArray(sec.incidents) && sec.incidents.length) {
+      const items = sec.incidents
+        .slice(0, 4)
+        .map((x) => `${escapeHtml(x.name)} <span style="color:#94a3b8;">(${escapeHtml(String(x.classification || "incident"))})</span>`)
+        .join("<br/>");
+      secEl.innerHTML = `<div><b>Hacks</b>: This protocol appears in the hacks DB. Weakest link: <b>${escapeHtml(
+        sec.weakestLink?.name || "unknown"
+      )}</b><br/>${items}</div>`;
+    } else {
+      secEl.innerHTML = `<div><b>Hacks</b>: No known incidents found for this protocol (DefiLlama hacks DB).</div>`;
+    }
+  }
+
   const tokenCount = Array.isArray(p.tokens) ? p.tokens.length : 0;
   const contractCount = Array.isArray(p.contracts) ? p.contracts.length : 0;
   const docCount = Array.isArray(p.docPages) ? p.docPages.length : 0;
@@ -492,7 +527,13 @@ async function doSearch() {
   metaEl.textContent = "Searching…";
   try {
     const r = await apiGet(`/api/db/search?q=${encodeURIComponent(q)}&limit=25`);
-    renderResults(r.results);
+    const rows = Array.isArray(r.results) ? r.results : [];
+    if (rows.length === 1 && rows[0]?.id) {
+      metaEl.textContent = `Found 1 result • opening…`;
+      await openProtocol(rows[0].id);
+      return;
+    }
+    renderResults(rows);
     metaEl.textContent = `Search source: ${r.source || "db"}`;
   } catch (e) {
     metaEl.textContent = `Search failed: ${String(e?.message || e)}`;
@@ -510,7 +551,22 @@ async function doPoolSearch() {
   if (poolMetaEl) poolMetaEl.textContent = "Searching pools…";
   try {
     const r = await apiGet(`/api/db/pool/search?q=${encodeURIComponent(q)}&limit=25`);
-    renderPoolResults(r.results);
+    const rows = Array.isArray(r.results) ? r.results : [];
+    if (rows.length === 1) {
+      const only = rows[0];
+      if (only?.kind === "yield_pool" && only?.protocolId) {
+        if (poolMetaEl) poolMetaEl.textContent = `Found 1 pool (via ${r.source || "db"}) • opening protocol…`;
+        await openProtocol(only.protocolId);
+        return;
+      }
+      if (only?.chain && only?.address) {
+        const key = keyForPool(only.chain, only.address);
+        if (poolMetaEl) poolMetaEl.textContent = `Found 1 pool (via ${r.source || "db"}) • opening…`;
+        await openPool(key);
+        return;
+      }
+    }
+    renderPoolResults(rows);
     if (poolMetaEl) poolMetaEl.textContent = `Pool search source: ${r.source || "neo4j"}`;
   } catch (e) {
     if (poolMetaEl) poolMetaEl.textContent = `Pool search failed: ${String(e?.message || e)}`;

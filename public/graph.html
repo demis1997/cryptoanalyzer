@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Graph • Protocol Inspector</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="app__header">
+        <h1>Graph</h1>
+        <p class="app__subtitle">Search a protocol/pool/token and explore exposures + weakest links visually.</p>
+        <nav class="nav" aria-label="Primary">
+          <a href="/">Home</a>
+          <a href="/agent.html">Agent</a>
+          <a href="/db.html">Database</a>
+          <a class="nav__active" href="/graph.html">Graph</a>
+        </nav>
+      </header>
+
+      <section class="card card--input">
+        <div class="field__label">Search</div>
+        <div class="field__row">
+          <input id="g-q" class="field__input" placeholder="pendle / usdc / mre7yield / yieldpool:…" />
+          <button id="g-search-btn" class="btn btn--ghost" type="button">Search</button>
+        </div>
+        <div id="g-meta" class="field__hint"></div>
+        <ul id="g-results" class="list" style="margin-top: 10px;"></ul>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2 class="card__title">Graph</h2>
+          <div id="g-canvas" class="summary" style="display:none;"></div>
+          <p id="g-empty" class="card__empty">Search to load a node graph.</p>
+        </article>
+        <article class="card">
+          <h2 class="card__title">Details</h2>
+          <div id="g-details" class="metric metric--muted">–</div>
+          <div id="g-security" class="metric metric--muted" style="margin-top:10px;"></div>
+          <div class="summary" style="margin-top:12px;">
+            <div style="display:flex; gap:10px; flex-wrap:wrap;">
+              <label class="field__hint" style="cursor:pointer;"><input type="checkbox" id="f-protocol" checked /> Protocols</label>
+              <label class="field__hint" style="cursor:pointer;"><input type="checkbox" id="f-yield" checked /> Yield pools</label>
+              <label class="field__hint" style="cursor:pointer;"><input type="checkbox" id="f-asset" checked /> Assets</label>
+              <label class="field__hint" style="cursor:pointer;"><input type="checkbox" id="f-contract" checked /> Contracts</label>
+              <label class="field__hint" style="cursor:pointer;"><input type="checkbox" id="f-token" checked /> Tokens</label>
+            </div>
+          </div>
+        </article>
+      </section>
+    </div>
+
+    <script type="module" src="graph.js"></script>
+  </body>
+</html>
+

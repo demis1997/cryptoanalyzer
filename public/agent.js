@@ -266,7 +266,21 @@ async function doPoolSearch() {
   if (poolMetaEl) poolMetaEl.textContent = "Searching pools…";
   try {
     const r = await apiGet(`/api/db/pool/search?q=${encodeURIComponent(q)}&limit=25`);
-    renderPoolResults(r.results);
+    const rows = Array.isArray(r.results) ? r.results : [];
+    if (rows.length === 1) {
+      const only = rows[0];
+      if (only?.kind === "yield_pool" && only?.protocolId) {
+        if (poolMetaEl) poolMetaEl.textContent = `Found 1 pool • opening protocol…`;
+        window.location.href = `/db.html#${encodeURIComponent(only.protocolId)}`;
+        return;
+      }
+      if (only?.chain && only?.address) {
+        if (poolMetaEl) poolMetaEl.textContent = `Found 1 pool • opening neighborhood…`;
+        await openPool(keyForPool(only.chain, only.address));
+        return;
+      }
+    }
+    renderPoolResults(rows);
     if (poolMetaEl) poolMetaEl.textContent = `Pool search source: ${r.source || "db"}`;
   } catch (e) {
     if (poolMetaEl) poolMetaEl.textContent = `Pool search failed: ${String(e?.message || e)}`;
