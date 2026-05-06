@@ -265,6 +265,25 @@ async function doPoolSearch() {
   clearPoolUi();
   if (poolMetaEl) poolMetaEl.textContent = "Searching pools…";
   try {
+    // If a pool/reserve URL is pasted, resolve it first.
+    if (/^https?:\/\//i.test(q)) {
+      if (poolMetaEl) poolMetaEl.textContent = "Recognizing link…";
+      const rr = await apiGet(`/api/resolve?url=${encodeURIComponent(q)}`);
+      if (rr?.hit) {
+        if (rr.kind === "pool" && rr.poolKey) {
+          if (poolMetaEl) poolMetaEl.textContent = "Opening pool neighborhood…";
+          await openPool(rr.poolKey);
+          return;
+        }
+        if (rr.kind === "token" && rr.protocolHint) {
+          if (poolMetaEl) poolMetaEl.textContent = "Opening related protocol…";
+          window.location.href = `/db.html#${encodeURIComponent(rr.protocolHint)}`;
+          return;
+        }
+      }
+      // fall through to text search if not resolved
+    }
+
     const r = await apiGet(`/api/db/pool/search?q=${encodeURIComponent(q)}&limit=25`);
     const rows = Array.isArray(r.results) ? r.results : [];
     if (rows.length === 1) {
