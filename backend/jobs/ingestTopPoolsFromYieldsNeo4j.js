@@ -1,6 +1,7 @@
 import "dotenv/config";
 import fetch from "node-fetch";
 import { neo4jEnabled, neo4jInit, neo4jClose, getProtocolGraphNeo4jById, upsertProtocolExtraNeo4j } from "../db/neo4jGraph.js";
+import { localGraphInit, upsertProtocolExtra as upsertProtocolExtraLocal } from "../db/localGraph.js";
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -39,6 +40,7 @@ function cleanPoolLabel(p) {
 async function main() {
   if (!neo4jEnabled()) throw new Error("Neo4j not enabled.");
   await neo4jInit();
+  await localGraphInit().catch(() => {});
 
   const LIMIT = Number(process.env.TOP_N || process.env.N || 100) || 100;
   const DELAY_MS = Number(process.env.DELAY_MS || 40) || 40;
@@ -102,6 +104,8 @@ async function main() {
 
     try {
       await upsertProtocolExtraNeo4j({ id, extra: next });
+      // Also write to local graph so pool search works even without Neo4j (e.g. Vercel).
+      await upsertProtocolExtraLocal({ id, name: String(p?.name || ""), url: String(p?.url || ""), extra: next }).catch(() => {});
       ok += 1;
     } catch (e) {
       failed += 1;

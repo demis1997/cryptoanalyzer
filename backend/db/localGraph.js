@@ -385,6 +385,55 @@ export async function upsertProtocolExtra({ id, name = null, url = null, extra =
   return { ok: true, id: pid };
 }
 
+// Search "poolsFromYields" stored inside protocols.extra_json (coworker-friendly pools, no addresses).
+export async function searchYieldPoolsLocal({ q, limit = 25 } = {}) {
+  const db = await getDb();
+  const query = String(q || "").trim().toLowerCase();
+  if (!query) return [];
+  const lim = Math.min(100, Math.max(1, Number(limit) || 25));
+  const like = `%${query.replace(/%/g, "")}%`;
+
+  // Narrow candidates via LIKE on extra_json (fast enough for our small local DB).
+  const candidates = all(
+    db,
+    `select id, name, extra_json
+     from protocols
+     where lower(coalesce(extra_json,'')) like ?
+     order by updated_at desc
+     limit 200`,
+    [like]
+  );
+
+  const out = [];
+  for (const row of candidates) {
+    let extra = null;
+    try {
+      extra = row?.extra_json ? JSON.parse(row.extra_json) : null;
+    } catch {
+      extra = null;
+    }
+    const pools = Array.isArray(extra?.protocol?.poolsFromYields) ? extra.protocol.poolsFromYields : [];
+    for (const p of pools) {
+      const name = String(p?.name || "").trim();
+      if (!name) continue;
+      const hay = `${name} ${p?.chain || ""} ${p?.project || ""}`.toLowerCase();
+      if (!hay.includes(query)) continue;
+      out.push({
+        kind: "yield_pool",
+        protocolId: row.id,
+        protocolName: row.name || row.id,
+        label: name,
+        chain: p?.chain || null,
+        tvlUsd: typeof p?.tvlUsd === "number" ? p.tvlUsd : null,
+        apy: typeof p?.apy === "number" ? p.apy : null,
+        exposure: p?.exposure || null,
+      });
+      if (out.length >= lim) return out;
+    }
+  }
+  return out;
+}
+
 export async function upsertProtocolGraph({
   protocol,
   tokens = [],

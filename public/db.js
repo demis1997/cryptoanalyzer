@@ -133,16 +133,21 @@ function renderPoolResults(results) {
   }
   for (const r of rows.slice(0, 30)) {
     const li = document.createElement("li");
+    const isYield = r.kind === "yield_pool";
     const label = r.label || "Pool/Market";
-    const type = r.type ? String(r.type) : "pool";
-    const key = keyForPool(r.chain, r.address);
+    const type = isYield ? "yield_pool" : (r.type ? String(r.type) : "pool");
+    const key = isYield ? (r.protocolName ? `${safeText(r.protocolName, 40)} • ${safeText(label, 60)}` : safeText(label, 80)) : keyForPool(r.chain, r.address);
     li.innerHTML = `
       <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;">
         <div>
           <div>${safeText(label, 90)} <span style="color:#9ca3af;">• ${escapeHtml(type)}</span></div>
-          <div class="metric metric--muted mono-inline">${escapeHtml(key)}</div>
+          <div class="metric metric--muted mono-inline">${escapeHtml(isYield ? prettyId(r.protocolId || "") : key)}</div>
         </div>
-        <button class="btn btn--ghost" style="padding:6px 12px;font-size:12px;" data-pool="${escapeHtml(key)}">Open</button>
+        ${
+          isYield
+            ? `<button class="btn btn--ghost" style="padding:6px 12px;font-size:12px;" data-id="${escapeHtml(r.protocolId)}">Open protocol</button>`
+            : `<button class="btn btn--ghost" style="padding:6px 12px;font-size:12px;" data-pool="${escapeHtml(key)}">Open</button>`
+        }
       </div>
     `;
     poolResultsEl.appendChild(li);

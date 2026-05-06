@@ -35,6 +35,7 @@ import {
   getProtocolGraph as getProtocolGraphLocal,
   getProtocolGraphById as getProtocolGraphLocalById,
   searchProtocols as searchLocalProtocols,
+  searchYieldPoolsLocal,
   getLocalGraphOverview,
   upsertProtocolGraph as upsertProtocolGraphLocal,
   upsertProtocolExtra as upsertProtocolExtraLocal,
@@ -896,9 +897,17 @@ app.get("/api/db/pool/search", async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
     const limit = Number(req.query.limit || 25);
-    if (!neo4jEnabled()) return res.json({ ok: true, source: "local_graph", results: [] });
-    const results = await searchPoolsNeo4j({ q, limit }).catch(() => []);
-    return res.json({ ok: true, source: "neo4j", results });
+    await localGraphInit().catch(() => {});
+
+    // Prefer Neo4j pool contracts when available
+    if (neo4jEnabled()) {
+      const results = await searchPoolsNeo4j({ q, limit }).catch(() => []);
+      if (results.length) return res.json({ ok: true, source: "neo4j", results });
+    }
+
+    // Fallback: coworker-friendly pools stored in local_graph extra_json (DefiLlama yields)
+    const yieldPools = await searchYieldPoolsLocal({ q, limit }).catch(() => []);
+    return res.json({ ok: true, source: "local_graph", results: yieldPools });
   } catch (err) {
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
