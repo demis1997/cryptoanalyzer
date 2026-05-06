@@ -84,6 +84,8 @@ function lastAssistantMessageText(conversation) {
  * - CURSOR_CLOUD_AGENTS_REPOSITORY_SLUG (owner/repo) if auto-detection from URL is wrong
  * - CURSOR_CLOUD_AGENTS_MODEL — omit or use id from GET /v0/models
  * - CURSOR_CLOUD_AGENTS_BASE_URL (default: https://api.cursor.com)
+ * - CURSOR_CLOUD_AGENTS_TIMEOUT_MS — poll budget when runJson does not pass timeoutMs (default 360000 = 6m)
+ * - CURSOR_CLOUD_AGENTS_HEAVY_STEP_TIMEOUT_MS — optional longer budget for large prompts (aiEnrich graph/architecture; default 600000 = 10m)
  */
 function normalizeRepoUrl(raw) {
   const u = String(raw || "").trim().replace(/\/+$/, "");
@@ -135,6 +137,16 @@ function uniqueSourceAttempts(repository, ref) {
   return out;
 }
 
+function parsePositiveIntEnv(name, fallback) {
+  const n = parseInt(String(process.env[name] || "").trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/** Polling budget when caller does not pass timeoutMs (Cloud Agents often exceed 2m for large prompts). */
+function defaultCloudAgentsPollMs() {
+  return parsePositiveIntEnv("CURSOR_CLOUD_AGENTS_TIMEOUT_MS", 360_000);
+}
+
 function launchErrorDetail(status, text, json) {
   const j = json && typeof json === "object" ? json : null;
   const msg = [j?.message, j?.error, typeof j?.detail === "string" ? j.detail : null].filter(Boolean).join("; ");
@@ -165,7 +177,8 @@ export function createCursorCloudAgentsProvider() {
 
   return {
     kind: "cursor_cloud_agents",
-    async runJson({ system, user, timeoutMs = 120_000 } = {}) {
+    async runJson({ system, user, timeoutMs } = {}) {
+      const pollBudgetMs = Number(timeoutMs) >= 10_000 ? Number(timeoutMs) : defaultCloudAgentsPollMs();
       const sys = clamp(system, 3_000);
       const usr = clamp(user, 18_000);
 
@@ -195,7 +208,7 @@ export function createCursorCloudAgentsProvider() {
           launch = await fetchJson(`${baseUrl}/v0/agents`, {
             method: "POST",
             headers,
-            timeoutMs: Math.min(25_000, timeoutMs),
+            timeoutMs: Math.min(25_000, pollBudgetMs),
             body: launchBody,
           });
 
@@ -245,7 +258,7 @@ export function createCursorCloudAgentsProvider() {
       }
 
       // 2) Poll status until finished or timeout
-      const deadline = Date.now() + Math.max(10_000, Number(timeoutMs) || 120_000);
+      const deadline = Date.now() + Math.max(10_000, pollBudgetMs);
       let status = String(launch.json?.status || "").toUpperCase();
       let lastStatusJson = launch.json;
       let delay = 1_250;
@@ -278,10 +291,14 @@ export function createCursorCloudAgentsProvider() {
       }
 
       if (String(status).toUpperCase() !== "FINISHED") {
-        throw new LlmProviderError("Cursor Cloud Agent timed out waiting for FINISHED", {
-          code: "timeout",
-          cause: JSON.stringify(lastStatusJson || {}, null, 2).slice(0, 1200),
-        });
+        const st = String(status || "UNKNOWN").toUpperCase();
+        throw new LlmProviderError(
+          `Cursor Cloud Agent timed out waiting for FINISHED (last status: ${st}; try CURSOR_CLOUD_AGENTS_TIMEOUT_MS or pass a larger timeoutMs for heavy steps)`,
+          {
+            code: "timeout",
+            cause: JSON.stringify(lastStatusJson || {}, null, 2).slice(0, 1200),
+          }
+        );
       }
 
       // 3) Fetch conversation and parse last assistant JSON

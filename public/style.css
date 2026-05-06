@@ -24,6 +24,42 @@ body {
   margin-bottom: 24px;
 }
 
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.nav a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  text-decoration: none;
+  color: #e5e7eb;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(2, 6, 23, 0.25);
+  font-size: 13px;
+}
+
+.nav a:hover {
+  border-color: rgba(56, 189, 248, 0.55);
+  background: rgba(2, 6, 23, 0.35);
+}
+
+.nav a.nav__active {
+  border-color: rgba(56, 189, 248, 0.75);
+  box-shadow: 0 10px 25px rgba(2, 6, 23, 0.25);
+}
+
+.mono-inline {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+}
+
 .app__header h1 {
   margin: 0 0 8px;
   font-size: 28px;

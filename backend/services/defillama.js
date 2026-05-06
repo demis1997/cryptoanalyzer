@@ -295,6 +295,69 @@ export async function getDefiLlamaProtocolInformation(slug) {
   return { description: info || null, evidence: ["Protocol Information (DefiLlama protocol page)", protoUrl] };
 }
 
+/**
+ * Rich protocol metadata from DefiLlama JSON API (used for LLM ecosystem context + graph hints).
+ * @see https://api.llama.fi/protocol/{slug}
+ */
+export async function getDefiLlamaProtocolApiDetail(slug) {
+  if (!slug) return null;
+  const apiUrl = `https://api.llama.fi/protocol/${encodeURIComponent(String(slug).trim())}`;
+  try {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 14_000);
+    try {
+      const resp = await fetch(apiUrl, {
+        headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" },
+        signal: controller.signal,
+      });
+      if (!resp.ok) return null;
+      const j = await resp.json().catch(() => null);
+      if (!j || typeof j !== "object") return null;
+
+      const oracles = Array.isArray(j.oraclesBreakdown)
+        ? j.oraclesBreakdown.map((o) => o?.name).filter(Boolean).slice(0, 14)
+        : [];
+
+      let parentProtocol = j.parentProtocol || null;
+      if (parentProtocol && typeof parentProtocol === "object") {
+        parentProtocol = {
+          name: parentProtocol.name || null,
+          slug: parentProtocol.slug || null,
+          url: parentProtocol.url || null,
+        };
+      } else if (typeof parentProtocol === "string") {
+        parentProtocol = { name: parentProtocol, slug: null, url: null };
+      }
+
+      const addr = typeof j.address === "string" ? j.address.trim() : "";
+      const tokenAddress = /^0x[a-fA-F0-9]{40}$/.test(addr) ? addr.toLowerCase() : null;
+
+      return {
+        slug: String(slug),
+        apiUrl,
+        name: typeof j.name === "string" ? j.name : null,
+        category: typeof j.category === "string" ? j.category : null,
+        chains: Array.isArray(j.chains) ? j.chains : [],
+        description:
+          typeof j.description === "string" ? String(j.description).slice(0, 2_800) : null,
+        methodology:
+          typeof j.methodology === "string" ? String(j.methodology).slice(0, 4_000) : null,
+        tokenSymbol: typeof j.symbol === "string" ? j.symbol : null,
+        tokenAddress,
+        auditLinks: Array.isArray(j.audit_links) ? j.audit_links.slice(0, 12) : [],
+        oracles,
+        parentProtocol,
+        github: Array.isArray(j.github) ? j.github.slice(0, 6) : [],
+        geckoId: typeof j.gecko_id === "string" ? j.gecko_id : null,
+      };
+    } finally {
+      clearTimeout(t);
+    }
+  } catch {
+    return null;
+  }
+}
+
 async function fetchTextLimited(url, { maxBytes = 250_000, timeoutMs = 12_000 } = {}) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);

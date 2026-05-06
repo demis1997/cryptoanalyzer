@@ -115,6 +115,7 @@ export async function discoverContractConnections({
       return existing;
     }
     const n = {
+      id: key,
       address: a,
       label: label || a,
       type: type || "unknown",

@@ -50,6 +50,7 @@ const tokenLiquidityEmpty = document.getElementById("token-liquidity-empty");
 const riskBtn = document.getElementById("risk-btn");
 const reportPdfBtn = document.getElementById("report-pdf-btn");
 const reportJsonBtn = document.getElementById("report-json-btn");
+const chatgptResearchBtn = document.getElementById("chatgpt-research-btn");
 const riskOverall = document.getElementById("risk-overall");
 const riskStatus = document.getElementById("risk-status");
 const riskSections = document.getElementById("risk-sections");
@@ -125,27 +126,40 @@ function renderConnections(connections) {
   }
   connectionsEmpty.style.display = "none";
 
-  const byAddr = new Map(nodes.map((n) => [String(n.address || "").toLowerCase(), n]));
-  const fmt = (a) => (a ? `${String(a).slice(0, 10)}…${String(a).slice(-8)}` : "—");
+  const byKey = new Map();
+  for (const n of nodes) {
+    const id = String(n.id || "").toLowerCase();
+    const addr = String(n.address || "").toLowerCase();
+    if (id) byKey.set(id, n);
+    if (addr) byKey.set(addr, n);
+  }
+  const fmt = (raw, n) => {
+    const a = n?.address || raw;
+    if (a && /^0x[a-f0-9]{40}$/i.test(String(a)))
+      return `${String(a).slice(0, 10)}…${String(a).slice(-8)}`;
+    return raw ? String(raw).slice(0, 42) + (String(raw).length > 42 ? "…" : "") : "—";
+  };
 
   edges.slice(0, 120).forEach((e) => {
-    const from = byAddr.get(String(e.from || "").toLowerCase());
-    const to = byAddr.get(String(e.to || "").toLowerCase());
+    const fk = String(e.from || "").toLowerCase();
+    const tk = String(e.to || "").toLowerCase();
+    const from = byKey.get(fk);
+    const to = byKey.get(tk);
     const rel = e.relation || "connected";
     const li = document.createElement("li");
     li.innerHTML = `
-      <div>${(from?.label || "Contract")} <span style="color:#9ca3af;">→</span> ${(to?.label || "Contract")}</div>
+      <div>${(from?.label || from?.name || "Node")} <span style="color:#9ca3af;">→</span> ${(to?.label || to?.name || "Node")}</div>
       <div class="tag" style="margin-top:6px;">
         <span class="tag__label">Relation</span>
         <span class="tag__value">${rel}</span>
       </div>
       <div class="tag" style="margin-top:6px;">
         <span class="tag__label">From</span>
-        <span class="tag__value" title="${e.from || ""}">${fmt(e.from)}</span>
+        <span class="tag__value" title="${e.from || ""}">${fmt(e.from, from)}</span>
       </div>
       <div class="tag" style="margin-top:6px;">
         <span class="tag__label">To</span>
-        <span class="tag__value" title="${e.to || ""}">${fmt(e.to)}</span>
+        <span class="tag__value" title="${e.to || ""}">${fmt(e.to, to)}</span>
       </div>
     `;
     connectionsList.appendChild(li);
@@ -484,18 +498,28 @@ function renderAllocations(allocations) {
 function renderEvidence(data) {
   evidenceList.innerHTML = "";
 
+  const structured = Array.isArray(data?.evidenceNotes) ? data.evidenceNotes.filter((n) => n && (n.label || n.source || n.detail)) : [];
+  const useStructured = structured.length > 0;
   const lines = [];
 
-  if (Array.isArray(data?.tvl?.evidence)) {
-    data.tvl.evidence.forEach((e) => lines.push({ label: "TVL", text: e || "" }));
-  }
+  if (!useStructured) {
+    if (Array.isArray(data?.tvl?.evidence)) {
+      data.tvl.evidence.forEach((e) => lines.push({ label: "TVL", text: e || "" }));
+    }
 
-  if (Array.isArray(data?.txsPerDay?.evidence)) {
-    data.txsPerDay.evidence.forEach((e) => lines.push({ label: "Tx/day", text: e || "" }));
-  }
+    if (Array.isArray(data?.txsPerDay?.evidence)) {
+      data.txsPerDay.evidence.forEach((e) => lines.push({ label: "Tx/day", text: e || "" }));
+    }
 
-  if (Array.isArray(data?.protocol?.totalRaisedEvidence)) {
-    data.protocol.totalRaisedEvidence.forEach((e) => lines.push({ label: "Total raised", text: e || "" }));
+    if (Array.isArray(data?.protocol?.totalRaisedEvidence)) {
+      data.protocol.totalRaisedEvidence.forEach((e) => lines.push({ label: "Total raised", text: e || "" }));
+    }
+
+    if (Array.isArray(data?.protocol?.auditsVerified?.evidence)) {
+      data.protocol.auditsVerified.evidence.forEach((e) =>
+        lines.push({ label: "Audits / verification", text: e || "" })
+      );
+    }
   }
 
   if (Array.isArray(data?.contracts)) {
@@ -509,12 +533,26 @@ function renderEvidence(data) {
     });
   }
 
-  if (!lines.length) {
+  if (!structured.length && !lines.length) {
     evidenceEmpty.style.display = "block";
     return;
   }
 
   evidenceEmpty.style.display = "none";
+
+  structured.forEach((n) => {
+    const li = document.createElement("li");
+    const detail = n.detail ? String(n.detail) : "";
+    li.innerHTML = `
+      <div>${n.label || ""}</div>
+      <div class="tag">
+        <span class="tag__label">Source</span>
+        <span class="tag__value">${n.source || "—"}</span>
+      </div>
+      ${detail ? `<div style="margin-top:0.35rem;opacity:0.92;font-size:0.9em">${detail}</div>` : ""}
+    `;
+    evidenceList.appendChild(li);
+  });
 
   lines.forEach((l) => {
     const li = document.createElement("li");
@@ -625,6 +663,54 @@ function safeFilenamePart(value) {
     .slice(0, 60);
 }
 
+function buildChatGptResearchPrompt({ url, protocolName } = {}) {
+  const u = String(url || "").trim();
+  const name = String(protocolName || "").trim();
+  return `
+You are a DeFi protocol researcher.
+
+Protocol URL: ${u || "—"}
+Protocol name (if known): ${name || "—"}
+
+Tasks:
+1) Find ALL audits/security reviews for this protocol. Output:
+   - auditor firm name
+   - report title
+   - report date (if available)
+   - link to the report (PDF/URL)
+   - which parts were audited (scope) if stated
+2) Estimate "audit coverage": what % of core deployed contracts are covered by public audits (justify with evidence).
+3) Build an ecosystem graph:
+   - subject protocol -> integrated tokens/assets -> issuer protocols (e.g. stETH -> Lido)
+   - subject protocol -> integrated protocols (DEXs, oracles, bridges, lenders, etc.)
+   - expand 2 hops: also include protocols connected to those protocols
+4) Return BOTH:
+   - a concise bullet summary with citations (URLs)
+   - a Mermaid diagram (graph TD) with labeled edges and URLs in node labels when relevant
+
+Rules:
+- Don’t guess. If unsure, say "unknown" and list what you tried.
+- Prefer primary sources: official docs/security pages, audit PDFs, and reputable auditor sites.
+`.trim();
+}
+
+function openChatGptWithPrompt(prompt) {
+  const p = String(prompt || "").trim();
+  if (!p) return;
+  try {
+    window.postMessage({ type: "PROTOCOL_INSPECTOR_CHATGPT_AUTOSEND", prompt: p }, "*");
+  } catch {
+    // ignore
+  }
+  const w = window.open("https://chatgpt.com/", "_blank", "noopener,noreferrer");
+  if (!w) {
+    navigator.clipboard?.writeText(p).catch(() => {});
+    alert("Popup blocked. Copied prompt to clipboard—open ChatGPT and paste.");
+    return;
+  }
+  navigator.clipboard?.writeText(p).catch(() => {});
+}
+
 function downloadJson(filename, data) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -696,5 +782,16 @@ reportJsonBtn?.addEventListener("click", () => {
     riskAssessment: lastRubric,
   };
   downloadJson(`${safeFilenamePart(name)}-report.json`, payload);
+});
+
+chatgptResearchBtn?.addEventListener("click", () => {
+  const url = urlInput?.value?.trim() || lastAnalysis?.protocol?.url || lastAnalysis?.origin || "";
+  if (!url) {
+    alert("Paste a protocol URL first.");
+    return;
+  }
+  const protocolName = lastAnalysis?.protocol?.name || "";
+  const prompt = buildChatGptResearchPrompt({ url, protocolName });
+  openChatGptWithPrompt(prompt);
 });
 

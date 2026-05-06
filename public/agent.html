@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Agent • Protocol Inspector</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="app__header">
+        <h1>Agent</h1>
+        <p class="app__subtitle">
+          Paste a protocol URL. The agent will fetch a summary, auditors, risk score, and show related protocols (up to 4 hops).
+        </p>
+        <nav class="nav" aria-label="Primary">
+          <a href="/">Home</a>
+          <a class="nav__active" href="/agent.html">Agent</a>
+          <a href="/db.html">Database</a>
+        </nav>
+      </header>
+
+      <section class="card card--input">
+        <form id="agent-form">
+          <label for="agent-url" class="field__label">Protocol website</label>
+          <div class="field__row">
+            <input id="agent-url" type="url" class="field__input" placeholder="https://lido.fi" required />
+            <button id="agent-run" type="submit" class="btn btn--primary">Run</button>
+            <button id="agent-download" type="button" class="btn btn--ghost" disabled>Download report</button>
+          </div>
+          <label class="field__hint" style="display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; cursor: pointer; max-width: 42rem;">
+            <input type="checkbox" id="agent-force" style="margin-top: 3px;" />
+            <span>Force refresh (re-crawl + overwrite graph)</span>
+          </label>
+          <div id="agent-meta" class="field__hint"></div>
+        </form>
+      </section>
+
+      <section class="grid grid--meta">
+        <article class="card">
+          <h2 class="card__title">Protocol summary</h2>
+          <div id="a-name" class="metric metric--primary">–</div>
+          <div id="a-url" class="metric metric--muted"></div>
+          <div id="a-auditors" class="metric metric--muted"></div>
+          <div id="a-desc" class="metric metric--muted" style="margin-top:10px;"></div>
+        </article>
+        <article class="card">
+          <h2 class="card__title">Risk</h2>
+          <div id="a-risk" class="metric metric--primary">–</div>
+          <div id="a-risk-note" class="metric metric--muted"></div>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2 class="card__title">Related protocols (up to 4 hops)</h2>
+          <ul id="a-related" class="list"></ul>
+          <p id="a-related-empty" class="card__empty">Run the agent to see related protocols.</p>
+        </article>
+        <article class="card">
+          <h2 class="card__title">Raw output</h2>
+          <pre id="a-raw" style="margin:0;white-space:pre-wrap;font-size:12px;color:#cbd5e1;max-height:420px;overflow:auto;"></pre>
+        </article>
+      </section>
+    </div>
+
+    <script type="module" src="agent.js"></script>
+  </body>
+</html>
+

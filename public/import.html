@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Import & Search • Protocol Inspector</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="app__header">
+        <h1>Import & Search</h1>
+        <p class="app__subtitle">
+          Upload a JSON/CSV relationship file, save it into the local graph DB, then search and visualize a protocol.
+        </p>
+        <nav class="nav" aria-label="Primary">
+          <a href="/">Home</a>
+          <a href="/agent.html">Agent</a>
+          <a href="/db.html">Database</a>
+          <a class="nav__active" href="/import.html">Import</a>
+        </nav>
+      </header>
+
+      <section class="card card--input">
+        <div class="field__label">Upload JSON or CSV</div>
+        <div class="field__row">
+          <input id="import-file" type="file" class="field__input" accept=".json,.csv,application/json,text/csv" />
+          <button id="import-btn" type="button" class="btn btn--primary">Import</button>
+        </div>
+        <div id="import-status" class="field__hint">Choose a file like `pendle_relationships.json`.</div>
+      </section>
+
+      <section class="card card--input">
+        <div class="field__label">Upload DOCX research report</div>
+        <div class="field__row">
+          <input id="docx-file" type="file" class="field__input" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+          <button id="docx-btn" type="button" class="btn btn--primary">Import DOCX</button>
+          <button id="view-docx-btn" type="button" class="btn btn--ghost" disabled>View full report</button>
+        </div>
+        <div class="field__hint">We’ll extract and store all text + parsed fields (protocol name, URL, auditors, risk score).</div>
+      </section>
+
+      <section class="card card--input">
+        <div class="field__label">Search protocol</div>
+        <div class="field__row">
+          <input id="search-q" type="text" class="field__input" placeholder="Pendle" />
+          <button id="search-btn" type="button" class="btn btn--ghost">Search</button>
+        </div>
+        <ul id="search-results" class="list" style="margin-top:10px;"></ul>
+      </section>
+
+      <section class="grid grid--meta">
+        <article class="card">
+          <h2 class="card__title">Protocol overview</h2>
+          <div id="protocol-name" class="metric metric--primary">–</div>
+          <div id="protocol-url-display" class="metric metric--muted">Import a file, then search.</div>
+          <div id="protocol-audits" class="metric metric--muted"></div>
+        </article>
+        <article class="card">
+          <h2 class="card__title">Risk score (imported)</h2>
+          <div id="risk-score" class="metric metric--primary">–</div>
+          <div id="risk-score-note" class="metric metric--muted"></div>
+        </article>
+        <article class="card">
+          <h2 class="card__title">Notes</h2>
+          <ul id="evidence-list" class="list"></ul>
+          <p class="card__empty" id="evidence-empty">No notes yet.</p>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2 class="card__title">Relationship diagram (edges)</h2>
+          <ul id="connections-list" class="list"></ul>
+          <p class="card__empty" id="connections-empty">No graph loaded yet.</p>
+        </article>
+        <article class="card">
+          <h2 class="card__title">Auditors</h2>
+          <ul id="auditor-list" class="list"></ul>
+          <p class="card__empty" id="auditor-empty">No auditors loaded yet.</p>
+        </article>
+      </section>
+
+      <section class="grid" style="margin-top:18px;">
+        <article class="card">
+          <h2 class="card__title">Summary (imported)</h2>
+          <div id="summary-text" class="metric metric--muted">—</div>
+          <div id="sources-text" class="metric metric--muted" style="margin-top:10px;"></div>
+        </article>
+        <article class="card">
+          <h2 class="card__title">Risk factors (imported)</h2>
+          <ul id="risk-list" class="list"></ul>
+          <p class="card__empty" id="risk-empty">No risk factors parsed yet.</p>
+        </article>
+      </section>
+
+      <section class="grid" style="margin-top:18px;">
+        <article class="card">
+          <h2 class="card__title">Tokens (imported addresses)</h2>
+          <ul id="token-list" class="list"></ul>
+          <p class="card__empty" id="token-empty">No tokens loaded yet.</p>
+        </article>
+        <article class="card">
+          <h2 class="card__title">Contracts (imported addresses)</h2>
+          <ul id="contract-list" class="list"></ul>
+          <p class="card__empty" id="contract-empty">No contracts loaded yet.</p>
+        </article>
+      </section>
+    </div>
+
+    <div id="docx-modal" style="display:none;position:fixed;inset:0;background:rgba(2,6,23,0.72);backdrop-filter:blur(8px);padding:22px;z-index:9999;overflow:auto;">
+      <div class="card" style="max-width:1100px;margin:0 auto;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+          <div>
+            <div class="metric metric--primary" style="font-size:16px;">Full DOCX report</div>
+            <div id="docx-modal-meta" class="metric metric--muted"></div>
+          </div>
+          <button id="docx-close-btn" class="btn btn--ghost">Close</button>
+        </div>
+        <div id="docx-render" style="margin-top:14px;background:#fff;color:#111827;border-radius:12px;padding:14px;overflow:auto;"></div>
+      </div>
+    </div>
+
+    <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
+    <script src="https://unpkg.com/docx-preview@0.1.20/dist/docx-preview.js"></script>
+    <script type="module" src="import.js"></script>
+  </body>
+</html>
+

@@ -38,14 +38,38 @@ function chainIdHintFromUrl(origin) {
 export async function getPendleMarketSnapshot({ origin, maxPages = 6, pageLimit = 100 } = {}) {
   const chainIdHint = chainIdHintFromUrl(origin);
   const all = [];
+  const errors = [];
+
+  const fetchWithRetry = async (url) => {
+    try {
+      return await fetch(url, {
+        headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" },
+      });
+    } catch (err) {
+      const msg = err?.message ? String(err.message) : String(err);
+      if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(msg)) {
+        // Transient DNS issues are common on some networks; retry once.
+        await new Promise((r) => setTimeout(r, 650));
+        return await fetch(url, {
+          headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" },
+        });
+      }
+      throw err;
+    }
+  };
 
   for (let page = 0; page < maxPages; page++) {
     const skip = page * pageLimit;
     const url = `https://api-v2.pendle.finance/core/v2/markets/all?skip=${skip}&limit=${pageLimit}`;
-    const resp = await fetch(url, {
-      headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" },
-    }).catch(() => null);
-    if (!resp || !resp.ok) break;
+    const resp = await fetchWithRetry(url).catch((err) => {
+      errors.push(`Pendle API fetch failed: ${err?.message ? String(err.message) : String(err)}`);
+      return null;
+    });
+    if (!resp) break;
+    if (!resp.ok) {
+      errors.push(`Pendle API request failed: ${resp.status}`);
+      break;
+    }
     const json = await resp.json().catch(() => null);
     const rows = Array.isArray(json?.results) ? json.results : [];
     if (!rows.length) break;
@@ -119,6 +143,7 @@ export async function getPendleMarketSnapshot({ origin, maxPages = 6, pageLimit 
     contracts,
     evidence: [
       `Pendle markets snapshot: ${use.length} market rows (${filtered.length ? "chain-filtered" : "all chains fallback"})`,
+      ...(errors.length ? errors.slice(0, 3) : []),
     ],
   };
 }

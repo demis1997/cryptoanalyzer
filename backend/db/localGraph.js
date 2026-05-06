@@ -78,6 +78,24 @@ function get(db, sql, params = []) {
   return rows[0] || null;
 }
 
+function normalizeChain(raw) {
+  const s = String(raw || "").trim().toLowerCase();
+  if (!s) return "ethereum";
+  if (s.includes("arbitrum")) return "arbitrum";
+  if (s.includes("optimism")) return "optimism";
+  if (s.includes("base")) return "base";
+  if (s.includes("polygon")) return "polygon";
+  if (s.includes("avalanche")) return "avalanche";
+  if (s.includes("bsc") || s.includes("binance")) return "bsc";
+  if (s.includes("scroll")) return "scroll";
+  if (s.includes("mantle")) return "mantle";
+  if (s.includes("sonic")) return "sonic";
+  if (s.includes("berachain") || s.includes("bera")) return "berachain";
+  if (s.includes("ronin")) return "ronin";
+  if (s.includes("plasma")) return "plasma";
+  return s.replace(/[^a-z0-9_-]+/g, "_").slice(0, 24) || "ethereum";
+}
+
 export function protocolIdFrom({ origin, defillamaSlug }) {
   const s = String(defillamaSlug || "").trim();
   if (s) return `defillama:${s}`;
@@ -120,6 +138,7 @@ export async function localGraphInit() {
       defillama_slug text,
       connections_json text,
       architecture_json text,
+      extra_json text,
       created_at text not null,
       updated_at text not null
     );
@@ -176,6 +195,12 @@ export async function localGraphInit() {
       primary key (protocol_id, doc_url)
     );
   `);
+  // Lightweight migrations for older DB files.
+  try {
+    db.exec(`alter table protocols add column extra_json text;`);
+  } catch {
+    // ignore (column already exists)
+  }
   persistDb(db);
   return { ok: true, path: dbPath() };
 }
@@ -232,12 +257,132 @@ export async function getProtocolGraph({ origin, defillamaSlug }) {
       updatedAt: p.updated_at,
       connectionsJson: p.connections_json,
       architectureJson: p.architecture_json,
+      extraJson: p.extra_json,
       tokens,
       contracts,
       auditors,
       docPages,
     },
   };
+}
+
+export async function getProtocolGraphById({ id }) {
+  const db = await getDb();
+  const pid = String(id || "").trim();
+  if (!pid) return { ok: false, error: "Missing id" };
+  const p = get(db, `select * from protocols where id = ? limit 1`, [pid]);
+  if (!p) return { ok: true, hit: false, id: pid };
+  const tokens = all(
+    db,
+    `select t.chain, t.address, t.symbol
+     from protocol_tokens pt join tokens t
+     on pt.chain=t.chain and pt.address=t.address
+     where pt.protocol_id=?`,
+    [pid]
+  );
+  const contracts = all(
+    db,
+    `select c.chain, c.address, c.label, c.type
+     from protocol_contracts pc join contracts c
+     on pc.chain=c.chain and pc.address=c.address
+     where pc.protocol_id=?`,
+    [pid]
+  );
+  const auditors = all(
+    db,
+    `select a.name
+     from protocol_auditors pa join auditors a
+     on pa.auditor_name=a.name
+     where pa.protocol_id=?`,
+    [pid]
+  );
+  const docPages = all(
+    db,
+    `select d.url, d.hash, d.fetched_at as fetchedAt
+     from protocol_doc_pages pd join doc_pages d
+     on pd.doc_url=d.url
+     where pd.protocol_id=?`,
+    [pid]
+  );
+  return {
+    ok: true,
+    hit: true,
+    id: pid,
+    protocol: {
+      id: p.id,
+      name: p.name,
+      url: p.url,
+      defillamaSlug: p.defillama_slug,
+      createdAt: p.created_at,
+      updatedAt: p.updated_at,
+      connectionsJson: p.connections_json,
+      architectureJson: p.architecture_json,
+      extraJson: p.extra_json,
+      tokens,
+      contracts,
+      auditors,
+      docPages,
+    },
+  };
+}
+
+export async function searchProtocols({ q, limit = 25 } = {}) {
+  const db = await getDb();
+  const query = String(q || "").trim().toLowerCase();
+  if (!query) return [];
+  const lim = Math.min(100, Math.max(1, Number(limit) || 25));
+  const like = `%${query.replace(/%/g, "")}%`;
+  return all(
+    db,
+    `select id, name, url, updated_at as updatedAt
+     from protocols
+     where lower(coalesce(name,'')) like ? or lower(coalesce(url,'')) like ?
+     order by updated_at desc
+     limit ?`,
+    [like, like, lim]
+  );
+}
+
+export async function upsertProtocolExtra({ id, name = null, url = null, extra = null } = {}) {
+  const db = await getDb();
+  const pid = String(id || "").trim();
+  if (!pid) return { ok: false, error: "Missing id" };
+  const now = new Date().toISOString();
+
+  const existing = get(db, `select id, extra_json from protocols where id = ? limit 1`, [pid]);
+  let merged = null;
+  if (extra && typeof extra === "object") {
+    if (existing?.extra_json) {
+      try {
+        const prev = JSON.parse(existing.extra_json);
+        merged = { ...(prev && typeof prev === "object" ? prev : {}), ...extra };
+      } catch {
+        merged = { ...extra };
+      }
+    } else {
+      merged = { ...extra };
+    }
+  }
+
+  if (existing?.id) {
+    run(
+      db,
+      `update protocols
+       set extra_json = ?, name = coalesce(?, name), url = coalesce(?, url), updated_at = ?
+       where id = ?`,
+      [merged ? JSON.stringify(merged) : existing.extra_json || null, name, url, now, pid]
+    );
+  } else {
+    run(
+      db,
+      `insert into protocols (id, name, url, defillama_slug, connections_json, architecture_json, extra_json, created_at, updated_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [pid, name, url, null, null, null, merged ? JSON.stringify(merged) : null, now, now]
+    );
+  }
+
+  persistDb(db);
+  return { ok: true, id: pid };
 }
 
 export async function upsertProtocolGraph({
@@ -248,6 +393,7 @@ export async function upsertProtocolGraph({
   docPages = [],
   connections = null,
   architecture = null,
+  extra = null,
 } = {}) {
   const db = await getDb();
   const p = protocol || {};
@@ -257,14 +403,15 @@ export async function upsertProtocolGraph({
   run(
     db,
     `
-insert into protocols (id, name, url, defillama_slug, connections_json, architecture_json, created_at, updated_at)
-values (?, ?, ?, ?, ?, ?, ?, ?)
+insert into protocols (id, name, url, defillama_slug, connections_json, architecture_json, extra_json, created_at, updated_at)
+values (?, ?, ?, ?, ?, ?, ?, ?, ?)
 on conflict(id) do update set
   name=excluded.name,
   url=excluded.url,
   defillama_slug=excluded.defillama_slug,
   connections_json=excluded.connections_json,
   architecture_json=excluded.architecture_json,
+  extra_json=excluded.extra_json,
   updated_at=excluded.updated_at
     `,
     [
@@ -274,6 +421,7 @@ on conflict(id) do update set
       p.defillamaSlug || null,
       connections ? JSON.stringify(connections) : null,
       architecture ? JSON.stringify(architecture) : null,
+      extra ? JSON.stringify(extra) : null,
       now,
       now,
     ]
@@ -283,17 +431,18 @@ on conflict(id) do update set
   for (const t of Array.isArray(tokens) ? tokens : []) {
     const addr = String(t?.address || "").toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(addr)) continue;
+    const chain = normalizeChain(t?.chain || t?.network || "ethereum");
     run(
       db,
       `insert into tokens (chain,address,symbol) values (?,?,?)
        on conflict(chain,address) do update set symbol=coalesce(excluded.symbol, tokens.symbol)`,
-      ["ethereum", addr, t?.symbol || t?.token || null]
+      [chain, addr, t?.symbol || t?.token || null]
     );
     run(
       db,
       `insert into protocol_tokens (protocol_id, chain, address) values (?,?,?)
        on conflict(protocol_id,chain,address) do nothing`,
-      [id, "ethereum", addr]
+      [id, chain, addr]
     );
   }
 
@@ -301,19 +450,20 @@ on conflict(id) do update set
   for (const c of Array.isArray(contracts) ? contracts : []) {
     const addr = String(c?.address || "").toLowerCase();
     if (!/^0x[a-f0-9]{40}$/.test(addr)) continue;
+    const chain = normalizeChain(c?.chain || c?.network || "ethereum");
     run(
       db,
       `insert into contracts (chain,address,label,type) values (?,?,?,?)
        on conflict(chain,address) do update set
          label=coalesce(excluded.label, contracts.label),
          type=coalesce(excluded.type, contracts.type)`,
-      ["ethereum", addr, c?.label || null, c?.type || null]
+      [chain, addr, c?.label || null, c?.type || null]
     );
     run(
       db,
       `insert into protocol_contracts (protocol_id, chain, address) values (?,?,?)
        on conflict(protocol_id,chain,address) do nothing`,
-      [id, "ethereum", addr]
+      [id, chain, addr]
     );
   }
 

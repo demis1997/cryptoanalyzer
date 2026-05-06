@@ -4,7 +4,11 @@ import path from "path";
 import { fileURLToPath } from "url";
 import fetch from "node-fetch";
 import fs from "fs";
+import dns from "dns";
 import { chromium } from "playwright";
+import multer from "multer";
+import mammoth from "mammoth";
+import JSZip from "jszip";
 import {
   getDefiLlamaTvl as getDefiLlamaTvlFromModule,
   getDefiLlamaProtocolByUrl as getDefiLlamaProtocolByUrlFromModule,
@@ -12,7 +16,9 @@ import {
   getDefiLlamaTotalRaisedUsd as getDefiLlamaTotalRaisedUsdFromModule,
   getDefiLlamaProtocolInformation as getDefiLlamaProtocolInformationFromModule,
   getDefiLlamaTokenLiquidityFromYields as getDefiLlamaTokenLiquidityFromYieldsFromModule,
+  getDefiLlamaProtocolApiDetail as getDefiLlamaProtocolApiDetailFromModule,
 } from "./backend/services/defillama.js";
+import { buildEvidenceNotes } from "./backend/services/evidenceNotes.js";
 import { getPendleMarketSnapshot as getPendleMarketSnapshotFromModule } from "./backend/services/pendle.js";
 import { buildHeuristicRiskAssessment as buildHeuristicRiskAssessmentFromModule } from "./backend/llm/riskHeuristics.js";
 import {
@@ -26,21 +32,159 @@ import {
 import { discoverContractConnections } from "./backend/services/contractConnections.js";
 import {
   localGraphInit,
-  getProtocolGraph,
+  getProtocolGraph as getProtocolGraphLocal,
+  getProtocolGraphById as getProtocolGraphLocalById,
+  searchProtocols as searchLocalProtocols,
   getLocalGraphOverview,
-  upsertProtocolGraph,
+  upsertProtocolGraph as upsertProtocolGraphLocal,
+  upsertProtocolExtra as upsertProtocolExtraLocal,
   protocolIdFrom,
 } from "./backend/db/localGraph.js";
+import {
+  neo4jEnabled,
+  neo4jInit,
+  getProtocolGraphNeo4j,
+  getProtocolGraphNeo4jById,
+  upsertProtocolGraphNeo4j,
+  searchProtocolsNeo4j,
+  getRelatedProtocolsNeo4j,
+  findProtocolIdByUrlNeo4j,
+} from "./backend/db/neo4jGraph.js";
 import { fetchDocsSnippets } from "./backend/services/docsSnippets.js";
+import { ingestAuditPdfsIntoDocsPack } from "./backend/services/auditPdfIngest.js";
 import {
   extractAuditorsWithHostedLlm,
   inferContractGraphWithHostedLlm,
   inferArchitectureWithHostedLlm,
+  mergeConnectionGraphs,
+  graphAugmentationFromDefillamaApi,
+  subjectProtocolNodeId,
 } from "./backend/services/aiEnrich.js";
 import { resetHostedLlmRoute } from "./backend/llm/provider.js";
 
+function extractAuditorsHeuristic({ docsPack, defillamaApi } = {}) {
+  const lines = Array.isArray(docsPack?.lines) ? docsPack.lines.join("\n") : "";
+  const ev = Array.isArray(docsPack?.evidence) ? docsPack.evidence : [];
+  const links = Array.isArray(defillamaApi?.auditLinks) ? defillamaApi.auditLinks : [];
+  const text = `${lines}\n${links.join("\n")}\n${ev.join("\n")}`.toLowerCase();
+
+  const candidates = [
+    { name: "Trail of Bits", re: /trail\s*of\s*bits|trailofbits/ },
+    { name: "OpenZeppelin", re: /openzeppelin/ },
+    { name: "Quantstamp", re: /quantstamp/ },
+    { name: "ChainSecurity", re: /chainsecurity/ },
+    { name: "Spearbit", re: /spearbit/ },
+    { name: "Sigma Prime", re: /sigma\s*prime/ },
+    { name: "Least Authority", re: /least\s*authority/ },
+    { name: "Runtime Verification", re: /runtime\s*verification/ },
+    { name: "Halborn", re: /halborn/ },
+    { name: "MixBytes", re: /mixbytes/ },
+    { name: "CertiK", re: /certik/ },
+    { name: "PeckShield", re: /peckshield/ },
+    { name: "SlowMist", re: /slowmist/ },
+    { name: "OtterSec", re: /ottersec/ },
+    { name: "Coinspect", re: /coinspect/ },
+    { name: "Solidified", re: /solidified/ },
+  ];
+
+  const out = [];
+  for (const c of candidates) {
+    if (c.re.test(text)) out.push({ name: c.name });
+  }
+
+  // Also infer from audit link hostnames (best-effort).
+  for (const u of links) {
+    const s = String(u || "").toLowerCase();
+    if (s.includes("trailofbits")) out.push({ name: "Trail of Bits" });
+    if (s.includes("openzeppelin")) out.push({ name: "OpenZeppelin" });
+    if (s.includes("quantstamp")) out.push({ name: "Quantstamp" });
+    if (s.includes("chainsecurity")) out.push({ name: "ChainSecurity" });
+    if (s.includes("spearbit")) out.push({ name: "Spearbit" });
+    if (s.includes("halborn")) out.push({ name: "Halborn" });
+    if (s.includes("mixbytes")) out.push({ name: "MixBytes" });
+    if (s.includes("certik")) out.push({ name: "CertiK" });
+  }
+
+  // Dedupe
+  const seen = new Set();
+  const deduped = [];
+  for (const a of out) {
+    const n = String(a?.name || "").trim();
+    if (!n) continue;
+    const k = n.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    deduped.push({ name: n });
+    if (deduped.length >= 12) break;
+  }
+
+  return {
+    auditors: deduped,
+    evidence: [
+      "heuristic_auditor_extraction",
+      ...(links.length ? [`Audit links considered: ${links.slice(0, 6).join(", ")}`] : []),
+      ...(ev.length ? ev.slice(0, 4) : []),
+    ],
+  };
+}
+
+async function fetchDefillamaApiDetailBestEffort(slugLike) {
+  const raw = String(slugLike || "").trim();
+  if (!raw) return null;
+  const variants = Array.from(
+    new Set([
+      raw,
+      raw.replace(/_/g, "-"),
+      raw.replace(/-/g, "_"),
+    ])
+  )
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 3);
+  for (const v of variants) {
+    const d = await getDefiLlamaProtocolApiDetailFromModule(v).catch(() => null);
+    if (d && d.apiUrl) return d;
+  }
+  return null;
+}
+
+async function expandConnectionsWithDefillama({ connections, maxProtocols = 6 } = {}) {
+  const conn = connections && typeof connections === "object" ? connections : null;
+  if (!conn) return conn;
+  const nodes = Array.isArray(conn.nodes) ? conn.nodes : [];
+  const protocolNodes = nodes.filter((n) => n && (n.kind === "protocol" || n.type === "protocol") && typeof n.id === "string");
+  const slugs = protocolNodes
+    .map((n) => String(n.id || ""))
+    .filter((id) => id.startsWith("protocol:"))
+    .map((id) => id.slice("protocol:".length))
+    .filter(Boolean);
+  const uniqSlugs = Array.from(new Set(slugs)).slice(0, Math.max(1, Number(maxProtocols) || 6));
+
+  let out = conn;
+  for (const s of uniqSlugs) {
+    const api = await fetchDefillamaApiDetailBestEffort(s);
+    if (!api) continue;
+    const subjectId = `protocol:${String(s).trim()}`;
+    const aug = graphAugmentationFromDefillamaApi({
+      defillamaApi: api,
+      subjectProtocolId: subjectId,
+      subjectDisplayName: api.name || s,
+    });
+    out = mergeConnectionGraphs(out, aug);
+  }
+  return out;
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Node DNS can prefer IPv6 in some environments, which can cause flaky resolution/connectivity
+// to Cloudflare-fronted hosts even when curl works. Prefer IPv4 first for stability.
+try {
+  if (typeof dns?.setDefaultResultOrder === "function") dns.setDefaultResultOrder("ipv4first");
+} catch {
+  // ignore
+}
 
 // Local/dev fallback cache for report generation.
 // Vercel should rely on Postgres; local runs often don't have it configured.
@@ -51,12 +195,191 @@ export { app };
 export default app;
 const PORT = process.env.PORT || 3000;
 
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
+
 // Some endpoints (e.g. report generation) may accept large JSON payloads locally.
 // Vercel callers should prefer sending {url/protocolKey} and using Postgres-backed cache.
 app.use(express.json({ limit: "25mb" }));
 
 const PROTOCOL_CACHE_TTL_MS = Number(process.env.PROTOCOL_CACHE_TTL_MS || 6 * 60 * 60 * 1000);
 const ENABLE_PROTOCOL_DB_CACHE = String(process.env.ENABLE_PROTOCOL_DB_CACHE || "1") === "1";
+
+function slugKey(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48) || "unknown";
+}
+
+function parseAllAddresses(text) {
+  const out = [];
+  const s = String(text || "");
+  const re = /0x[a-fA-F0-9]{40}/g;
+  let m;
+  while ((m = re.exec(s)) !== null) out.push(m[0]);
+  return out;
+}
+
+function parseCsvText(csvText) {
+  const s = String(csvText || "");
+  const rows = [];
+  let row = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    const next = s[i + 1];
+    if (inQuotes) {
+      if (ch === '"' && next === '"') {
+        cur += '"';
+        i++;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        cur += ch;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = true;
+      continue;
+    }
+    if (ch === ",") {
+      row.push(cur);
+      cur = "";
+      continue;
+    }
+    if (ch === "\n") {
+      row.push(cur);
+      cur = "";
+      const isEmpty = row.every((c) => String(c || "").trim() === "");
+      if (!isEmpty) rows.push(row);
+      row = [];
+      continue;
+    }
+    if (ch === "\r") continue;
+    cur += ch;
+  }
+  row.push(cur);
+  if (!row.every((c) => String(c || "").trim() === "")) rows.push(row);
+  if (!rows.length) return [];
+  const header = rows[0].map((h) => String(h || "").trim());
+  const out = [];
+  for (const r of rows.slice(1)) {
+    const obj = {};
+    for (let i = 0; i < header.length; i++) obj[header[i]] = r[i] == null ? "" : String(r[i]);
+    out.push(obj);
+  }
+  return out;
+}
+
+function relationshipToRelation(rel) {
+  const r = String(rel || "").trim().toLowerCase();
+  if (!r) return "unknown_link";
+  if (r === "audited_by") return "audited_by";
+  if (r === "issues_token") return "issues_token";
+  if (r === "uses_token") return "uses_token";
+  if (r === "connected_to") return "connected_to";
+  return r.replace(/[^a-z0-9]+/g, "_");
+}
+
+function toImportGraph({ rootProtocol, rows }) {
+  const root = String(rootProtocol || "").trim();
+  const rootSlug = slugKey(root);
+  const protocolId = `import:${rootSlug}`;
+
+  const nodes = [];
+  const edges = [];
+
+  const ensureNode = (n) => {
+    if (!n || !n.id) return;
+    if (seenNodes.has(n.id)) return;
+    seenNodes.add(n.id);
+    nodes.push(n);
+  };
+
+  const seenNodes = new Set();
+  const makeNodeId = (type, name, addr) => {
+    const t = String(type || "entity").trim().toLowerCase();
+    const n = String(name || "").trim();
+    const a = String(addr || "").trim().toLowerCase();
+    if (a && /^0x[a-f0-9]{40}$/.test(a)) return a;
+    return `${t}:${slugKey(n || "unknown")}`;
+  };
+
+  ensureNode({ kind: "protocol", id: `protocol:${rootSlug}`, name: root, label: root, network: "Multi-chain" });
+
+  const auditors = [];
+  const notes = [];
+  const tokens = [];
+  const contracts = [];
+
+  for (const raw of rows) {
+    const sourceName = raw.source_name || raw.sourceName || "";
+    const sourceType = raw.source_type || raw.sourceType || "entity";
+    const targetName = raw.target_name || raw.targetName || "";
+    const targetType = raw.target_type || raw.targetType || "entity";
+    const chain = raw.chain || "";
+    const relationship = raw.relationship || raw.relation || "";
+    const rel = relationshipToRelation(relationship);
+    const rowNotes = raw.notes || raw.note || "";
+
+    const addresses = parseAllAddresses(rowNotes);
+    const addr = addresses.length ? addresses[0] : "";
+
+    const fromId = makeNodeId(sourceType, sourceName, "");
+    const toId = makeNodeId(targetType, targetName, addr);
+
+    ensureNode({
+      kind: String(sourceType || "entity").toLowerCase(),
+      id: fromId,
+      name: String(sourceName || "").trim() || null,
+      label: String(sourceName || "").trim() || fromId,
+      network: chain || "Unknown",
+    });
+    ensureNode({
+      kind: String(targetType || "entity").toLowerCase(),
+      id: toId,
+      address: /^0x[a-f0-9]{40}$/.test(String(addr || "").toLowerCase()) ? String(addr).toLowerCase() : undefined,
+      name: String(targetName || "").trim() || null,
+      label: String(targetName || "").trim() || toId,
+      network: chain || "Unknown",
+    });
+
+    edges.push({
+      from: fromId,
+      to: toId,
+      relation: rel,
+      evidence: rowNotes ? String(rowNotes).slice(0, 360) : `Imported: ${relationship}`,
+    });
+
+    if (String(rel) === "audited_by" && String(targetType || "").toLowerCase() === "auditor") {
+      const n = String(targetName || "").trim();
+      if (n) auditors.push({ name: n });
+    }
+    if (rowNotes) notes.push(rowNotes);
+
+    if (String(targetType || "").toLowerCase().includes("token") && /^0x[a-f0-9]{40}$/.test(String(addr || "").toLowerCase())) {
+      tokens.push({ chain, address: addr, symbol: String(targetName || "").trim() });
+    }
+    if (String(targetType || "").toLowerCase().includes("contract") && /^0x[a-f0-9]{40}$/.test(String(addr || "").toLowerCase())) {
+      contracts.push({ chain, address: addr, label: String(targetName || "").trim(), type: String(targetType || "") });
+    }
+  }
+
+  // Attach root links if missing.
+  // If rows define root_protocol but omit explicit root node linking, we still keep full edges.
+
+  return {
+    protocol: { id: protocolId, name: root, url: `import:${rootSlug}`, defillamaSlug: null },
+    connections: { nodes, edges, evidence: [`Imported relationships for ${root}`] },
+    auditors,
+    tokens,
+    contracts,
+    notes,
+  };
+}
 
 app.get("/api/health", (req, res) => {
   res.json({
@@ -67,8 +390,44 @@ app.get("/api/health", (req, res) => {
       riskAssessment: "POST /api/risk-assessment",
       localGraph: "GET /api/local-graph?limit=20",
       reportHtml: "POST /api/report/html",
+      netcheck: "GET /api/netcheck",
     },
   });
+});
+
+app.get("/api/netcheck", async (req, res) => {
+  const targets = [
+    "https://app.pendle.finance/",
+    "https://api-v2.pendle.finance/core/v2/markets/all?skip=0&limit=1",
+    "https://api.llama.fi/protocols",
+  ];
+  const results = [];
+  for (const url of targets) {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 8000);
+    try {
+      const r = await fetch(url, {
+        headers: { "User-Agent": "ProtocolInspector/1.0 (+https://github.com/)" },
+        signal: controller.signal,
+      });
+      results.push({
+        url,
+        ok: r.ok,
+        status: r.status,
+        contentType: r.headers.get("content-type") || null,
+      });
+    } catch (err) {
+      results.push({
+        url,
+        ok: false,
+        status: 0,
+        error: String(err?.message || err),
+      });
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  res.json({ ok: true, results });
 });
 
 app.get("/api/local-graph", async (req, res) => {
@@ -88,9 +447,454 @@ app.get("/api/local-graph", async (req, res) => {
   }
 });
 
+app.post("/api/import/relationships", async (req, res) => {
+  try {
+    await localGraphInit().catch(() => {});
+    const { format, text } = req.body || {};
+    const fmt = String(format || "").toLowerCase().trim();
+    const payloadText = String(text || "");
+    if (!payloadText.trim()) return res.status(400).json({ ok: false, error: "Missing text" });
+
+    let rows = null;
+    if (fmt === "json" || payloadText.trim().startsWith("[")) {
+      rows = JSON.parse(payloadText);
+    } else if (fmt === "csv") {
+      rows = parseCsvText(payloadText);
+    } else {
+      return res.status(400).json({ ok: false, error: "Unknown format (use json or csv)" });
+    }
+    if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ ok: false, error: "No rows found" });
+
+    const byRoot = new Map();
+    for (const r of rows) {
+      const root = String(r?.root_protocol || r?.rootProtocol || "").trim() || "unknown";
+      if (!byRoot.has(root)) byRoot.set(root, []);
+      byRoot.get(root).push(r);
+    }
+
+    const imported = [];
+    for (const [rootProtocol, group] of byRoot.entries()) {
+      const g = toImportGraph({ rootProtocol, rows: group });
+      await upsertProtocolGraphLocal({
+        protocol: g.protocol,
+        tokens: g.tokens,
+        contracts: g.contracts,
+        auditors: g.auditors,
+        docPages: [],
+        connections: g.connections,
+        architecture: null,
+      });
+      imported.push({ rootProtocol, id: g.protocol.id, rows: group.length, auditors: g.auditors.length });
+    }
+
+    return res.json({ ok: true, imported });
+  } catch (err) {
+    console.error("/api/import/relationships error:", err);
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+function parseDocxFields(rawText) {
+  const text = String(rawText || "");
+  const lines = text.split(/\r?\n/).map((l) => l.trim());
+  const joined = lines.join("\n");
+
+  const pick = (re) => {
+    const m = re.exec(joined);
+    return m && m[1] ? String(m[1]).trim() : null;
+  };
+
+  function sectionSlice(startRe, endRe) {
+    const startIdx = lines.findIndex((l) => startRe.test(l));
+    if (startIdx < 0) return [];
+    let endIdx = lines.length;
+    for (let i = startIdx + 1; i < lines.length; i++) {
+      if (endRe.test(lines[i])) {
+        endIdx = i;
+        break;
+      }
+    }
+    return lines.slice(startIdx, endIdx);
+  }
+
+  const protocolName =
+    pick(/^\s*Protocol\s*\n\s*([^\n]{2,120})/mi) ||
+    pick(/^\s*Protocol name\s*:\s*([^\n]{2,120})/mi) ||
+    null;
+
+  const origin =
+    pick(/^\s*Input resolved from:\s*(https?:\/\/[^\s]+)\s*$/mi) ||
+    pick(/^\s*URL\s*:\s*(https?:\/\/[^\s]+)\s*$/mi) ||
+    null;
+
+  const riskScore =
+    pick(/^\s*Overall risk score\s*\n\s*([^\n]{1,80})/mi) ||
+    pick(/^\s*Overall risk score\s*:\s*([^\n]{1,80})/mi) ||
+    null;
+
+  // Concise description: prefer section 1.
+  const descSection = sectionSlice(/^\s*1\.\s*Concise protocol description/i, /^\s*2\.\s*Assumptions and scope/i);
+  const description = descSection.length
+    ? descSection
+        .slice(1)
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 1800)
+    : null;
+
+  // Sources / methodology: pull the “prioritizes primary…” paragraph.
+  const sourcesPara = pick(/prioritizes primary and near-primary sources:\s*([^\n]+(?:\n[^\n]+){0,3})/i);
+
+  // Auditors: look for “Audited by …” lines and also the Verified auditors table section.
+  const auditorNames = new Set();
+  for (const l of lines) {
+    const m = /audited by\s+(.+)/i.exec(l);
+    if (!m) continue;
+    const chunk = m[1].replace(/\.\s*$/, "");
+    chunk
+      .split(/,| and | & /i)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .forEach((n) => auditorNames.add(n));
+  }
+
+  const verifiedAuditorsSection = sectionSlice(
+    /^\s*3\.\s*Verified auditors and security references/i,
+    /^\s*4\.\s*/i
+  );
+  if (verifiedAuditorsSection.length) {
+    // Heuristic: names are standalone lines followed by coverage/status/notes rows.
+    // Capture capitalized / brand-like tokens and common audit orgs; ignore headers.
+    const ignore = new Set(["entity", "coverage", "verification status", "notes"]);
+    for (const l of verifiedAuditorsSection) {
+      const s = String(l || "").trim();
+      if (!s) continue;
+      if (ignore.has(s.toLowerCase())) continue;
+      if (s.length > 48) continue;
+      // Avoid capturing "Verified" or similar table cells.
+      if (/^verified$/i.test(s)) continue;
+      if (/compound/i.test(s) && s.length > 12) continue;
+      // Likely auditor name (contains letters, maybe spaces).
+      if (/^[a-z0-9][a-z0-9 ._-]{1,48}$/i.test(s)) {
+        // Skip obvious non-names from table.
+        if (/^formal verification|bug bounty/i.test(s)) continue;
+        auditorNames.add(s);
+      }
+    }
+  }
+
+  // Risk overview table section.
+  const riskSection = sectionSlice(/^\s*7\.\s*Structured risk overview/i, /^\s*8\.\s*/i);
+  const riskRows = [];
+  if (riskSection.length) {
+    // Table-like: Risk area / Assessment / Rationale repeated as 3-line chunks.
+    for (let i = 0; i < riskSection.length - 3; i++) {
+      const a = riskSection[i];
+      const b = riskSection[i + 1];
+      const c = riskSection[i + 2];
+      if (!a || !b || !c) continue;
+      if (/^risk area$/i.test(a) || /^assessment$/i.test(b) || /^rationale$/i.test(c)) continue;
+      if (/^overall risk score$/i.test(a)) continue;
+      if (b.length <= 24 && c.length >= 12) {
+        // a: area, b: assessment, c: rationale
+        if (/^\d+\./.test(a)) continue;
+        riskRows.push({ area: a, assessment: b, rationale: c });
+      }
+      if (riskRows.length >= 20) break;
+    }
+  }
+
+  // Connected protocols table (assets -> issuer). Present as 5-line chunks before section 6 heading.
+  const connectedIdx = lines.findIndex((l) => /^6\.\s*Connected protocols/i.test(l));
+  const assetRows = [];
+  if (connectedIdx > 10) {
+    const window = lines.slice(Math.max(0, connectedIdx - 140), connectedIdx);
+    // Try reading from bottom upwards to avoid earlier unrelated sections.
+    for (let i = 0; i < window.length - 4; i++) {
+      const token = window[i];
+      const role = window[i + 1];
+      const issuer = window[i + 2];
+      const chain = window[i + 3];
+      const note = window[i + 4];
+      if (!token || !issuer) continue;
+      if (token.length > 20) continue;
+      if (!/[A-Za-z]/.test(token)) continue;
+      if (issuer.length > 60) continue;
+      if (!/[A-Za-z]/.test(issuer)) continue;
+      if (!/collateral|underlying|base|token/i.test(role)) continue;
+      assetRows.push({ token, role, issuer, chain, note });
+      if (assetRows.length >= 40) break;
+    }
+  }
+
+  return {
+    protocolName,
+    origin,
+    riskScore,
+    description,
+    sources: sourcesPara ? sourcesPara.replace(/\s+/g, " ").trim().slice(0, 900) : null,
+    auditors: Array.from(auditorNames).slice(0, 30),
+    riskOverview: riskRows.slice(0, 18),
+    connectedAssets: assetRows.slice(0, 40),
+  };
+}
+
+app.post("/api/import/docx", upload.single("file"), async (req, res) => {
+  try {
+    await localGraphInit().catch(() => {});
+    const f = req.file;
+    if (!f || !f.buffer) return res.status(400).json({ ok: false, error: "Missing DOCX file" });
+
+    const extracted = await mammoth.extractRawText({ buffer: f.buffer });
+    const rawText = String(extracted?.value || "");
+    const fields = parseDocxFields(rawText);
+    const name = fields.protocolName || (f.originalname ? f.originalname.replace(/\.docx$/i, "") : "Imported DOCX");
+    const slug = slugKey(name);
+    const protocolId = `import:${slug}`;
+    const protocolUrl = fields.origin || `import:docx:${slug}`;
+
+    // Persist the original DOCX and extract embedded media.
+    const safeFolder = String(protocolId).replace(/[^a-zA-Z0-9._-]+/g, "_");
+    const baseDir = path.join(process.cwd(), "data", "imports", safeFolder);
+    const mediaDir = path.join(baseDir, "media");
+    try {
+      fs.mkdirSync(mediaDir, { recursive: true });
+      fs.writeFileSync(path.join(baseDir, "report.docx"), f.buffer);
+    } catch (e) {
+      console.warn("DOCX persist failed:", e?.message ? String(e.message) : String(e));
+    }
+
+    const media = [];
+    try {
+      const zip = await JSZip.loadAsync(f.buffer);
+      const entries = Object.keys(zip.files || {}).filter((p) => p.startsWith("word/media/"));
+      for (const p of entries.slice(0, 40)) {
+        const file = zip.file(p);
+        if (!file) continue;
+        const filename = p.split("/").pop() || "image";
+        const outPath = path.join(mediaDir, filename);
+        const buf = await file.async("nodebuffer");
+        fs.writeFileSync(outPath, buf);
+        media.push({
+          filename,
+          url: `/imports/${encodeURIComponent(safeFolder)}/media/${encodeURIComponent(filename)}`,
+        });
+      }
+    } catch (e) {
+      console.warn("DOCX media extraction failed:", e?.message ? String(e.message) : String(e));
+    }
+
+    const auditors = Array.isArray(fields.auditors) ? fields.auditors.map((n) => ({ name: n })) : [];
+
+    // Build a lightweight relationship graph from parsed “connected assets” rows.
+    const nodes = [];
+    const edges = [];
+    const seen = new Set();
+    const rootPid = `protocol:${slugKey(name)}`;
+    const addNode = (n) => {
+      if (!n?.id) return;
+      if (seen.has(n.id)) return;
+      seen.add(n.id);
+      nodes.push(n);
+    };
+    addNode({ kind: "protocol", id: rootPid, label: name, name });
+
+    for (const row of Array.isArray(fields.connectedAssets) ? fields.connectedAssets : []) {
+      const tokenId = `token:${slugKey(row.token)}`;
+      const issuerPid = `protocol:${slugKey(String(row.issuer).split("/")[0])}`;
+      addNode({ kind: "token", id: tokenId, label: row.token, symbol: row.token, network: row.chain || "Unknown" });
+      addNode({ kind: "protocol", id: issuerPid, label: row.issuer, name: row.issuer, network: row.chain || "Unknown" });
+      edges.push({
+        from: rootPid,
+        to: tokenId,
+        relation: "lists_asset",
+        evidence: `DOCX: ${row.role}${row.note ? ` — ${row.note}` : ""}`.slice(0, 300),
+      });
+      edges.push({
+        from: tokenId,
+        to: issuerPid,
+        relation: "issued_by",
+        evidence: `DOCX: issuer = ${row.issuer}`.slice(0, 240),
+      });
+      if (edges.length >= 120) break;
+    }
+
+    const extra = {
+      importType: "docx",
+      filename: f.originalname || null,
+      mimeType: f.mimetype || null,
+      docxUrl: `/imports/${encodeURIComponent(safeFolder)}/report.docx`,
+      media,
+      extractedText: rawText,
+      extractedFields: fields,
+    };
+
+    await upsertProtocolGraphLocal({
+      protocol: { id: protocolId, name, url: protocolUrl, defillamaSlug: null },
+      tokens: [],
+      contracts: [],
+      auditors,
+      docPages: [],
+      connections: { nodes, edges, evidence: ["Imported DOCX"] },
+      architecture: null,
+      extra,
+    });
+
+    // Attach this DOCX to an existing protocol record when we can identify it
+    // (e.g. url:https://app.compound.finance, defillama:slug, etc.)
+    try {
+      if (fields?.origin) {
+        const u = new URL(String(fields.origin));
+        const urlId = `url:${u.origin}`;
+        await upsertProtocolExtraLocal({
+          id: urlId,
+          name,
+          url: u.origin,
+          extra,
+        }).catch(() => {});
+      }
+    } catch {
+      // ignore
+    }
+
+    return res.json({ ok: true, id: protocolId, name, url: protocolUrl, auditors: auditors.length });
+  } catch (err) {
+    console.error("/api/import/docx error:", err);
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.get("/api/import/search", async (req, res) => {
+  try {
+    await localGraphInit().catch(() => {});
+    const q = String(req.query.q || "").trim();
+    const results = await searchLocalProtocols({ q, limit: Number(req.query.limit || 25) });
+    res.json({ ok: true, results });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.get("/api/import/protocol", async (req, res) => {
+  try {
+    await localGraphInit().catch(() => {});
+    const id = String(req.query.id || "").trim();
+    if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
+    const g = await getProtocolGraphLocalById({ id });
+    if (!g.ok) return res.status(500).json(g);
+    if (!g.hit) return res.status(404).json({ ok: true, hit: false, id });
+    const p = g.protocol || {};
+    const out = {
+      origin: p.url || null,
+      cache: { protocolKey: g.id, hit: true, source: "local_graph" },
+      llmEnrich: { enabled: false, source: "imported" },
+      protocol: {
+        name: p.name || null,
+        url: p.url || null,
+        auditsVerified: Array.isArray(p.auditors) && p.auditors.length ? { count: p.auditors.length, firms: p.auditors.map((a) => a.name) } : null,
+      },
+      contracts: (p.contracts || []).map((c) => ({
+        label: c.label || "Contract",
+        network: c.chain || "Unknown",
+        address: c.address,
+        evidence: "Source: imported file",
+      })),
+      tokenLiquidity: (p.tokens || []).map((t) => ({
+        token: t.symbol || "Token",
+        tokenAddress: t.address,
+        liquidityUsd: null,
+        evidence: ["Source: imported file"],
+      })),
+    };
+    try {
+      if (p.connectionsJson) out.connections = JSON.parse(p.connectionsJson);
+    } catch {}
+    try {
+      if (p.extraJson) out.imported = JSON.parse(p.extraJson);
+    } catch {}
+    // Evidence notes: show import provenance and latest update.
+    out.evidenceNotes = [
+      { label: "Imported protocol", source: "User upload", detail: `Loaded from local graph DB (${g.id}).` },
+      ...(out.protocol?.auditsVerified?.firms?.length ? [{ label: "Auditors (imported)", source: "User upload", detail: out.protocol.auditsVerified.firms.join(", ") }] : []),
+    ];
+    return res.json({ ok: true, data: out });
+  } catch (err) {
+    console.error("/api/import/protocol error:", err);
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+// Database API (Neo4j-first, with local graph fallback)
+app.get("/api/db/search", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    const limit = Number(req.query.limit || 25);
+    await localGraphInit().catch(() => {});
+
+    if (neo4jEnabled()) {
+      const results = await searchProtocolsNeo4j({ q, limit }).catch(() => []);
+      return res.json({ ok: true, source: "neo4j", results });
+    }
+    const results = await searchLocalProtocols({ q, limit });
+    return res.json({ ok: true, source: "local_graph", results });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.get("/api/db/protocol", async (req, res) => {
+  try {
+    const id = String(req.query.id || "").trim();
+    if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
+
+    await localGraphInit().catch(() => {});
+    const g = neo4jEnabled()
+      ? await getProtocolGraphNeo4jById({ id })
+      : await getProtocolGraphLocalById({ id });
+
+    if (!g.ok) return res.status(500).json(g);
+    if (!g.hit) return res.status(404).json({ ok: true, hit: false, id });
+
+    const p = g.protocol || {};
+    const out = { ok: true, hit: true, id: g.id, protocol: p, source: neo4jEnabled() ? "neo4j" : "local_graph" };
+    try {
+      if (p.connectionsJson) out.connections = JSON.parse(p.connectionsJson);
+    } catch {}
+    try {
+      if (p.architectureJson) out.architecture = JSON.parse(p.architectureJson);
+    } catch {}
+    try {
+      if (p.extraJson) out.extra = JSON.parse(p.extraJson);
+    } catch {}
+    return res.json(out);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.get("/api/db/related", async (req, res) => {
+  try {
+    const id = String(req.query.id || "").trim();
+    const hops = Number(req.query.hops || 4);
+    if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
+    if (!neo4jEnabled()) {
+      return res.json({ ok: true, source: "local_graph", hit: true, id, graph: { nodes: [], edges: [] } });
+    }
+    const r = await getRelatedProtocolsNeo4j({ id, hops });
+    if (!r.ok) return res.status(500).json(r);
+    return res.json({ ok: true, source: "neo4j", ...r });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
 // Static assets after explicit /api/health and /api/local-graph.
 const publicDir = path.join(__dirname, "public");
 app.use(express.static(publicDir));
+// Serve imported doc assets (docx + extracted media).
+app.use("/imports", express.static(path.join(process.cwd(), "data", "imports")));
 app.use(express.static(__dirname));
 
 app.get("/api/analyze", async (req, res) => {
@@ -141,6 +945,18 @@ function bodyTruthyFlag(v) {
   return false;
 }
 
+function withTimeout(promise, ms, label) {
+  const timeoutMs = Number(ms);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
+  let t = null;
+  const timeout = new Promise((_, reject) => {
+    t = setTimeout(() => reject(new Error(`${label || "operation"} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (t) clearTimeout(t);
+  });
+}
+
 app.post("/api/llm-analyze", async (req, res) => {
   const { url, walletAddress } = req.body || {};
   const forceRefresh = bodyTruthyFlag((req.body || {}).forceRefresh);
@@ -154,6 +970,12 @@ app.post("/api/llm-analyze", async (req, res) => {
   try {
     // Local graph DB init (always local file). No credentials needed.
     await localGraphInit().catch(() => {});
+    // Optional Neo4j graph init (best-effort).
+    if (neo4jEnabled()) {
+      await neo4jInit().catch((err) => {
+        console.warn("Neo4j init failed; continuing with SQLite graph cache:", err?.message ? String(err.message) : String(err));
+      });
+    }
 
     const hasPostgres = Boolean(process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL);
     if (ENABLE_PROTOCOL_DB_CACHE && hasPostgres) {
@@ -161,14 +983,21 @@ app.post("/api/llm-analyze", async (req, res) => {
       await protocolCacheInit().catch(() => {});
     }
 
+    let defillamaMatchError = null;
     const defillama = await getDefiLlamaProtocolByUrlFromModule(origin).catch((err) => {
-      console.warn("DefiLlama protocol match error:", err.message);
+      defillamaMatchError = err?.message ? String(err.message) : String(err);
+      console.warn("DefiLlama protocol match error:", defillamaMatchError);
       return null;
     });
+    const defillamaApiDetail = defillama?.slug
+      ? await getDefiLlamaProtocolApiDetailFromModule(defillama.slug).catch(() => null)
+      : null;
 
     // Graph-first: if protocol graph exists and no wallet requested, return it.
     const defillamaSlug = defillama?.slug || null;
-    const graph = await getProtocolGraph({ origin, defillamaSlug }).catch(() => null);
+    const graph = neo4jEnabled()
+      ? await getProtocolGraphNeo4j({ origin, defillamaSlug }).catch(() => null)
+      : await getProtocolGraphLocal({ origin, defillamaSlug }).catch(() => null);
     if (!forceRefresh && graph?.ok && graph?.hit && !(walletAddress && String(walletAddress).trim())) {
       const p = graph.protocol || {};
       const out = {
@@ -205,6 +1034,15 @@ app.post("/api/llm-analyze", async (req, res) => {
       try {
         if (p.architectureJson) out.protocol.architecture = JSON.parse(p.architectureJson);
       } catch {}
+      try {
+        out.evidenceNotes = buildEvidenceNotes(out, {
+          defillama,
+          defillamaApi: defillamaApiDetail,
+          origin,
+        });
+      } catch {
+        // ignore
+      }
       return res.json(out);
     }
 
@@ -244,6 +1082,17 @@ app.post("/api/llm-analyze", async (req, res) => {
         if (!forceRefresh && !stale && !cacheIncomplete && !(walletAddress && String(walletAddress).trim())) {
           const out = { ...(cached.analysis_json || {}) };
           out.cache = cacheMeta;
+          if (!Array.isArray(out.evidenceNotes) || !out.evidenceNotes.length) {
+            try {
+              out.evidenceNotes = buildEvidenceNotes(out, {
+                defillama,
+                defillamaApi: defillamaApiDetail,
+                origin,
+              });
+            } catch {
+              // ignore
+            }
+          }
           return res.json(out);
         }
       } else {
@@ -315,10 +1164,16 @@ app.post("/api/llm-analyze", async (req, res) => {
       }
     }
 
+    const tokenRowsHaveAddresses = Array.isArray(tokenLiquidity)
+      ? tokenLiquidity.some((t) => /^0x[a-fA-F0-9]{40}$/.test(String(t?.tokenAddress || t?.contractAddress || t?.address || "").trim()))
+      : false;
+    const tokenCount = Array.isArray(tokenLiquidity) ? tokenLiquidity.length : 0;
+
+    // Fallback: if on-page extraction is sparse OR lacks on-chain addresses, prefer DefiLlama yields.
+    // Many protocol apps are JS-heavy; when Playwright rendering is skipped/blocked, HTML-visible text can undercount tokens.
     if (
-      Array.isArray(tokenLiquidity) &&
-      tokenLiquidity.length <= 4 &&
-      defiLlamaSlug
+      defiLlamaSlug &&
+      (tokenCount <= 12 || !tokenRowsHaveAddresses)
     ) {
       const fromYields = await getDefiLlamaTokenLiquidityFromYieldsFromModule(defiLlamaSlug).catch(() => null);
       if (Array.isArray(fromYields) && fromYields.length) {
@@ -362,6 +1217,37 @@ app.post("/api/llm-analyze", async (req, res) => {
 
     // Enrich: DefiLlama TVL + basic metadata
     const enriched = analysis ? { ...analysis } : {};
+    // Attach Pendle snapshot metadata now that `enriched` exists.
+    if (pendleSnapshot && typeof pendleSnapshot === "object") {
+      enriched.pendle = {
+        ok: true,
+        chainId: pendleSnapshot.chainId || null,
+        tokenLiquidity: Array.isArray(pendleSnapshot.tokenLiquidity) ? pendleSnapshot.tokenLiquidity.length : 0,
+        contracts: Array.isArray(pendleSnapshot.contracts) ? pendleSnapshot.contracts.length : 0,
+        evidence: Array.isArray(pendleSnapshot.evidence) ? pendleSnapshot.evidence : [],
+      };
+    }
+    // Also merge discovered contracts (markets/PT/YT/SY) when present.
+    if (Array.isArray(pendleSnapshot?.contracts) && pendleSnapshot.contracts.length) {
+      const byAddr = new Set(
+        (Array.isArray(enriched.contracts) ? enriched.contracts : [])
+          .map((c) => String(c?.address || "").toLowerCase())
+          .filter(Boolean)
+      );
+      enriched.contracts = Array.isArray(enriched.contracts) ? enriched.contracts : [];
+      for (const c of pendleSnapshot.contracts.slice(0, 120)) {
+        const a = String(c?.address || "").toLowerCase();
+        if (!/^0x[a-f0-9]{40}$/.test(a)) continue;
+        if (byAddr.has(a)) continue;
+        byAddr.add(a);
+        enriched.contracts.push({
+          label: c.label || "Contract",
+          network: c.network || "Ethereum",
+          address: c.address,
+          evidence: c.evidence || "Source: Pendle markets API",
+        });
+      }
+    }
 
     // Always return protocol metadata so the frontend can render an identity even
     // when the LLM fails and DefiLlama has no match.
@@ -817,6 +1703,16 @@ app.post("/api/llm-analyze", async (req, res) => {
       console.warn("Connection discovery failed:", err?.message ? String(err.message) : String(err));
     }
 
+    if (defillamaApiDetail) {
+      const sid = subjectProtocolNodeId(defillama?.slug, enriched?.protocol?.name || defillama?.name);
+      const aug = graphAugmentationFromDefillamaApi({
+        defillamaApi: defillamaApiDetail,
+        subjectProtocolId: sid,
+        subjectDisplayName: enriched?.protocol?.name || defillama?.name || "Protocol",
+      });
+      enriched.connections = mergeConnectionGraphs(enriched.connections || { nodes: [], edges: [], evidence: [] }, aug);
+    }
+
     // Hosted LLM (Cursor Cloud Agents): docs + optional analyze-page fallback. Graph DB is always persisted below.
     let fetchedDocs = null;
     try {
@@ -833,6 +1729,13 @@ app.post("/api/llm-analyze", async (req, res) => {
           origin,
           fallbackVisibleText: analyzeVisible.slice(0, 25_000),
         }).catch(() => null);
+        if (fetchedDocs?.ok && defillamaApiDetail?.auditLinks?.length) {
+          fetchedDocs = await ingestAuditPdfsIntoDocsPack({
+            docsPack: fetchedDocs,
+            auditLinks: defillamaApiDetail.auditLinks,
+            maxPdfs: Number(process.env.AUDIT_PDF_MAX || 3),
+          }).catch(() => fetchedDocs);
+        }
         enriched.llmEnrich.docsFetched = Boolean(fetchedDocs?.ok);
         if (Array.isArray(fetchedDocs?.evidence) && fetchedDocs.evidence.some((e) => String(e).includes("snapshot"))) {
           enriched.llmEnrich.usedAnalyzeHtmlFallback = true;
@@ -853,18 +1756,44 @@ app.post("/api/llm-analyze", async (req, res) => {
           const haveAuditorsAlready =
             Array.isArray(enriched.protocol.auditsVerified?.firms) &&
             enriched.protocol.auditsVerified.firms.length > 0;
-          const auditorsRes = haveAuditorsAlready
-            ? {
-                auditors: enriched.protocol.auditsVerified.firms.map((n) => ({ name: String(n) })),
-                evidence: Array.isArray(enriched.protocol.auditsVerified?.evidence)
-                  ? enriched.protocol.auditsVerified.evidence
-                  : [],
-              }
-            : await extractAuditorsWithHostedLlm({
-                protocolName: enriched?.protocol?.name || defillama?.name || null,
-                origin,
-                docs: fetchedDocs,
-              }).catch(catchLlm("auditors"));
+          const heuristicAuditors = !haveAuditorsAlready
+            ? extractAuditorsHeuristic({ docsPack: fetchedDocs, defillamaApi: defillamaApiDetail })
+            : null;
+          let auditorsRes = null;
+          if (haveAuditorsAlready) {
+            auditorsRes = {
+              auditors: enriched.protocol.auditsVerified.firms.map((n) => ({ name: String(n) })),
+              evidence: Array.isArray(enriched.protocol.auditsVerified?.evidence)
+                ? enriched.protocol.auditsVerified.evidence
+                : [],
+            };
+          } else if (heuristicAuditors?.auditors?.length) {
+            auditorsRes = {
+              auditors: heuristicAuditors.auditors,
+              evidence: heuristicAuditors.evidence || [],
+              llmRoute: { usedComposerFallback: false, usedHeuristicFallback: true },
+            };
+          } else {
+            const auditorsTimeoutMs = Number(
+              process.env.HOSTED_AUDITORS_TIMEOUT_MS ||
+                process.env.CURSOR_CLOUD_AGENTS_AUDITORS_TIMEOUT_MS ||
+                120_000
+            );
+            try {
+              auditorsRes = await withTimeout(
+                extractAuditorsWithHostedLlm({
+                  protocolName: enriched?.protocol?.name || defillama?.name || null,
+                  origin,
+                  docs: fetchedDocs,
+                  defillamaApi: defillamaApiDetail,
+                }),
+                auditorsTimeoutMs,
+                "auditors"
+              );
+            } catch (err) {
+              auditorsRes = catchLlm("auditors")(err);
+            }
+          }
           enriched.llmEnrich.reusedAuditorsFromEarlyPass = haveAuditorsAlready;
 
           const graphRes = await inferContractGraphWithHostedLlm({
@@ -873,6 +1802,14 @@ app.post("/api/llm-analyze", async (req, res) => {
             docs: fetchedDocs,
             knownTokens: enriched.tokenLiquidity || [],
             knownContracts: enriched.contracts || [],
+            subjectDefillamaSlug: defillama?.slug || null,
+            defillamaApi: defillamaApiDetail,
+            research: {
+              tvlUsd: enriched?.tvl?.valueUsd ?? null,
+              volume24h: enriched?.txsPerDay?.value ?? null,
+              totalRaisedUsd: enriched?.protocol?.totalRaisedUsd ?? null,
+              auditsCountHint: enriched?.protocol?.auditsVerified?.count ?? enriched?.protocol?.audits ?? null,
+            },
           }).catch(catchLlm("contractGraph"));
 
           const archRes = await inferArchitectureWithHostedLlm({
@@ -894,12 +1831,22 @@ app.post("/api/llm-analyze", async (req, res) => {
 
           if (graphRes && (graphRes.nodes?.length || graphRes.edges?.length)) {
             const existing = enriched.connections || { nodes: [], edges: [], evidence: [] };
-            enriched.connections = {
-              ...existing,
-              nodes: [...(existing.nodes || []), ...(graphRes.nodes || [])],
-              edges: [...(existing.edges || []), ...(graphRes.edges || [])],
-              evidence: Array.from(new Set([...(existing.evidence || []), ...(graphRes.evidence || [])])).slice(0, 18),
-            };
+            enriched.connections = mergeConnectionGraphs(existing, {
+              nodes: graphRes.nodes || [],
+              edges: graphRes.edges || [],
+              evidence: graphRes.evidence || [],
+            });
+          }
+
+          // Free multi-hop enrichment: for each protocol node discovered, pull DefiLlama detail and add deterministic edges.
+          // This reduces LLM guesswork and expands 1 hop further without web search APIs.
+          try {
+            enriched.connections = await expandConnectionsWithDefillama({
+              connections: enriched.connections,
+              maxProtocols: Number(process.env.DEFILLAMA_EXPAND_MAX || 6),
+            });
+          } catch {
+            // ignore
           }
 
           if (archRes?.architecture) {
@@ -953,7 +1900,7 @@ app.post("/api/llm-analyze", async (req, res) => {
         }));
       const firmList = Array.isArray(enriched.protocol?.auditsVerified?.firms) ? enriched.protocol.auditsVerified.firms : [];
       const auditorsForGraph = firmList.map((n) => ({ name: String(n) }));
-      await upsertProtocolGraph({
+      await upsertProtocolGraphLocal({
         protocol: graphProtocol,
         tokens: tokensForGraph,
         contracts: contractsForGraph,
@@ -965,10 +1912,51 @@ app.post("/api/llm-analyze", async (req, res) => {
         })),
         connections: enriched.connections || null,
         architecture: enriched.protocol.architecture || null,
+        extra: {
+          protocol: enriched.protocol || null,
+          tvl: enriched.tvl || null,
+          llmEnrich: enriched.llmEnrich || null,
+          pendle: enriched.pendle || null,
+          urlAnalysis: enriched.urlAnalysis || null,
+          pageType: enriched.pageType || null,
+          chainsSupported: enriched.chainsSupported || null,
+          evidenceNotes: enriched.evidenceNotes || null,
+        },
       });
       enriched.localGraph = { persisted: true, protocolId: graphProtocol.id };
       if (enriched.llmEnrich && typeof enriched.llmEnrich === "object") {
         enriched.llmEnrich.graphPersisted = true;
+      }
+      if (neo4jEnabled()) {
+        try {
+          await upsertProtocolGraphNeo4j({
+            protocol: graphProtocol,
+            tokens: tokensForGraph,
+            contracts: contractsForGraph,
+            auditors: auditorsForGraph,
+            docPages: (fetchedDocs?.ok ? fetchedDocs.pages || [] : []).map((p) => ({
+              url: p.url,
+              hash: fetchedDocs.hash,
+              fetchedAt: p.fetchedAt,
+            })),
+            connections: enriched.connections || null,
+            architecture: enriched.protocol.architecture || null,
+            extra: {
+              protocol: enriched.protocol || null,
+              tvl: enriched.tvl || null,
+              llmEnrich: enriched.llmEnrich || null,
+              pendle: enriched.pendle || null,
+              urlAnalysis: enriched.urlAnalysis || null,
+              pageType: enriched.pageType || null,
+              chainsSupported: enriched.chainsSupported || null,
+              evidenceNotes: enriched.evidenceNotes || null,
+            },
+          });
+          enriched.neo4j = { persisted: true, protocolId: graphProtocol.id };
+        } catch (neoErr) {
+          enriched.neo4j = { persisted: false, error: String(neoErr?.message || neoErr) };
+          console.warn("Neo4j persist failed:", neoErr?.message ? String(neoErr.message) : String(neoErr));
+        }
       }
     } catch (persistErr) {
       enriched.localGraph = { persisted: false, error: String(persistErr?.message || persistErr) };
@@ -1041,6 +2029,16 @@ app.post("/api/llm-analyze", async (req, res) => {
           analysisHash: hash,
         }).catch(() => {});
       }
+    }
+
+    try {
+      enriched.evidenceNotes = buildEvidenceNotes(enriched, {
+        defillama: defillamaMatchError ? { ...(defillama || {}), _matchError: defillamaMatchError } : defillama,
+        defillamaApi: defillamaApiDetail,
+        origin,
+      });
+    } catch {
+      // ignore
     }
 
     res.json(enriched);
@@ -1549,6 +2547,347 @@ app.post("/api/report/html", async (req, res) => {
   return res.send(html);
 });
 
+function csvEscape(v) {
+  const s = String(v ?? "");
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function buildAgentGraphArtifacts({ analysis, relatedGraph = null, maxEdges = 900 } = {}) {
+  const rootName = analysis?.protocol?.name || "Unknown";
+  const rootId = analysis?.neo4j?.protocolId || analysis?.localGraph?.protocolId || analysis?.cache?.protocolKey || rootName;
+
+  const conn = analysis?.connections && typeof analysis.connections === "object" ? analysis.connections : null;
+  const nodes = Array.isArray(conn?.nodes) ? conn.nodes : [];
+  const edges = Array.isArray(conn?.edges) ? conn.edges : [];
+
+  const nodeById = new Map();
+  for (const n of nodes) {
+    const id = String(n?.id || n?.address || "").toLowerCase();
+    if (!id) continue;
+    nodeById.set(id, n);
+  }
+
+  const subjectProtocolId =
+    nodes.find((n) => n && (n.kind === "protocol" || n.type === "protocol") && String(n.id || "").startsWith("protocol:"))
+      ?.id || null;
+
+  const auditors = Array.isArray(analysis?.protocol?.auditsVerified?.firms) ? analysis.protocol.auditsVerified.firms : [];
+
+  const rows = [];
+  const addRow = (r) => {
+    if (!r) return;
+    rows.push({
+      root_protocol: rootName,
+      source_name: r.source_name || "Unknown",
+      source_type: r.source_type || "Unknown",
+      relationship: r.relationship || "CONNECTED_TO",
+      target_name: r.target_name || "Unknown",
+      target_type: r.target_type || "Unknown",
+      chain: r.chain || "Unknown",
+      notes: r.notes || "",
+    });
+  };
+
+  // Auditor edges
+  for (const a of auditors.slice(0, 40)) {
+    addRow({
+      source_name: rootName,
+      source_type: "Protocol",
+      relationship: "AUDITED_BY",
+      target_name: String(a),
+      target_type: "Auditor",
+      chain: "Off-chain",
+      notes: "Verified from docs pack (best-effort).",
+    });
+  }
+
+  // Connection edges (from analysis.connections)
+  const inferType = (n) => {
+    const kind = String(n?.kind || n?.type || "").toLowerCase();
+    if (kind === "protocol") return "Protocol";
+    if (kind === "token") return "Token";
+    if (kind === "contract") return "Contract";
+    if (String(n?.id || "").startsWith("protocol:")) return "Protocol";
+    if (/^0x[a-f0-9]{40}$/i.test(String(n?.id || n?.address || ""))) return "Contract";
+    return kind ? kind : "Unknown";
+  };
+  const labelOf = (n, fallback) => String(n?.label || n?.name || n?.symbol || fallback || "Unknown").trim();
+  const chainOf = (n) => String(n?.network || n?.chain || "Unknown").trim();
+
+  for (const e of edges.slice(0, maxEdges)) {
+    const fromId = String(e?.from || "").toLowerCase();
+    const toId = String(e?.to || "").toLowerCase();
+    if (!fromId || !toId) continue;
+    const fromN = nodeById.get(fromId) || { id: fromId };
+    const toN = nodeById.get(toId) || { id: toId };
+    addRow({
+      source_name: labelOf(fromN, fromId),
+      source_type: inferType(fromN),
+      relationship: String(e?.relation || "CONNECTED_TO"),
+      target_name: labelOf(toN, toId),
+      target_type: inferType(toN),
+      chain: chainOf(fromN) || chainOf(toN) || "Unknown",
+      notes: Array.isArray(e?.evidence) ? e.evidence.join(" | ").slice(0, 400) : "",
+    });
+  }
+
+  // Related protocols up to 4 hops (Neo4j)
+  const relNodes = Array.isArray(relatedGraph?.nodes) ? relatedGraph.nodes : [];
+  for (const rp of relNodes.slice(0, 260)) {
+    if (!rp?.id) continue;
+    if (rp.id === rootId || rp.id === subjectProtocolId) continue;
+    addRow({
+      source_name: rootName,
+      source_type: "Protocol",
+      relationship: "CONNECTED_TO",
+      target_name: rp.name || rp.id,
+      target_type: "Protocol",
+      chain: "Multi-chain",
+      notes: "From Neo4j hop expansion (up to 4 hops).",
+    });
+  }
+
+  const csvHeader = ["root_protocol", "source_name", "source_type", "relationship", "target_name", "target_type", "chain", "notes"];
+  const csv = [csvHeader.join(",")]
+    .concat(
+      rows.map((r) =>
+        csvHeader.map((k) => csvEscape(r[k])).join(",")
+      )
+    )
+    .join("\n");
+
+  const json = {
+    rootProtocol: rootName,
+    rootProtocolId: rootId,
+    subjectProtocolNodeId: subjectProtocolId,
+    rows,
+  };
+
+  return { csv, json };
+}
+
+function buildMonotoneRelationshipSvg({ analysis, relatedGraph } = {}) {
+  const rootLabel = String(analysis?.protocol?.name || "Protocol").slice(0, 32);
+  const nodes = Array.isArray(relatedGraph?.nodes) ? relatedGraph.nodes : [];
+  const max = Math.min(60, nodes.length);
+  const width = 980;
+  const height = 80 + Math.max(1, Math.ceil(max / 3)) * 70;
+
+  // Simple 3-column tree-ish layout (monotone, professional).
+  const cols = 3;
+  const colW = Math.floor(width / cols);
+  const padX = 22;
+  const padY = 60;
+
+  const items = nodes.slice(0, max).map((n) => ({
+    id: n.id,
+    label: String(n.name || n.id || "Protocol").slice(0, 28),
+  }));
+
+  const root = { x: Math.floor(width / 2), y: 28, label: rootLabel };
+  const points = items.map((it, idx) => {
+    const c = idx % cols;
+    const r = Math.floor(idx / cols);
+    return {
+      ...it,
+      x: padX + c * colW + Math.floor(colW / 2),
+      y: padY + r * 64,
+    };
+  });
+
+  const lines = points
+    .map((p) => `<line x1="${root.x}" y1="${root.y + 14}" x2="${p.x}" y2="${p.y - 10}" stroke="#334155" stroke-width="1" />`)
+    .join("");
+  const bubbles = points
+    .map(
+      (p) => `
+      <g>
+        <rect x="${p.x - 150}" y="${p.y - 20}" width="300" height="36" rx="12" fill="#0b1220" stroke="#334155" />
+        <text x="${p.x}" y="${p.y + 3}" text-anchor="middle" font-size="12" fill="#e5e7eb" font-family="system-ui, -apple-system, Segoe UI, sans-serif">${escapeHtml(p.label)}</text>
+      </g>`
+    )
+    .join("");
+
+  return `
+  <svg width="100%" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Protocol relationship tree">
+    <rect x="0" y="0" width="${width}" height="${height}" fill="#020617" rx="18" />
+    <g>
+      <rect x="${root.x - 160}" y="${root.y - 18}" width="320" height="40" rx="14" fill="#0b1220" stroke="#38bdf8" stroke-width="1.5" />
+      <text x="${root.x}" y="${root.y + 7}" text-anchor="middle" font-size="13" fill="#e5e7eb" font-family="system-ui, -apple-system, Segoe UI, sans-serif">${escapeHtml(root.label)}</text>
+    </g>
+    ${lines}
+    ${bubbles}
+    <text x="${width - 16}" y="${height - 14}" text-anchor="end" font-size="10" fill="#64748b" font-family="system-ui, -apple-system, Segoe UI, sans-serif">Monotone relationship view (top ${max})</text>
+  </svg>
+  `;
+}
+
+app.post("/api/agent/report", async (req, res) => {
+  const { url, protocolKey, riskAssessment } = req.body || {};
+  let analysis = await loadCachedAnalysisForReport({ analysisIn: null, protocolKey, url });
+  if (!analysis || typeof analysis !== "object") {
+    // Fallback: load from local graph cache (sqlite) or neo4j stored protocol payload.
+    try {
+      await localGraphInit().catch(() => {});
+      const origin = url ? normalizeUrl(url) : null;
+      if (origin) {
+        let g = null;
+        if (neo4jEnabled()) {
+          // Prefer exact URL match, because most entries are keyed by defillama:slug, not url:origin.
+          const pid = await findProtocolIdByUrlNeo4j({ url: origin }).catch(() => null);
+          g = pid ? await getProtocolGraphNeo4jById({ id: pid }).catch(() => null) : null;
+          if (!g) {
+            g = await getProtocolGraphNeo4j({ origin, defillamaSlug: null }).catch(() => null);
+          }
+        } else {
+          g = await getProtocolGraphLocal({ origin, defillamaSlug: null }).catch(() => null);
+        }
+        const p = g?.protocol || null;
+        if (g?.ok && g?.hit && p) {
+          let extra = null;
+          try {
+            extra = p.extraJson ? JSON.parse(p.extraJson) : null;
+          } catch {}
+          let connections = null;
+          try {
+            connections = p.connectionsJson ? JSON.parse(p.connectionsJson) : null;
+          } catch {}
+          let architecture = null;
+          try {
+            architecture = p.architectureJson ? JSON.parse(p.architectureJson) : null;
+          } catch {}
+          analysis = {
+            origin,
+            protocol: extra?.protocol || { name: p.name || null, url: p.url || origin },
+            tvl: extra?.tvl || null,
+            chainsSupported: extra?.chainsSupported || null,
+            pageType: extra?.pageType || null,
+            urlAnalysis: extra?.urlAnalysis || null,
+            llmEnrich: extra?.llmEnrich || null,
+            evidenceNotes: extra?.evidenceNotes || null,
+            tokenLiquidity: (p.tokens || []).map((t) => ({
+              token: t.symbol || "Token",
+              tokenAddress: t.address,
+              liquidityUsd: null,
+              evidence: ["Source: graph cache"],
+            })),
+            contracts: (p.contracts || []).map((c) => ({
+              label: c.label || "Contract",
+              network: c.chain || "Unknown",
+              address: c.address,
+              evidence: "Source: graph cache",
+            })),
+            connections,
+            architecture,
+            localGraph: { persisted: true, protocolId: g.id },
+            neo4j: g.id?.startsWith("defillama:") ? { persisted: true, protocolId: g.id } : null,
+            cache: { protocolKey: g.id, hit: true, source: neo4jEnabled() ? "neo4j" : "local_graph" },
+          };
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!analysis || typeof analysis !== "object") {
+    return res.status(400).json({ ok: false, error: "Missing analysis. Run Agent/Analyze first." });
+  }
+
+  // Related protocols from DB (best-effort).
+  let related = null;
+  try {
+    if (neo4jEnabled()) {
+      const pid =
+        analysis?.neo4j?.protocolId ||
+        analysis?.localGraph?.protocolId ||
+        analysis?.cache?.protocolKey ||
+        null;
+      if (pid) {
+        const r = await getRelatedProtocolsNeo4j({ id: pid, hops: 4 }).catch(() => null);
+        related = r?.graph || null;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  const artifacts = buildAgentGraphArtifacts({ analysis, relatedGraph: related });
+  const svg = buildMonotoneRelationshipSvg({ analysis, relatedGraph: related || { nodes: [] } });
+
+  // Risk score 1–10 (1 low risk, 10 high risk) derived from rubric overallTotal (0–1, higher safer).
+  let risk10 = null;
+  try {
+    const overall = typeof riskAssessment?.overallTotal === "number" ? riskAssessment.overallTotal : null;
+    if (typeof overall === "number") {
+      risk10 = Math.max(1, Math.min(10, Math.round((1 - overall) * 9 + 1)));
+    }
+  } catch {}
+
+  const html = `<!doctype html>
+  <html>
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>${escapeHtml(analysis?.protocol?.name || "Protocol")} • Agent Report</title>
+      <style>
+        body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#020617;color:#e5e7eb}
+        .wrap{max-width:980px;margin:0 auto;padding:22px}
+        .card{background:rgba(15,23,42,.92);border:1px solid rgba(148,163,184,.25);border-radius:16px;padding:16px;margin-top:14px}
+        h1{margin:0 0 6px;font-size:22px}
+        h2{margin:0 0 8px;font-size:14px;color:#e2e8f0}
+        .muted{color:#94a3b8;font-size:12px;line-height:1.5}
+        pre{white-space:pre-wrap;background:#0b1220;border:1px solid rgba(148,163,184,.25);border-radius:12px;padding:12px;overflow:auto;color:#cbd5e1}
+        .kpi{display:flex;gap:12px;flex-wrap:wrap}
+        .pill{border:1px solid rgba(148,163,184,.35);background:rgba(2,6,23,.25);border-radius:999px;padding:6px 10px;font-size:12px}
+        a{color:#93c5fd}
+      </style>
+    </head>
+    <body>
+      <div class="wrap">
+        <h1>${escapeHtml(analysis?.protocol?.name || "Protocol")} — Agent report</h1>
+        <div class="muted">URL: ${escapeHtml(analysis?.protocol?.url || analysis?.origin || "Unknown")}</div>
+        <div class="kpi" style="margin-top:10px;">
+          <div class="pill">Risk score (1–10): <strong>${risk10 == null ? "Unknown" : String(risk10)}</strong></div>
+          <div class="pill">Auditors: <strong>${escapeHtml((analysis?.protocol?.auditsVerified?.firms || []).join(", ") || "Unknown")}</strong></div>
+          <div class="pill">TVL: <strong>${analysis?.tvl?.valueUsd ? `$${Number(analysis.tvl.valueUsd).toFixed(0)}` : "Unknown"}</strong></div>
+        </div>
+
+        <div class="card">
+          <h2>Description</h2>
+          <div class="muted">${escapeHtml(analysis?.protocol?.description || "Unknown")}</div>
+        </div>
+
+        <div class="card">
+          <h2>Relationship diagram</h2>
+          ${svg}
+        </div>
+
+        <div class="card">
+          <h2>Relationship CSV</h2>
+          <pre>${escapeHtml(artifacts.csv)}</pre>
+        </div>
+
+        <div class="card">
+          <h2>Relationship JSON</h2>
+          <pre>${escapeHtml(JSON.stringify(artifacts.json, null, 2))}</pre>
+        </div>
+
+        <div class="card">
+          <h2>Full analysis JSON (raw)</h2>
+          <pre>${escapeHtml(JSON.stringify(analysis, null, 2))}</pre>
+        </div>
+      </div>
+    </body>
+  </html>`;
+
+  const filename = `${safePdfFilename(analysis?.protocol?.name || "protocol")}-agent-report.html`;
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  return res.send(html);
+});
+
 app.post("/api/risk-assessment", async (req, res) => {
   const { protocolName, url, analysis: analysisIn, protocolKey } = req.body || {};
 
@@ -1923,6 +3262,129 @@ function buildArchitectureSpiderSvg({ protocolLabel, protocolAddress, tokenNodes
   </svg>`;
 }
 
+function buildEcosystemHopSvg({ subjectId, nodes, edges, hopDist }) {
+  const width = 980;
+  const height = 720;
+  const padding = 18;
+  const cx = Math.round(width / 2);
+  const cy = Math.round(height / 2);
+  const nodeW = 200;
+  const nodeH = 44;
+  const r1 = 210;
+  const r2 = 315;
+
+  const safeId = (v) => String(v || "").trim().toLowerCase();
+  const safeLabel = (n) => String(n?.label || n?.name || n?.symbol || n?.address || n?.id || "—").trim();
+  const safeKind = (n) => String(n?.kind || n?.type || "node").toLowerCase();
+
+  const rect = (x, y, w, h, fill, stroke) =>
+    `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" ry="10" fill="${fill}" stroke="${stroke}" />`;
+  const text = (x, y, t, size = 10, color = "#0f172a", anchor = "start", family = "system") => {
+    const font =
+      family === "mono"
+        ? `ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace`
+        : `-apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif`;
+    return `<text x="${x}" y="${y}" font-size="${size}" fill="${color}" font-family="${font}" text-anchor="${anchor}">${escapeHtml(
+      t
+    )}</text>`;
+  };
+  const line = (x1, y1, x2, y2, stroke = "#94a3b8", widthPx = 1.3, opacity = 0.85) =>
+    `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${stroke}" stroke-width="${widthPx}" opacity="${opacity}" />`;
+
+  const bg = `<rect x="0" y="0" width="${width}" height="${height}" rx="12" ry="12" fill="#ffffff" stroke="#dbe3ee" />`;
+  const ring0 = `<circle cx="${cx}" cy="${cy}" r="3" fill="#1d4ed8" />`;
+  const ring1 = `<circle cx="${cx}" cy="${cy}" r="${r1}" fill="none" stroke="#e2e8f0" stroke-dasharray="4 4" />`;
+  const ring2 = `<circle cx="${cx}" cy="${cy}" r="${r2}" fill="none" stroke="#e2e8f0" stroke-dasharray="4 4" />`;
+
+  const all = Array.isArray(nodes) ? nodes : [];
+  const start = safeId(subjectId);
+  const hop0 = all.filter((n) => safeId(n?.id || n?.address) === start);
+  const hop1 = all.filter((n) => hopDist.get(safeId(n?.id || n?.address)) === 1);
+  const hop2 = all.filter((n) => hopDist.get(safeId(n?.id || n?.address)) === 2);
+
+  const placeRing = (ringNodes, radius) => {
+    const count = ringNodes.length;
+    return count
+      ? ringNodes.map((n, i) => {
+          const angle = -Math.PI / 2 + (2 * Math.PI * i) / count;
+          return { n, x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius };
+        })
+      : [];
+  };
+
+  const placed = [
+    ...hop0.map((n) => ({ n, x: cx, y: cy })),
+    ...placeRing(hop1, r1),
+    ...placeRing(hop2, r2),
+  ];
+
+  const pos = new Map(placed.map((p) => [safeId(p.n?.id || p.n?.address), { x: p.x, y: p.y, n: p.n }]));
+  const relEdges = Array.isArray(edges) ? edges : [];
+
+  const edgeColor = (rel) => {
+    const r = String(rel || "").toLowerCase();
+    if (r.includes("issued") || r.includes("wrapped") || r.includes("staking")) return "#7c3aed";
+    if (r.includes("integrat") || r.includes("oracle")) return "#10b981";
+    return "#94a3b8";
+  };
+
+  const edgeLines = relEdges
+    .slice(0, 160)
+    .map((e) => {
+      const from = pos.get(safeId(e?.from));
+      const to = pos.get(safeId(e?.to));
+      if (!from || !to) return "";
+      return line(from.x, from.y, to.x, to.y, edgeColor(e?.relation));
+    })
+    .join("");
+
+  const nodeFill = (k) => {
+    if (k === "protocol") return { fill: "#eff6ff", stroke: "#93c5fd", title: "#1d4ed8" };
+    if (k === "token") return { fill: "#f0f9ff", stroke: "#93c5fd", title: "#0f172a" };
+    if (k.includes("router")) return { fill: "#ecfdf5", stroke: "#6ee7b7", title: "#065f46" };
+    if (k === "contract") return { fill: "#faf5ff", stroke: "#c4b5fd", title: "#0f172a" };
+    return { fill: "#f8fafc", stroke: "#dbe3ee", title: "#0f172a" };
+  };
+
+  const nodeBlocks = placed
+    .slice(0, 44) // keep diagram readable in PDF
+    .map((p) => {
+      const n = p.n;
+      const id = safeId(n?.id || n?.address);
+      const hop = hopDist.get(id) ?? (id === start ? 0 : "");
+      const kind = safeKind(n);
+      const theme = nodeFill(kind);
+      const labelStr = safeLabel(n).slice(0, 26);
+      const idStr =
+        id && id.startsWith("0x") ? `${id.slice(0, 10)}...${id.slice(-6)}` : id.slice(0, 26);
+      const x = Math.max(padding, Math.min(width - padding - nodeW, Math.round(p.x - nodeW / 2)));
+      const y = Math.max(padding + 24, Math.min(height - padding - nodeH - 18, Math.round(p.y - nodeH / 2)));
+      return (
+        rect(x, y, nodeW, nodeH, theme.fill, theme.stroke) +
+        text(x + 8, y + 16, `${hop !== "" ? `hop ${hop} · ` : ""}${kind}`.slice(0, 22), 9, "#475569") +
+        text(x + 8, y + 30, labelStr, 10, theme.title) +
+        (idStr ? text(x + 8, y + 41, idStr, 8, "#475569", "start", "mono") : "")
+      );
+    })
+    .join("");
+
+  const legend =
+    rect(padding, padding, 300, 56, "#ffffff", "#dbe3ee") +
+    text(padding + 10, padding + 18, "Ecosystem Graph (2‑hop)", 11, "#334155") +
+    text(padding + 10, padding + 34, "Center = subject protocol · Ring1 = hop1 · Ring2 = hop2", 9, "#475569") +
+    text(padding + 10, padding + 48, "Lines show edges between these nodes (subset).", 9, "#475569");
+
+  return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+    ${bg}
+    ${ring1}
+    ${ring2}
+    ${edgeLines}
+    ${nodeBlocks}
+    ${ring0}
+    ${legend}
+  </svg>`;
+}
+
 function buildPdfReportHtml({ analysis, riskAssessment, generatedAt }) {
   const a = analysis || {};
   const p = a.protocol || {};
@@ -1970,6 +3432,64 @@ function buildPdfReportHtml({ analysis, riskAssessment, generatedAt }) {
   const aiNodes = Array.isArray(archFromAi?.nodes) ? archFromAi.nodes : [];
   const conn = a?.connections && typeof a.connections === "object" ? a.connections : null;
   const connNodes = Array.isArray(conn?.nodes) ? conn.nodes : [];
+  const connEdgesAll = Array.isArray(conn?.edges) ? conn.edges : [];
+
+  // Multi-hop ecosystem (protocol + token) view for reports:
+  // Prefer showing 2 hops from subject if possible.
+  const subjectGuess =
+    connNodes.find((n) => n && (n.kind === "protocol" || n.type === "protocol") && String(n.id || "").startsWith("protocol:") && String(n.label || n.name || "").toLowerCase().includes(String(p?.name || "").toLowerCase())) ||
+    connNodes.find((n) => n && (n.kind === "protocol" || n.type === "protocol") && String(n.id || "").startsWith("protocol:")) ||
+    null;
+  const subjectProtocolId = String(subjectGuess?.id || "").trim();
+
+  const connIdOf = (n) => String(n?.id || n?.address || "").trim().toLowerCase();
+  const connLabelOf = (n) => String(n?.label || n?.name || n?.symbol || n?.address || n?.id || "—").trim();
+  const adjacency = (() => {
+    const m = new Map(); // id -> Set(ids)
+    for (const e of connEdgesAll) {
+      if (!e) continue;
+      const f = String(e.from || "").trim().toLowerCase();
+      const t = String(e.to || "").trim().toLowerCase();
+      if (!f || !t) continue;
+      if (!m.has(f)) m.set(f, new Set());
+      if (!m.has(t)) m.set(t, new Set());
+      m.get(f).add(t);
+      m.get(t).add(f);
+    }
+    return m;
+  })();
+
+  const bfsWithinHops = (startId, maxHops) => {
+    if (!startId) return new Map();
+    const dist = new Map([[startId.toLowerCase(), 0]]);
+    const q = [startId.toLowerCase()];
+    while (q.length) {
+      const cur = q.shift();
+      const d = dist.get(cur);
+      if (d == null || d >= maxHops) continue;
+      const neigh = adjacency.get(cur);
+      if (!neigh) continue;
+      for (const nx of neigh) {
+        if (dist.has(nx)) continue;
+        dist.set(nx, d + 1);
+        q.push(nx);
+      }
+    }
+    return dist;
+  };
+
+  const hopDist = bfsWithinHops(subjectProtocolId, 2);
+  const connNodesById = new Map(connNodes.map((n) => [connIdOf(n), n]).filter(([id]) => id));
+  const multiHopNodes = subjectProtocolId ? Array.from(hopDist.keys()).map((id) => connNodesById.get(id)).filter(Boolean) : [];
+  const multiHopEdges = subjectProtocolId
+    ? connEdgesAll
+        .filter((e) => e && hopDist.has(String(e.from || "").toLowerCase()) && hopDist.has(String(e.to || "").toLowerCase()))
+        .slice(0, 120)
+    : [];
+  const ecosystemSvg =
+    subjectProtocolId && multiHopNodes.length
+      ? buildEcosystemHopSvg({ subjectId: subjectProtocolId, nodes: multiHopNodes, edges: multiHopEdges, hopDist })
+      : "";
 
   const aiTokens = aiNodes
     .filter((n) => n && n.type === "token" && isLikelyAddress(n.address))
@@ -2202,6 +3722,69 @@ function buildPdfReportHtml({ analysis, riskAssessment, generatedAt }) {
                 </tbody>
               </table>`
             : `<div class="muted">No smart contract addresses were detected.</div>`
+        }
+      </section>
+
+      <section class="section">
+        <h2>Ecosystem Connections (Multi‑hop)</h2>
+        ${
+          subjectProtocolId && multiHopNodes.length
+            ? `<div class="summary">
+                <div class="muted">Showing up to <strong>2 hops</strong> from <span class="mono">${escapeHtml(subjectProtocolId)}</span>.</div>
+                <div class="muted" style="margin-top:6px;">Nodes: ${escapeHtml(String(multiHopNodes.length))}, edges: ${escapeHtml(String(multiHopEdges.length))}.</div>
+              </div>
+              <div class="summary" style="margin-top:10px;">
+                ${ecosystemSvg}
+              </div>
+              <table style="margin-top:8px;">
+                <thead>
+                  <tr><th>Hop</th><th>Kind</th><th>Name / Label</th><th>ID / Address</th></tr>
+                </thead>
+                <tbody>
+                  ${multiHopNodes
+                    .slice(0, 120)
+                    .map((n) => {
+                      const id = connIdOf(n);
+                      const hop = hopDist.get(id) ?? "—";
+                      const kind = String(n?.kind || n?.type || "node");
+                      const label = connLabelOf(n);
+                      return `<tr>
+                        <td>${escapeHtml(String(hop))}</td>
+                        <td>${escapeHtml(kind)}</td>
+                        <td>${escapeHtml(label)}</td>
+                        <td class="mono">${escapeHtml(id || "—")}</td>
+                      </tr>`;
+                    })
+                    .join("")}
+                </tbody>
+              </table>
+              ${
+                multiHopEdges.length
+                  ? `<table style="margin-top:10px;">
+                      <thead>
+                        <tr><th>From</th><th>Relation</th><th>To</th><th>Evidence</th></tr>
+                      </thead>
+                      <tbody>
+                        ${multiHopEdges
+                          .slice(0, 120)
+                          .map((e) => {
+                            const from = String(e.from || "");
+                            const to = String(e.to || "");
+                            const rel = String(e.relation || "connected");
+                            const ev = Array.isArray(e.evidence) ? e.evidence.join(" | ") : String(e.evidence || "");
+                            return `<tr>
+                              <td class="mono">${escapeHtml(from)}</td>
+                              <td>${escapeHtml(rel)}</td>
+                              <td class="mono">${escapeHtml(to)}</td>
+                              <td>${escapeHtml(ev.slice(0, 240))}</td>
+                            </tr>`;
+                          })
+                          .join("")}
+                      </tbody>
+                    </table>`
+                  : ""
+              }`
+            : `<div class="muted">No multi-hop ecosystem graph was attached to this analysis yet. Enable hosted enrichment and ensure the connections graph includes protocol/token nodes.</div>`
         }
       </section>
 
@@ -2676,14 +4259,23 @@ async function verifyAuditsFromProtocolDocs({ origin, protocolName }) {
   const enableHostedEnrich = String(process.env.ENABLE_HOSTED_ENRICH || "0") === "1";
   const enableWebsiteLlm = String(process.env.ENABLE_WEBSITE_LLM || "1").toLowerCase() === "1";
   if (enableHostedEnrich && allSnippets.length) {
-    const auditorsRes = await extractAuditorsWithHostedLlm({
-      protocolName: protocolName || null,
-      origin: base,
-      docs: {
-        lines: allSnippets.slice(0, 55),
-        evidence: ["verifyAuditsFromProtocolDocs (hosted)", ...evidence.slice(0, 3)],
-      },
-    }).catch(() => null);
+    const auditorsTimeoutMs = Number(
+      process.env.HOSTED_AUDITORS_TIMEOUT_MS ||
+        process.env.CURSOR_CLOUD_AGENTS_AUDITORS_TIMEOUT_MS ||
+        120_000
+    );
+    const auditorsRes = await withTimeout(
+      extractAuditorsWithHostedLlm({
+        protocolName: protocolName || null,
+        origin: base,
+        docs: {
+          lines: allSnippets.slice(0, 55),
+          evidence: ["verifyAuditsFromProtocolDocs (hosted)", ...evidence.slice(0, 3)],
+        },
+      }),
+      auditorsTimeoutMs,
+      "auditors"
+    ).catch(() => null);
     for (const a of auditorsRes?.auditors || []) {
       const n = String(a?.name || "").trim();
       if (n) firmSet.add(n);
@@ -2930,9 +4522,21 @@ async function fetchHtmlWithOptionalRender(url) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), fetchTimeoutMs);
 
+  const fetchOnce = () => fetch(url, { headers, signal: controller.signal });
   let resp;
   try {
-    resp = await fetch(url, { headers, signal: controller.signal });
+    // Small retry for transient DNS issues (EAI_AGAIN/ENOTFOUND happens on some networks).
+    try {
+      resp = await fetchOnce();
+    } catch (e1) {
+      const m = String(e1?.message || e1 || "");
+      if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(m)) {
+        await new Promise((r) => setTimeout(r, 650));
+        resp = await fetchOnce();
+      } else {
+        throw e1;
+      }
+    }
   } catch (err) {
     const msg = err?.message ? String(err.message) : String(err);
     // Network timeouts are common when rendering JS-heavy pages.
@@ -2970,18 +4574,13 @@ async function fetchHtmlWithOptionalRender(url) {
     const u = new URL(String(url || ""));
     const host = u.hostname.toLowerCase();
     if (host.startsWith("app.") || host.includes("pendle.finance")) {
-      defaultRenderTimeoutMs = 12_000;
+      defaultRenderTimeoutMs = 25_000;
     }
   } catch {
     // ignore
   }
   const renderTimeoutMs = Number(process.env.PLAYWRIGHT_RENDER_TIMEOUT_MS || defaultRenderTimeoutMs);
-  const rendered = await Promise.race([
-    renderHtmlWithPlaywright(url),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`Playwright render timed out after ${renderTimeoutMs}ms`)), renderTimeoutMs)
-    ),
-  ]).catch((err) => {
+  const rendered = await renderHtmlWithPlaywright(url, { timeoutMs: renderTimeoutMs }).catch((err) => {
     renderError = err?.message ? String(err.message) : String(err);
     console.warn("Playwright render failed, using raw HTML:", renderError);
     return null;
@@ -3059,7 +4658,7 @@ function shouldRenderHtml({ html, url }) {
   return false;
 }
 
-async function renderHtmlWithPlaywright(url) {
+async function renderHtmlWithPlaywright(url, { timeoutMs } = {}) {
   // Serverless (Vercel) often needs these flags. Locally, apply default
   // Chromium settings to avoid hangs/regressions.
   const isVercel = String(process.env.VERCEL || "") !== "";
@@ -3068,6 +4667,18 @@ async function renderHtmlWithPlaywright(url) {
     args: isVercel ? ["--no-sandbox", "--disable-setuid-sandbox"] : [],
   });
   try {
+    const hardTimeoutMs = Number(timeoutMs || process.env.PLAYWRIGHT_RENDER_TIMEOUT_MS || (isVercel ? 60_000 : 30_000));
+    let hardTimer = null;
+    const hardTimeout = new Promise((_, reject) => {
+      hardTimer = setTimeout(async () => {
+        try {
+          await browser.close();
+        } catch {}
+        reject(new Error(`Playwright render timed out after ${hardTimeoutMs}ms`));
+      }, hardTimeoutMs);
+    });
+
+    const work = (async () => {
     const context = await browser.newContext({
       userAgent: "ProtocolInspector/1.0 (+https://github.com/)",
       viewport: { width: 1280, height: 720 },
@@ -3140,6 +4751,11 @@ async function renderHtmlWithPlaywright(url) {
 
     await context.close();
     return { html, extracted, lastErr: lastErr ? String(lastErr.message || lastErr) : null };
+    })();
+
+    const result = await Promise.race([work, hardTimeout]);
+    if (hardTimer) clearTimeout(hardTimer);
+    return result;
   } finally {
     await browser.close();
   }
@@ -4235,7 +5851,17 @@ if (!process.env.VERCEL) {
 function normalizeUrl(rawUrl) {
   if (!rawUrl) return "";
   try {
-    return new URL(rawUrl).origin;
+    const u = new URL(rawUrl);
+    // Prefer https for public sites (prevents mixed-content issues and avoids some DNS/proxy oddities on http).
+    const host = u.hostname.toLowerCase();
+    const isLocal =
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host.endsWith(".localhost");
+    if (!isLocal && u.protocol === "http:") {
+      u.protocol = "https:";
+    }
+    return u.origin;
   } catch {
     return rawUrl.trim();
   }

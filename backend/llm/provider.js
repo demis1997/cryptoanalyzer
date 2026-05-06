@@ -7,6 +7,48 @@ export class LlmProviderError extends Error {
   }
 }
 
+function truthyEnv(name) {
+  const v = String(process.env[name] || "").trim();
+  return /^(1|true|yes|on)$/i.test(v);
+}
+
+function truncateForLog(s, max = 6000) {
+  const t = String(s ?? "");
+  if (t.length <= max) return t;
+  return `${t.slice(0, max)}\n[truncated:${t.length - max} chars]`;
+}
+
+function logHostedLlm({ phase, providerKind, step, system, user, model, meta, rawText, json, error }) {
+  if (!truthyEnv("DEBUG_LLM")) return;
+  const header = `[llm][${providerKind || "unknown"}] ${phase}${step ? ` step=${step}` : ""}`;
+  try {
+    if (phase === "request") {
+      console.log(header, {
+        model: model || null,
+        system: truncateForLog(system, 8000),
+        user: truncateForLog(user, 16000),
+      });
+      return;
+    }
+    if (phase === "response") {
+      console.log(header, {
+        meta: meta || null,
+        rawText: truncateForLog(rawText, 20000),
+        json: json ?? null,
+      });
+      return;
+    }
+    if (phase === "error") {
+      console.warn(header, {
+        error: String(error?.message || error || ""),
+        meta: meta || null,
+      });
+    }
+  } catch {
+    // ignore log failures
+  }
+}
+
 /**
  * Minimal interface:
  * - runJson({ system, user, model, timeoutMs }) -> { json, rawText, meta }
@@ -38,6 +80,7 @@ export async function runHostedLlmJson(opts) {
   const primaryKind = String(process.env.LLM_PROVIDER || "cursor").toLowerCase();
   const disableFb = String(process.env.DISABLE_COMPOSER_FALLBACK || "0") === "1";
   const endpoint = String(process.env.CURSOR_API_ENDPOINT || "").trim();
+  const step = opts && typeof opts === "object" ? String(opts.step || "") : "";
 
   const runComposer = async () => {
     if (!endpoint) {
@@ -48,7 +91,23 @@ export async function runHostedLlmJson(opts) {
     }
     const mod = await import("./hostedCursor.js");
     const fallback = mod.createCursorProvider();
+    logHostedLlm({
+      phase: "request",
+      providerKind: "cursor",
+      step,
+      system: opts?.system,
+      user: opts?.user,
+      model: opts?.model,
+    });
     const r = await fallback.runJson(opts);
+    logHostedLlm({
+      phase: "response",
+      providerKind: "cursor",
+      step,
+      meta: r?.meta,
+      rawText: r?.rawText,
+      json: r?.json,
+    });
     return {
       ...r,
       meta: { ...(r.meta || {}), kind: "cursor", usedComposerFallback: true },
@@ -61,12 +120,29 @@ export async function runHostedLlmJson(opts) {
 
   const provider = await createLlmProvider();
   try {
+    logHostedLlm({
+      phase: "request",
+      providerKind: provider?.kind,
+      step,
+      system: opts?.system,
+      user: opts?.user,
+      model: opts?.model,
+    });
     const r = await provider.runJson(opts);
+    logHostedLlm({
+      phase: "response",
+      providerKind: provider?.kind,
+      step,
+      meta: r?.meta,
+      rawText: r?.rawText,
+      json: r?.json,
+    });
     return {
       ...r,
       meta: { ...(r.meta || {}), kind: provider.kind, usedComposerFallback: false },
     };
   } catch (err) {
+    logHostedLlm({ phase: "error", providerKind: provider?.kind, step, error: err });
     const msg = String(err?.message || err || "");
     const storageOff = /storage mode is disabled/i.test(msg);
     if (primaryKind === "cursor_cloud_agents" && storageOff && !endpoint) {

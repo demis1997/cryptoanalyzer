@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Database • Protocol Inspector</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="app__header">
+        <h1>Database</h1>
+        <p class="app__subtitle">
+          Search protocols stored in our DB and explore connected protocols.
+        </p>
+        <nav class="nav" aria-label="Primary">
+          <a href="/">Home</a>
+          <a href="/agent.html">Agent</a>
+          <a class="nav__active" href="/db.html">Database</a>
+        </nav>
+      </header>
+
+      <section class="card card--input">
+        <div class="field__label">Search protocol</div>
+        <div class="field__row">
+          <input id="db-q" type="text" class="field__input" placeholder="lido / optimism / pendle" />
+          <button id="db-search-btn" type="button" class="btn btn--ghost">Search</button>
+        </div>
+        <div id="db-meta" class="field__hint"></div>
+        <ul id="db-results" class="list" style="margin-top:10px;"></ul>
+      </section>
+
+      <section class="grid grid--meta">
+        <article class="card">
+          <h2 class="card__title">Protocol</h2>
+          <div id="p-name" class="metric metric--primary">–</div>
+          <div id="p-id" class="metric metric--muted mono-inline"></div>
+          <div id="p-url" class="metric metric--muted"></div>
+          <div id="p-auditors" class="metric metric--muted"></div>
+          <div id="p-summary" class="metric metric--muted" style="margin-top:10px;"></div>
+        </article>
+        <article class="card">
+          <h2 class="card__title">Stored objects</h2>
+          <div id="p-stats" class="metric metric--muted">–</div>
+          <ul id="p-docs" class="list" style="margin-top:10px;"></ul>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2 class="card__title">Related protocols (up to 4 hops)</h2>
+          <div id="rel-graph" class="summary" style="margin-bottom:10px;display:none;"></div>
+          <ul id="rel-list" class="list"></ul>
+          <p id="rel-empty" class="card__empty">Search and open a protocol to see connections.</p>
+        </article>
+        <article class="card">
+          <h2 class="card__title">Raw stored JSON</h2>
+          <pre id="raw-json" style="margin:0;white-space:pre-wrap;font-size:12px;color:#cbd5e1;max-height:420px;overflow:auto;"></pre>
+        </article>
+      </section>
+    </div>
+
+    <script type="module" src="db.js"></script>
+  </body>
+</html>
+
