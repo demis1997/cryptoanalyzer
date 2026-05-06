@@ -1,6 +1,31 @@
 import fetch from "node-fetch";
-import { PDFParse } from "pdf-parse";
 import { extractAddressContexts, extractKeywordLines } from "./docsSnippets.js";
+
+async function loadPdfParse() {
+  // pdf-parse depends on pdfjs-dist which expects certain Canvas/DOM polyfills in Node.
+  // On serverless runtimes (e.g. Vercel), this can crash at import time if optional deps are missing.
+  try {
+    // Best-effort polyfills (if available)
+    if (!globalThis.DOMMatrix || !globalThis.ImageData || !globalThis.Path2D) {
+      try {
+        const canvas = await import("@napi-rs/canvas");
+        if (!globalThis.DOMMatrix && canvas.DOMMatrix) globalThis.DOMMatrix = canvas.DOMMatrix;
+        if (!globalThis.ImageData && canvas.ImageData) globalThis.ImageData = canvas.ImageData;
+        if (!globalThis.Path2D && canvas.Path2D) globalThis.Path2D = canvas.Path2D;
+      } catch {
+        // ignore; we'll still try to import pdf-parse and fall back if it fails
+      }
+    }
+
+    const mod = await import("pdf-parse");
+    // pdf-parse v2 exports PDFParse (class) in ESM builds
+    const PDFParse = mod?.PDFParse || mod?.default?.PDFParse || mod?.default || null;
+    if (!PDFParse) return null;
+    return PDFParse;
+  } catch {
+    return null;
+  }
+}
 
 function uniq(arr) {
   return Array.from(new Set((arr || []).filter(Boolean)));
@@ -69,6 +94,9 @@ export async function ingestAuditPdfsIntoDocsPack({
   const lines = Array.isArray(pack.lines) ? [...pack.lines] : [];
 
   let parsed = 0;
+  const PDFParse = await loadPdfParse();
+  if (!PDFParse) return pack;
+
   for (const url of links) {
     if (parsed >= Math.max(1, Number(maxPdfs) || 3)) break;
     if (!isProbablyPdfUrl(url)) continue;
