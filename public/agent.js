@@ -15,6 +15,7 @@ const riskNoteEl = document.getElementById("a-risk-note");
 
 const relatedEl = document.getElementById("a-related");
 const relatedEmpty = document.getElementById("a-related-empty");
+const relatedGraphEl = document.getElementById("a-related-graph");
 const rawEl = document.getElementById("a-raw");
 
 let lastProtocolKey = null;
@@ -44,11 +45,85 @@ async function apiGet(url) {
   return json;
 }
 
+function prettyId(id) {
+  const s = String(id || "").trim();
+  if (!s) return "";
+  return s.replace(/^defillama:/i, "").replace(/^protocol:/i, "").replace(/^url:/i, "");
+}
+
+function escapeHtml(v) {
+  return String(v ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function renderRelatedGraphSvg({ rootName, relatedNodes }) {
+  if (!relatedGraphEl) return;
+  const nodes = Array.isArray(relatedNodes) ? relatedNodes.slice(0, 36) : [];
+  if (!nodes.length) {
+    relatedGraphEl.style.display = "none";
+    relatedGraphEl.innerHTML = "";
+    return;
+  }
+
+  const width = 860;
+  const height = 260;
+  const root = { x: Math.floor(width / 2), y: 36, label: String(rootName || "Protocol").slice(0, 26) };
+  const cols = 6;
+  const colW = Math.floor(width / cols);
+  const padX = 18;
+  const padY = 100;
+
+  const pts = nodes.map((n, i) => {
+    const c = i % cols;
+    const r = Math.floor(i / cols);
+    return {
+      x: padX + c * colW + Math.floor(colW / 2),
+      y: padY + r * 62,
+      label: String(n.name || prettyId(n.id) || "Protocol").slice(0, 18),
+    };
+  });
+
+  const lines = pts
+    .map((p) => `<line x1="${root.x}" y1="${root.y + 14}" x2="${p.x}" y2="${p.y - 10}" stroke="#334155" stroke-width="1" />`)
+    .join("");
+  const bubbles = pts
+    .map(
+      (p) => `
+      <g>
+        <rect x="${p.x - 70}" y="${p.y - 18}" width="140" height="32" rx="12" fill="#0b1220" stroke="#334155" />
+        <text x="${p.x}" y="${p.y + 3}" text-anchor="middle" font-size="11" fill="#e5e7eb" font-family="system-ui, -apple-system, Segoe UI, sans-serif">${escapeHtml(p.label)}</text>
+      </g>`
+    )
+    .join("");
+
+  relatedGraphEl.style.display = "block";
+  relatedGraphEl.innerHTML = `
+    <svg width="100%" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Related protocols graph">
+      <rect x="0" y="0" width="${width}" height="${height}" fill="#020617" rx="18" />
+      <g>
+        <rect x="${root.x - 120}" y="${root.y - 18}" width="240" height="38" rx="14" fill="#0b1220" stroke="#38bdf8" stroke-width="1.5" />
+        <text x="${root.x}" y="${root.y + 6}" text-anchor="middle" font-size="12" fill="#e5e7eb" font-family="system-ui, -apple-system, Segoe UI, sans-serif">${escapeHtml(root.label)}</text>
+      </g>
+      ${lines}
+      ${bubbles}
+      <text x="${width - 16}" y="${height - 14}" text-anchor="end" font-size="10" fill="#64748b" font-family="system-ui, -apple-system, Segoe UI, sans-serif">Showing ${nodes.length} related protocols</text>
+    </svg>
+  `;
+}
+
 function renderRelated(graph, { rootId }) {
   relatedEl.innerHTML = "";
   const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
   if (!nodes.length) {
     if (relatedEmpty) relatedEmpty.style.display = "block";
+    if (relatedGraphEl) {
+      relatedGraphEl.style.display = "none";
+      relatedGraphEl.innerHTML = "";
+    }
     return;
   }
   if (relatedEmpty) relatedEmpty.style.display = "none";
@@ -60,7 +135,7 @@ function renderRelated(graph, { rootId }) {
       <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;">
         <div>
           <div>${safeText(n.name || n.id, 90)}</div>
-          <div class="metric metric--muted mono-inline">${safeText(n.id, 140)}</div>
+          <div class="metric metric--muted mono-inline">${safeText(prettyId(n.id), 140)}</div>
         </div>
         <a class="btn btn--ghost" style="padding:6px 12px;font-size:12px;text-decoration:none;" href="/db.html#${encodeURIComponent(
           n.id
@@ -80,6 +155,10 @@ function clear() {
   riskNoteEl.textContent = "";
   relatedEl.innerHTML = "";
   if (relatedEmpty) relatedEmpty.style.display = "block";
+  if (relatedGraphEl) {
+    relatedGraphEl.style.display = "none";
+    relatedGraphEl.innerHTML = "";
+  }
   rawEl.textContent = "";
   metaEl.textContent = "";
   lastProtocolKey = null;
@@ -98,10 +177,13 @@ async function downloadAgentReport({ url, protocolKey, riskAssessment } = {}) {
     throw new Error(json?.error || `Download failed (${resp.status})`);
   }
   const blob = await resp.blob();
+  const cd = resp.headers.get("content-disposition") || "";
+  const m = /filename="([^"]+)"/i.exec(cd);
+  const filename = m && m[1] ? m[1] : "agent-report.html";
   const dlUrl = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = dlUrl;
-  a.download = "agent-report.html";
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -161,6 +243,11 @@ form?.addEventListener("submit", async (e) => {
     if (pid) {
       metaEl.textContent += " • Loading related protocols…";
       const related = await apiGet(`/api/db/related?id=${encodeURIComponent(pid)}&hops=4`);
+      const relNodes = Array.isArray(related?.graph?.nodes) ? related.graph.nodes : [];
+      renderRelatedGraphSvg({
+        rootName: p.name || prettyId(pid),
+        relatedNodes: relNodes.filter((n) => n?.id && n.id !== pid),
+      });
       renderRelated(related.graph, { rootId: pid });
     }
 

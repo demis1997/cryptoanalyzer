@@ -8,6 +8,22 @@ function truthyEnv(name) {
   return /^(1|true|yes|on)$/i.test(env(name));
 }
 
+function normalizeChain(raw) {
+  const s = String(raw || "").trim().toLowerCase();
+  if (!s) return "ethereum";
+  if (s.includes("arbitrum")) return "arbitrum";
+  if (s.includes("optimism")) return "optimism";
+  if (s.includes("base")) return "base";
+  if (s.includes("polygon")) return "polygon";
+  if (s.includes("avalanche")) return "avalanche";
+  if (s.includes("bsc") || s.includes("bnb")) return "bsc";
+  if (s.includes("scroll")) return "scroll";
+  if (s.includes("mantle")) return "mantle";
+  if (s.includes("zksync")) return "zksync";
+  if (s.includes("linea")) return "linea";
+  return s.replace(/[^a-z0-9_-]+/g, "_").slice(0, 24) || "ethereum";
+}
+
 export function neo4jEnabled() {
   // Enable explicitly or when URI is present.
   return truthyEnv("ENABLE_NEO4J_GRAPH") || Boolean(env("NEO4J_URI"));
@@ -238,6 +254,98 @@ export async function getRelatedProtocolsNeo4j({ id, hops = 4, limitNodes = 220,
   }
 }
 
+const POOL_TYPES = new Set(["pool", "market", "vault", "amm", "lp", "staking"]);
+
+export async function searchPoolsNeo4j({ q, limit = 25 } = {}) {
+  const query = String(q || "").trim();
+  if (!query) return [];
+  const lim = Math.min(100, Math.max(1, Number(limit) || 25));
+
+  const { driver } = getDriver();
+  const cfg = neo4jConfig();
+  const session = driver.session({ database: cfg.database });
+  try {
+    const res = await session.run(
+      `
+      MATCH (c:Contract)
+      WHERE
+        toLower(coalesce(c.label,'')) CONTAINS toLower($q)
+        AND (
+          toLower(coalesce(c.type,'')) IN ['pool','market','vault','amm','lp','staking']
+          OR toLower(coalesce(c.label,'')) CONTAINS 'pool'
+          OR toLower(coalesce(c.label,'')) CONTAINS 'market'
+          OR toLower(coalesce(c.label,'')) CONTAINS 'vault'
+        )
+      RETURN c.chain AS chain, c.address AS address, c.label AS label, c.type AS type, c.updatedAt AS updatedAt
+      ORDER BY updatedAt DESC
+      LIMIT $limit
+      `,
+      { q: query, limit: neo4j.int(lim) }
+    );
+    return res.records.map((r) => ({
+      chain: r.get("chain") || "ethereum",
+      address: r.get("address") || null,
+      label: r.get("label") || null,
+      type: r.get("type") || null,
+      updatedAt: r.get("updatedAt") || null,
+    }));
+  } finally {
+    await session.close();
+  }
+}
+
+export async function getPoolNeighborhoodNeo4j({ chain = "ethereum", address, hops = 4, limitProtocols = 160, limitPools = 120 } = {}) {
+  const ch = String(chain || "ethereum").trim().toLowerCase() || "ethereum";
+  const addr = String(address || "").trim().toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(addr)) return { ok: false, error: "Bad address" };
+  const maxHops = Math.min(6, Math.max(1, Number(hops) || 4));
+
+  const { driver } = getDriver();
+  const cfg = neo4jConfig();
+  const session = driver.session({ database: cfg.database });
+  try {
+    const res = await session.run(
+      `
+      MATCH (root:Contract {chain:$chain, address:$address})
+      OPTIONAL MATCH path = (root)-[:ECOSYSTEM_LINK*1..${maxHops}]-(m)
+      UNWIND (CASE WHEN path IS NULL THEN [root] ELSE nodes(path) END) AS n
+      WITH root, collect(DISTINCT n) AS allNodes
+      WITH root,
+        [x IN allNodes WHERE x:Protocol] AS protos,
+        [x IN allNodes WHERE x:Contract AND (toLower(coalesce(x.type,'')) IN ['pool','market','vault','amm','lp','staking'] OR toLower(coalesce(x.label,'')) CONTAINS 'pool' OR toLower(coalesce(x.label,'')) CONTAINS 'market' OR toLower(coalesce(x.label,'')) CONTAINS 'vault')] AS pools
+      RETURN
+        root.chain AS chain,
+        root.address AS address,
+        root.label AS label,
+        root.type AS type,
+        [p IN protos | {id:p.id, name:p.name, url:p.url}] AS protocols,
+        [c IN pools | {chain:c.chain, address:c.address, label:c.label, type:c.type}] AS pools
+      `,
+      { chain: ch, address: addr }
+    );
+
+    if (!res.records.length) return { ok: true, hit: false, chain: ch, address: addr };
+    const rec = res.records[0];
+    const protocols = Array.isArray(rec.get("protocols")) ? rec.get("protocols") : [];
+    const pools = Array.isArray(rec.get("pools")) ? rec.get("pools") : [];
+
+    return {
+      ok: true,
+      hit: true,
+      root: {
+        chain: rec.get("chain") || ch,
+        address: rec.get("address") || addr,
+        label: rec.get("label") || null,
+        type: rec.get("type") || null,
+      },
+      protocols: protocols.slice(0, limitProtocols),
+      pools: pools.slice(0, limitPools),
+    };
+  } finally {
+    await session.close();
+  }
+}
+
 function protocolIdFrom({ origin, defillamaSlug }) {
   const s = String(defillamaSlug || "").trim();
   if (s) return `defillama:${s}`;
@@ -442,6 +550,7 @@ export async function upsertProtocolGraphNeo4j({
       for (const t of Array.isArray(tokens) ? tokens : []) {
         const addr = String(t?.address || "").toLowerCase();
         if (!/^0x[a-f0-9]{40}$/.test(addr)) continue;
+        const chain = normalizeChain(t?.chain || t?.network || "ethereum");
         await tx.run(
           `
           MATCH (p:Protocol {id:$id})
@@ -449,13 +558,14 @@ export async function upsertProtocolGraphNeo4j({
           SET t.symbol = coalesce($symbol, t.symbol)
           MERGE (p)-[:HAS_TOKEN]->(t)
           `,
-          { id, chain: "ethereum", address: addr, symbol: t?.symbol || t?.token || null }
+          { id, chain, address: addr, symbol: t?.symbol || t?.token || null }
         );
       }
 
       for (const c of Array.isArray(contracts) ? contracts : []) {
         const addr = String(c?.address || "").toLowerCase();
         if (!/^0x[a-f0-9]{40}$/.test(addr)) continue;
+        const chain = normalizeChain(c?.chain || c?.network || "ethereum");
         await tx.run(
           `
           MATCH (p:Protocol {id:$id})
@@ -465,7 +575,7 @@ export async function upsertProtocolGraphNeo4j({
             c.type = coalesce($type, c.type)
           MERGE (p)-[:HAS_CONTRACT]->(c)
           `,
-          { id, chain: "ethereum", address: addr, label: c?.label || null, type: c?.type || null }
+          { id, chain, address: addr, label: c?.label || null, type: c?.type || null }
         );
       }
 
@@ -615,17 +725,26 @@ export async function upsertConnectionsGraphNeo4j({ rootProtocolId, subjectProto
     return { refLabel: "Asset", key: { id: sid } };
   };
 
-  try {
-    await session.executeWrite(async (tx) => {
-      // Merge nodes
-      for (const n of nodeIndex.values()) {
-        await mergeNodeCypher(tx, n);
-      }
+  const chunk = (arr, size) => {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
+  };
 
-      // Optionally link root protocol id (defillama:url) to the subject protocol node (protocol:slug)
-      const root = String(rootProtocolId || "").trim();
-      const subj = String(subjectProtocolId || "").trim().toLowerCase();
-      if (root && subj && subj.startsWith("protocol:")) {
+  try {
+    // Batch writes to avoid transaction timeouts on Aura
+    const nodeBatches = chunk([...nodeIndex.values()], 500);
+    for (const batch of nodeBatches) {
+      await session.executeWrite(async (tx) => {
+        for (const n of batch) await mergeNodeCypher(tx, n);
+      });
+    }
+
+    // Optionally link root protocol id (defillama:url) to the subject protocol node (protocol:slug)
+    const root = String(rootProtocolId || "").trim();
+    const subj = String(subjectProtocolId || "").trim().toLowerCase();
+    if (root && subj && subj.startsWith("protocol:")) {
+      await session.executeWrite(async (tx) => {
         await tx.run(
           `
           MATCH (r:Protocol {id:$root})
@@ -634,38 +753,59 @@ export async function upsertConnectionsGraphNeo4j({ rootProtocolId, subjectProto
           `,
           { root, subj }
         );
-      }
+      });
+    }
 
-      // Merge edges
-      for (const e of edges) {
-        if (!e || typeof e !== "object") continue;
-        const f = matchNodeRef(e.from);
-        const t = matchNodeRef(e.to);
-        if (!f || !t) continue;
-        const rel = String(e.relation || "associated").trim().slice(0, 64);
-        const evidence = Array.isArray(e.evidence) ? e.evidence.map((x) => String(x).slice(0, 220)).slice(0, 8) : [];
-        const evStr = evidence.length ? JSON.stringify(evidence) : null;
+    const edgeBatches = chunk(edges, 500);
+    for (const batch of edgeBatches) {
+      await session.executeWrite(async (tx) => {
+        const rows = [];
+        for (const e of batch) {
+          if (!e || typeof e !== "object") continue;
+          const f = matchNodeRef(e.from);
+          const t = matchNodeRef(e.to);
+          if (!f || !t) continue;
+          const rel = String(e.relation || "associated").trim().slice(0, 64);
+          const evidence = Array.isArray(e.evidence) ? e.evidence.map((x) => String(x).slice(0, 220)).slice(0, 8) : [];
+          const evStr = evidence.length ? JSON.stringify(evidence) : null;
+          rows.push({
+            fromKind: String(f.refLabel || "").toLowerCase(),
+            fromId: f.key.id || null,
+            fromChain: f.key.chain || null,
+            fromAddress: f.key.address || null,
+            toKind: String(t.refLabel || "").toLowerCase(),
+            toId: t.key.id || null,
+            toChain: t.key.chain || null,
+            toAddress: t.key.address || null,
+            relation: rel,
+            evidence: evStr,
+            now,
+          });
+        }
+        if (!rows.length) return;
 
-        const cypher = `
-          MATCH (a:${f.refLabel} ${Object.keys(f.key).length === 1 ? "{id:$fromId}" : "{chain:$fromChain, address:$fromAddress}"})
-          MATCH (b:${t.refLabel} ${Object.keys(t.key).length === 1 ? "{id:$toId}" : "{chain:$toChain, address:$toAddress}"})
-          MERGE (a)-[r:ECOSYSTEM_LINK {relation:$relation}]->(b)
-          SET r.evidence = coalesce($evidence, r.evidence), r.updatedAt = $now
-        `;
-
-        await tx.run(cypher, {
-          fromId: f.key.id || null,
-          fromChain: f.key.chain || null,
-          fromAddress: f.key.address || null,
-          toId: t.key.id || null,
-          toChain: t.key.chain || null,
-          toAddress: t.key.address || null,
-          relation: rel,
-          evidence: evStr,
-          now,
-        });
-      }
-    });
+        await tx.run(
+          `
+          UNWIND $rows AS row
+          MATCH (a)
+          WHERE
+            (row.fromKind = "protocol" AND a:Protocol AND a.id = row.fromId) OR
+            (row.fromKind = "contract" AND a:Contract AND a.chain = row.fromChain AND a.address = row.fromAddress) OR
+            (row.fromKind = "token" AND a:Token AND a.chain = row.fromChain AND a.address = row.fromAddress) OR
+            (row.fromKind = "asset" AND a:Asset AND a.id = row.fromId)
+          MATCH (b)
+          WHERE
+            (row.toKind = "protocol" AND b:Protocol AND b.id = row.toId) OR
+            (row.toKind = "contract" AND b:Contract AND b.chain = row.toChain AND b.address = row.toAddress) OR
+            (row.toKind = "token" AND b:Token AND b.chain = row.toChain AND b.address = row.toAddress) OR
+            (row.toKind = "asset" AND b:Asset AND b.id = row.toId)
+          MERGE (a)-[r:ECOSYSTEM_LINK {relation: row.relation}]->(b)
+          SET r.evidence = coalesce(row.evidence, r.evidence), r.updatedAt = row.now
+          `,
+          { rows }
+        );
+      });
+    }
 
     return { ok: true, nodes: nodeIndex.size, edges: edges.length };
   } finally {

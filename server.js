@@ -49,6 +49,8 @@ import {
   searchProtocolsNeo4j,
   getRelatedProtocolsNeo4j,
   findProtocolIdByUrlNeo4j,
+  searchPoolsNeo4j,
+  getPoolNeighborhoodNeo4j,
 } from "./backend/db/neo4jGraph.js";
 import { fetchDocsSnippets } from "./backend/services/docsSnippets.js";
 import { ingestAuditPdfsIntoDocsPack } from "./backend/services/auditPdfIngest.js";
@@ -884,6 +886,32 @@ app.get("/api/db/related", async (req, res) => {
     }
     const r = await getRelatedProtocolsNeo4j({ id, hops });
     if (!r.ok) return res.status(500).json(r);
+    return res.json({ ok: true, source: "neo4j", ...r });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.get("/api/db/pool/search", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    const limit = Number(req.query.limit || 25);
+    if (!neo4jEnabled()) return res.json({ ok: true, source: "local_graph", results: [] });
+    const results = await searchPoolsNeo4j({ q, limit }).catch(() => []);
+    return res.json({ ok: true, source: "neo4j", results });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.get("/api/db/pool/neighborhood", async (req, res) => {
+  try {
+    const chain = String(req.query.chain || "ethereum").trim();
+    const address = String(req.query.address || "").trim();
+    const hops = Number(req.query.hops || 4);
+    if (!neo4jEnabled()) return res.json({ ok: true, source: "local_graph", hit: false });
+    const r = await getPoolNeighborhoodNeo4j({ chain, address, hops });
+    if (!r.ok) return res.status(400).json(r);
     return res.json({ ok: true, source: "neo4j", ...r });
   } catch (err) {
     return res.status(500).json({ ok: false, error: String(err?.message || err) });

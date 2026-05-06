@@ -60,6 +60,24 @@ body {
   font-size: 12px;
 }
 
+.summary {
+  font-size: 12px;
+  line-height: 1.45;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 12px;
+  padding: 10px;
+  background: rgba(2, 6, 23, 0.25);
+}
+
+.link-list a {
+  color: #93c5fd;
+  text-decoration: none;
+}
+
+.link-list a:hover {
+  text-decoration: underline;
+}
+
 .app__header h1 {
   margin: 0 0 8px;
   font-size: 28px;

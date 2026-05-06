@@ -30,6 +30,16 @@
         <ul id="db-results" class="list" style="margin-top:10px;"></ul>
       </section>
 
+      <section class="card card--input">
+        <div class="field__label">Search pool / market / vault</div>
+        <div class="field__row">
+          <input id="pool-q" type="text" class="field__input" placeholder="Aave pool / Pendle market / Uniswap V3 pool" />
+          <button id="pool-search-btn" type="button" class="btn btn--ghost">Search pools</button>
+        </div>
+        <div id="pool-meta" class="field__hint"></div>
+        <ul id="pool-results" class="list" style="margin-top:10px;"></ul>
+      </section>
+
       <section class="grid grid--meta">
         <article class="card">
           <h2 class="card__title">Protocol</h2>
@@ -38,11 +48,12 @@
           <div id="p-url" class="metric metric--muted"></div>
           <div id="p-auditors" class="metric metric--muted"></div>
           <div id="p-summary" class="metric metric--muted" style="margin-top:10px;"></div>
+          <div id="p-audit-links" class="metric metric--muted link-list" style="margin-top:10px;"></div>
         </article>
         <article class="card">
           <h2 class="card__title">Stored objects</h2>
           <div id="p-stats" class="metric metric--muted">–</div>
-          <ul id="p-docs" class="list" style="margin-top:10px;"></ul>
+          <ul id="p-docs" class="list link-list" style="margin-top:10px;"></ul>
         </article>
       </section>
 
@@ -54,9 +65,19 @@
           <p id="rel-empty" class="card__empty">Search and open a protocol to see connections.</p>
         </article>
         <article class="card">
-          <h2 class="card__title">Raw stored JSON</h2>
-          <pre id="raw-json" style="margin:0;white-space:pre-wrap;font-size:12px;color:#cbd5e1;max-height:420px;overflow:auto;"></pre>
+          <h2 class="card__title">Pool neighborhood</h2>
+          <div id="pool-selected" class="metric metric--muted">No pool selected.</div>
+          <div id="pool-graph" class="summary" style="margin-top:10px;display:none;"></div>
+          <ul id="pool-related" class="list" style="margin-top:10px;"></ul>
+          <p id="pool-related-empty" class="card__empty">Search pools and open one to see related protocols/pools.</p>
         </article>
+      </section>
+
+      <section class="card" style="margin-top:18px;">
+        <details>
+          <summary class="field__label" style="cursor:pointer;">Raw stored JSON (advanced)</summary>
+          <pre id="raw-json" style="margin:12px 0 0;white-space:pre-wrap;font-size:12px;color:#cbd5e1;max-height:520px;overflow:auto;"></pre>
+        </details>
       </section>
     </div>
 
