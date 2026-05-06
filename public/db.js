@@ -352,6 +352,34 @@ function renderRelated(graph, { rootId }) {
   }
 }
 
+function fmtUsd(v) {
+  const n = Number(v);
+  if (!isFinite(n) || n <= 0) return "";
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(n);
+  } catch {
+    return `$${Math.round(n).toLocaleString()}`;
+  }
+}
+
+function renderKvs(kvs) {
+  const rows = (Array.isArray(kvs) ? kvs : []).filter((x) => x && x.k && x.v);
+  if (!rows.length) return "";
+  return `
+    <div class="summary" style="margin-top:12px;">
+      ${rows
+        .map(
+          (r) => `
+        <div style="display:flex;gap:10px;justify-content:space-between;align-items:flex-start; padding:6px 0; border-bottom: 1px solid rgba(148,163,184,0.12);">
+          <div style="color:#cbd5e1; font-size:12px; min-width:140px;">${escapeHtml(r.k)}</div>
+          <div style="color:#e5e7eb; font-size:12px; text-align:right;">${r.v}</div>
+        </div>`
+        )
+        .join("")}
+    </div>
+  `;
+}
+
 async function openProtocol(id) {
   clearProtocol();
   metaEl.textContent = "Loading protocol…";
@@ -391,7 +419,31 @@ async function openProtocol(id) {
   const tokenCount = Array.isArray(p.tokens) ? p.tokens.length : 0;
   const contractCount = Array.isArray(p.contracts) ? p.contracts.length : 0;
   const docCount = Array.isArray(p.docPages) ? p.docPages.length : 0;
-  statsEl.textContent = `Tokens: ${tokenCount} • Contracts: ${contractCount} • Doc pages: ${docCount}`;
+
+  const tvlUsd = extra?.protocol?.tvlUsd;
+  const category = extra?.protocol?.category;
+  const chains = Array.isArray(extra?.protocol?.chains) ? extra.protocol.chains : [];
+  const exposures = Array.isArray(extra?.protocol?.topTokenLiquidity) ? extra.protocol.topTokenLiquidity : [];
+  const exposureList = exposures
+    .slice(0, 10)
+    .map((t) => {
+      const sym = String(t?.token || "").trim();
+      const usd = fmtUsd(t?.liquidityUsd);
+      if (!sym || !usd) return null;
+      return `${escapeHtml(sym)} <span style="color:#94a3b8;">(${escapeHtml(usd)})</span>`;
+    })
+    .filter(Boolean);
+
+  statsEl.innerHTML = renderKvs([
+    { k: "TVL", v: tvlUsd ? escapeHtml(fmtUsd(tvlUsd)) : "" },
+    { k: "Category", v: category ? escapeHtml(String(category)) : "" },
+    { k: "Chains", v: chains.length ? escapeHtml(chains.slice(0, 10).join(", ")) : "" },
+    {
+      k: "Top exposures",
+      v: exposureList.length ? `<div class="link-list">${exposureList.join("<br/>")}</div>` : "",
+    },
+    { k: "Stored objects", v: `Tokens: ${tokenCount} • Pools/Contracts: ${contractCount} • Docs: ${docCount}` },
+  ]);
 
   docsEl.innerHTML = "";
   for (const d of (Array.isArray(p.docPages) ? p.docPages : []).slice(0, 25)) {

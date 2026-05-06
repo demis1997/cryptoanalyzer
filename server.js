@@ -1028,12 +1028,27 @@ app.post("/api/llm-analyze", async (req, res) => {
       : await getProtocolGraphLocal({ origin, defillamaSlug }).catch(() => null);
     if (!forceRefresh && graph?.ok && graph?.hit && !(walletAddress && String(walletAddress).trim())) {
       const p = graph.protocol || {};
+      const fallbackTokens =
+        Array.isArray(defillamaApiDetail?.topTokenLiquidity) ? defillamaApiDetail.topTokenLiquidity : [];
+      const fallbackContracts = [];
+      // If DefiLlama exposes a canonical contract/token address, surface it as a contract in cache view.
+      if (typeof defillamaApiDetail?.addressRaw === "string" && defillamaApiDetail.addressRaw.includes("0x")) {
+        const m = defillamaApiDetail.addressRaw.match(/(0x[a-fA-F0-9]{40})/);
+        if (m && m[1]) {
+          fallbackContracts.push({
+            label: `${defillamaApiDetail?.name || p.name || "Protocol"} contract`,
+            network: defillamaApiDetail?.addressChain || "Unknown",
+            address: m[1].toLowerCase(),
+            evidence: defillamaApiDetail.apiUrl || "DefiLlama protocol API",
+          });
+        }
+      }
       const out = {
         origin,
-        cache: { protocolKey: graph.id, hit: true, source: "local_graph" },
+        cache: { protocolKey: graph.id, hit: true, source: graph.source || (neo4jEnabled() ? "neo4j" : "local_graph") },
         llmEnrich: {
           enabled: false,
-          source: "local_graph",
+          source: graph.source || (neo4jEnabled() ? "neo4j" : "local_graph"),
           note:
             "Served from SQLite graph cache (fast path). Enable “Full refresh” in the UI or POST forceRefresh: true to re-crawl the site and run hosted LLM.",
         },
@@ -1042,18 +1057,22 @@ app.post("/api/llm-analyze", async (req, res) => {
           url: p.url || origin,
           auditsVerified: p.auditors?.length ? { count: p.auditors.length, firms: p.auditors.map((a) => a.name) } : null,
         },
-        tokenLiquidity: (p.tokens || []).map((t) => ({
-          token: t.symbol || "Token",
-          tokenAddress: t.address,
-          liquidityUsd: null,
-          evidence: ["Source: graph cache"],
-        })),
-        contracts: (p.contracts || []).map((c) => ({
-          label: c.label || "Contract",
-          network: "Ethereum",
-          address: c.address,
-          evidence: "Source: graph cache",
-        })),
+        tokenLiquidity: (p.tokens || []).length
+          ? (p.tokens || []).map((t) => ({
+              token: t.symbol || "Token",
+              tokenAddress: t.address,
+              liquidityUsd: null,
+              evidence: ["Source: graph cache"],
+            }))
+          : fallbackTokens,
+        contracts: (p.contracts || []).length
+          ? (p.contracts || []).map((c) => ({
+              label: c.label || "Contract",
+              network: "Ethereum",
+              address: c.address,
+              evidence: "Source: graph cache",
+            }))
+          : fallbackContracts,
       };
       // Persist connection/architecture json if present
       try {

@@ -330,7 +330,27 @@ export async function getDefiLlamaProtocolApiDetail(slug) {
       }
 
       const addr = typeof j.address === "string" ? j.address.trim() : "";
-      const tokenAddress = /^0x[a-fA-F0-9]{40}$/.test(addr) ? addr.toLowerCase() : null;
+      // DefiLlama sometimes returns chain-prefixed addresses: "optimism:0xabc..."
+      const addrMatch = addr.match(/(0x[a-fA-F0-9]{40})/);
+      const tokenAddress = addrMatch ? addrMatch[1].toLowerCase() : null;
+      const addressChain = addr.includes(":") ? String(addr.split(":")[0]).trim() : null;
+
+      const tokensInUsd = Array.isArray(j.tokensInUsd) ? j.tokensInUsd : [];
+      const latestTokensInUsd = tokensInUsd.length ? tokensInUsd[tokensInUsd.length - 1] : null;
+      const tokenUsdMap = latestTokensInUsd && typeof latestTokensInUsd.tokens === "object" ? latestTokensInUsd.tokens : null;
+      const topTokenLiquidity = tokenUsdMap
+        ? Object.entries(tokenUsdMap)
+            .map(([sym, usd]) => ({ token: sym, liquidityUsd: typeof usd === "number" ? usd : Number(usd) || 0 }))
+            .filter((x) => x.token && isFinite(x.liquidityUsd) && x.liquidityUsd > 0)
+            .sort((a, b) => b.liquidityUsd - a.liquidityUsd)
+            .slice(0, 40)
+            .map((x) => ({
+              token: x.token,
+              tokenAddress: null,
+              liquidityUsd: x.liquidityUsd,
+              evidence: [`DefiLlama protocol API tokensInUsd (latest snapshot)`, apiUrl],
+            }))
+        : [];
 
       return {
         slug: String(slug),
@@ -344,11 +364,14 @@ export async function getDefiLlamaProtocolApiDetail(slug) {
           typeof j.methodology === "string" ? String(j.methodology).slice(0, 4_000) : null,
         tokenSymbol: typeof j.symbol === "string" ? j.symbol : null,
         tokenAddress,
+        addressRaw: addr || null,
+        addressChain,
         auditLinks: Array.isArray(j.audit_links) ? j.audit_links.slice(0, 12) : [],
         oracles,
         parentProtocol,
         github: Array.isArray(j.github) ? j.github.slice(0, 6) : [],
         geckoId: typeof j.gecko_id === "string" ? j.gecko_id : null,
+        topTokenLiquidity,
       };
     } finally {
       clearTimeout(t);
