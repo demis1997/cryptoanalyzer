@@ -36,6 +36,18 @@
         </form>
       </section>
 
+      <section class="card card--input" style="margin-top:14px;">
+        <div>
+          <label for="agent-pool-q" class="field__label">Pool / market / vault</label>
+          <div class="field__row">
+            <input id="agent-pool-q" class="field__input" placeholder="Search pools (e.g. steth, usdc, morpho, pendle)" />
+            <button id="agent-pool-search-btn" type="button" class="btn btn--ghost">Search pools</button>
+          </div>
+          <div id="agent-pool-meta" class="field__hint"></div>
+          <ul id="agent-pool-results" class="list" style="margin-top:10px;"></ul>
+        </div>
+      </section>
+
       <section class="grid grid--meta">
         <article class="card">
           <h2 class="card__title">Protocol summary</h2>
@@ -57,6 +69,12 @@
           <div id="a-related-graph" class="summary" style="margin-bottom:10px;display:none;"></div>
           <ul id="a-related" class="list"></ul>
           <p id="a-related-empty" class="card__empty">Run the agent to see related protocols.</p>
+        </article>
+        <article class="card">
+          <h2 class="card__title">Pool neighborhood</h2>
+          <div id="agent-pool-graph" class="summary" style="margin-bottom:10px;display:none;"></div>
+          <ul id="agent-pool-related" class="list"></ul>
+          <p id="agent-pool-related-empty" class="card__empty">Search pools and open one to see related protocols/pools.</p>
         </article>
         <article class="card">
           <h2 class="card__title">Raw output</h2>
