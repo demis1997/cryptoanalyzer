@@ -629,6 +629,30 @@ export async function upsertProtocolGraphNeo4j({
   }
 }
 
+// Update extraJson only (do not overwrite tokens/contracts/docs).
+export async function upsertProtocolExtraNeo4j({ id, extra } = {}) {
+  const { driver } = getDriver();
+  const cfg = neo4jConfig();
+  const pid = String(id || "").trim();
+  if (!pid) return { ok: false, error: "Missing id" };
+  const now = new Date().toISOString();
+  const session = driver.session({ database: cfg.database });
+  try {
+    await session.executeWrite(async (tx) => {
+      await tx.run(
+        `
+        MATCH (p:Protocol {id:$id})
+        SET p.extraJson = $extraJson, p.updatedAt = $now
+        `,
+        { id: pid, now, extraJson: extra ? JSON.stringify(extra) : null }
+      );
+    });
+    return { ok: true, id: pid };
+  } finally {
+    await session.close();
+  }
+}
+
 function isEthAddress(v) {
   return /^0x[a-f0-9]{40}$/.test(String(v || "").trim().toLowerCase());
 }

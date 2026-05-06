@@ -424,6 +424,7 @@ async function openProtocol(id) {
   const category = extra?.protocol?.category;
   const chains = Array.isArray(extra?.protocol?.chains) ? extra.protocol.chains : [];
   const exposures = Array.isArray(extra?.protocol?.topTokenLiquidity) ? extra.protocol.topTokenLiquidity : [];
+  const poolsFromYields = Array.isArray(extra?.protocol?.poolsFromYields) ? extra.protocol.poolsFromYields : [];
   const exposureList = exposures
     .slice(0, 10)
     .map((t) => {
@@ -434,6 +435,17 @@ async function openProtocol(id) {
     })
     .filter(Boolean);
 
+  const poolList = poolsFromYields
+    .slice(0, 8)
+    .map((pl) => {
+      const nm = safeText(pl?.name || "Pool", 90);
+      const tvl = fmtUsd(pl?.tvlUsd);
+      const apy = typeof pl?.apy === "number" && isFinite(pl.apy) ? `${pl.apy.toFixed(2)}% APY` : "";
+      const rhs = [tvl ? `TVL ${tvl}` : "", apy, pl?.exposure ? String(pl.exposure) : ""].filter(Boolean).join(" • ");
+      return `${escapeHtml(nm)}${rhs ? ` <span style="color:#94a3b8;">— ${escapeHtml(rhs)}</span>` : ""}`;
+    })
+    .filter(Boolean);
+
   statsEl.innerHTML = renderKvs([
     { k: "TVL", v: tvlUsd ? escapeHtml(fmtUsd(tvlUsd)) : "" },
     { k: "Category", v: category ? escapeHtml(String(category)) : "" },
@@ -441,6 +453,10 @@ async function openProtocol(id) {
     {
       k: "Top exposures",
       v: exposureList.length ? `<div class="link-list">${exposureList.join("<br/>")}</div>` : "",
+    },
+    {
+      k: "Top pools",
+      v: poolList.length ? `<div class="link-list">${poolList.join("<br/>")}</div>` : "",
     },
     { k: "Stored objects", v: `Tokens: ${tokenCount} • Pools/Contracts: ${contractCount} • Docs: ${docCount}` },
   ]);
