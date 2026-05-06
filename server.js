@@ -837,8 +837,19 @@ app.get("/api/db/search", async (req, res) => {
     await localGraphInit().catch(() => {});
 
     if (neo4jEnabled()) {
-      const results = await searchProtocolsNeo4j({ q, limit }).catch(() => []);
-      return res.json({ ok: true, source: "neo4j", results });
+      try {
+        await neo4jInit();
+        const results = await searchProtocolsNeo4j({ q, limit }).catch(() => []);
+        return res.json({ ok: true, source: "neo4j", results });
+      } catch (e) {
+        const results = await searchLocalProtocols({ q, limit }).catch(() => []);
+        return res.json({
+          ok: true,
+          source: "local_graph",
+          neo4jError: String(e?.message || e),
+          results,
+        });
+      }
     }
     const results = await searchLocalProtocols({ q, limit });
     return res.json({ ok: true, source: "local_graph", results });
@@ -853,15 +864,24 @@ app.get("/api/db/protocol", async (req, res) => {
     if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
 
     await localGraphInit().catch(() => {});
-    const g = neo4jEnabled()
-      ? await getProtocolGraphNeo4jById({ id })
-      : await getProtocolGraphLocalById({ id });
+    let g = null;
+    let neo4jError = null;
+    if (neo4jEnabled()) {
+      try {
+        await neo4jInit();
+        g = await getProtocolGraphNeo4jById({ id });
+      } catch (e) {
+        neo4jError = String(e?.message || e);
+      }
+    }
+    if (!g) g = await getProtocolGraphLocalById({ id });
 
     if (!g.ok) return res.status(500).json(g);
     if (!g.hit) return res.status(404).json({ ok: true, hit: false, id });
 
     const p = g.protocol || {};
-    const out = { ok: true, hit: true, id: g.id, protocol: p, source: neo4jEnabled() ? "neo4j" : "local_graph" };
+    const out = { ok: true, hit: true, id: g.id, protocol: p, source: g.source || (neo4jEnabled() ? "neo4j" : "local_graph") };
+    if (neo4jError) out.neo4jError = neo4jError;
     try {
       if (p.connectionsJson) out.connections = JSON.parse(p.connectionsJson);
     } catch {}
