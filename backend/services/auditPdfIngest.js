@@ -83,6 +83,11 @@ export async function ingestAuditPdfsIntoDocsPack({
   const pack = docsPack && typeof docsPack === "object" ? { ...docsPack } : null;
   if (!pack) return null;
 
+  // Vercel serverless runtime is sensitive to native canvas/pdfjs deps.
+  // Skip PDF ingestion there; we still keep audit URLs as evidence via DefiLlama/Docs scraping.
+  if (process.env.VERCEL === "1" || process.env.VERCEL === "true") return pack;
+  if (String(process.env.DISABLE_PDF_PARSE || "0") === "1") return pack;
+
   const links = uniq(auditLinks)
     .filter((u) => typeof u === "string" && u.trim())
     .slice(0, 15);

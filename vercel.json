@@ -2,9 +2,7 @@
   "functions": {
     "server.js": {
       "runtime": "nodejs20.x",
-      "includeFiles": [
-        "node_modules/@napi-rs/canvas/**"
-      ]
+      "includeFiles": "node_modules/@napi-rs/canvas/**"
     }
   }
 }
