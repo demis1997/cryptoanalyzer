@@ -15,6 +15,10 @@ import { GraphPanel } from "./js/risk-graph.js";
 import { initShell, setPlatformStatus, setAnalyzing, showToast, revealResults } from "./js/shell.js";
 
 const form = document.getElementById("protocol-form");
+const graphSearchForm = document.getElementById("graph-search-form");
+const graphSearchQ = document.getElementById("graph-search-q");
+const graphSearchResults = document.getElementById("graph-search-results");
+const searchModeBtns = document.querySelectorAll("[data-search-mode]");
 const urlInput = document.getElementById("protocol-url");
 const walletInput = document.getElementById("wallet-address");
 const debankLinkWrap = document.getElementById("debank-link-wrap");
@@ -81,6 +85,8 @@ const graphExpandBtn = document.getElementById("graph-expand-btn");
 let lastAnalysis = null;
 let lastRubric = null;
 let shellApi = null;
+let searchMode = "protocol";
+let lastGraphRef = null;
 
 const heroGraph = new GraphPanel(document.getElementById("hero-graph-panel"), {
   onSelect: (node) => {
@@ -114,6 +120,130 @@ function updateDebankLink() {
 
 walletInput?.addEventListener("input", updateDebankLink);
 updateDebankLink();
+
+function setSearchMode(mode) {
+  searchMode = mode === "graph" ? "graph" : "protocol";
+  searchModeBtns.forEach((btn) => {
+    btn.classList.toggle("search-mode__btn--active", btn.dataset.searchMode === searchMode);
+  });
+  if (form) form.hidden = searchMode !== "protocol";
+  if (graphSearchForm) graphSearchForm.hidden = searchMode !== "graph";
+  if (graphSearchResults) graphSearchResults.hidden = searchMode !== "graph";
+  const u = new URL(window.location.href);
+  if (searchMode === "graph") u.searchParams.set("mode", "graph");
+  else u.searchParams.delete("mode");
+  history.replaceState(null, "", u.toString());
+}
+
+searchModeBtns.forEach((btn) => {
+  btn.addEventListener("click", () => setSearchMode(btn.dataset.searchMode || "protocol"));
+});
+
+async function apiGetJson(url) {
+  const resp = await fetch(url);
+  const json = await resp.json().catch(() => ({}));
+  if (!resp.ok || json?.ok === false) throw new Error(json?.error || `Request failed (${resp.status})`);
+  return json;
+}
+
+function renderGraphSearchResults(rows, meta) {
+  if (!graphSearchResults) return;
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) {
+    graphSearchResults.hidden = false;
+    graphSearchResults.innerHTML = `<div class="graph-search-drop__meta">${escapeHtml(meta || "No matches.")}</div>`;
+    return;
+  }
+  graphSearchResults.hidden = false;
+  graphSearchResults.innerHTML = `
+    <div class="graph-search-drop__meta">${escapeHtml(meta || "")}</div>
+    ${list
+      .slice(0, 25)
+      .map(
+        (r) => `
+      <div class="graph-search-drop__item">
+        <div>
+          <div>${escapeHtml(String(r.label || r.ref || "").slice(0, 90))}</div>
+          <div class="metric metric--muted mono-inline" style="font-size:11px;">${escapeHtml(String(r.kind || ""))} · ${escapeHtml(String(r.ref || ""))}</div>
+        </div>
+        <button type="button" class="btn btn--ghost" style="padding:6px 12px;font-size:12px;" data-graph-ref="${escapeHtml(r.ref)}">Open</button>
+      </div>`
+      )
+      .join("")}
+  `;
+}
+
+async function openGraphRef(ref) {
+  const hops = Number(graphDepthEl?.value || 3) || 3;
+  lastGraphRef = ref;
+  setPlatformStatus("Loading graph neighborhood…");
+  shellApi?.setTab("graph");
+  setViewMode("landing");
+  if (resultsHero) resultsHero.hidden = true;
+  try {
+    const r = await apiGetJson(`/api/graph/neighborhood?ref=${encodeURIComponent(ref)}&hops=${encodeURIComponent(String(hops))}`);
+    const graph = {
+      ref,
+      nodes: Array.isArray(r?.graph?.nodes) ? r.graph.nodes : [],
+      edges: Array.isArray(r?.graph?.edges) ? r.graph.edges : [],
+    };
+    if (!graph.nodes.length) {
+      setPlatformStatus("No graph neighborhood for this ref. Run Neo4j ingest jobs or try another query.", "error");
+      tabGraph.renderDemo();
+      return;
+    }
+    tabGraph.setDepth(hops);
+    tabGraph.render(graph);
+    landingGraph.render(graph);
+    if (graphNodeDetail) {
+      const root = graph.nodes.find((n) => n.ref === ref) || graph.nodes[0];
+      graphNodeDetail.innerHTML = `<b>${escapeHtml(root?.label || ref)}</b> · ${escapeHtml(root?.kind || "")} · <span class="mono">${escapeHtml(ref)}</span>`;
+    }
+    setPlatformStatus(`Graph loaded (${graph.nodes.length} nodes, ${graph.edges.length} edges).`, "success");
+    if (graphSearchResults) graphSearchResults.hidden = true;
+  } catch (e) {
+    setPlatformStatus(String(e?.message || e), "error");
+    showToast(String(e?.message || e), "error");
+  }
+}
+
+async function runGraphSearch() {
+  const q = String(graphSearchQ?.value || "").trim();
+  if (!q) return;
+  setSearchMode("graph");
+  setPlatformStatus("Searching graph database…");
+  try {
+    if (/^https?:\/\//i.test(q)) {
+      const rr = await apiGetJson(`/api/resolve?url=${encodeURIComponent(q)}`);
+      if (rr?.hit && rr.ref) {
+        await openGraphRef(rr.ref);
+        return;
+      }
+    }
+    const r = await apiGetJson(`/api/graph/search?q=${encodeURIComponent(q)}&limit=25`);
+    const rows = Array.isArray(r.results) ? r.results : [];
+    if (rows.length === 1 && rows[0]?.ref) {
+      await openGraphRef(rows[0].ref);
+      return;
+    }
+    renderGraphSearchResults(rows, `Source: ${r.source || "neo4j"} · ${rows.length} result(s)`);
+    setPlatformStatus(rows.length ? "Select a result to open its neighborhood graph." : "No graph matches. Try Protocol database or run ingest jobs.", "error");
+  } catch (e) {
+    renderGraphSearchResults([], `Search failed: ${String(e?.message || e)}`);
+    setPlatformStatus(String(e?.message || e), "error");
+  }
+}
+
+graphSearchForm?.addEventListener("submit", (e) => {
+  e.preventDefault();
+  runGraphSearch();
+});
+
+graphSearchResults?.addEventListener("click", (e) => {
+  const btn = e.target?.closest?.("button[data-graph-ref]");
+  const ref = btn?.getAttribute?.("data-graph-ref");
+  if (ref) openGraphRef(ref);
+});
 
 function setViewMode(mode) {
   if (landingState) landingState.hidden = mode !== "landing";
@@ -780,5 +910,14 @@ document.addEventListener("DOMContentLoaded", () => {
   const tab = u.searchParams.get("tab");
   if (tab === "graph") {
     shellApi?.setTab("graph");
+  }
+  if (u.searchParams.get("mode") === "graph" || u.searchParams.get("q")) {
+    setSearchMode("graph");
+    if (u.searchParams.get("q") && graphSearchQ) {
+      graphSearchQ.value = u.searchParams.get("q");
+      runGraphSearch();
+    }
+  } else {
+    setSearchMode("protocol");
   }
 });

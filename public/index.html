@@ -28,37 +28,58 @@
           <button type="button" class="sidebar__item" data-tab="export"><span class="sidebar__icon">↓</span> Report Export</button>
         </nav>
         <div class="sidebar__footer">
-          <a href="/db.html">Protocol database</a> · <a href="/agent.html">Research agent</a>
+          <a href="/db.html">Pool &amp; protocol database</a> · <a href="/agent.html">Research agent</a>
         </div>
       </aside>
 
       <div class="platform__main">
         <header class="topbar">
-          <form id="protocol-form" class="command-bar">
-            <div class="command-bar__field">
-              <input
-                id="protocol-url"
-                name="protocol-url"
-                type="url"
-                class="command-bar__input"
-                placeholder="Enter protocol URL — e.g. https://app.aave.com"
-                required
-                autocomplete="off"
-              />
+          <div class="topbar__command">
+            <div class="search-mode" role="tablist" aria-label="Search mode">
+              <button type="button" class="search-mode__btn search-mode__btn--active" data-search-mode="protocol">Protocol URL</button>
+              <button type="button" class="search-mode__btn" data-search-mode="graph">Pools &amp; graph search</button>
             </div>
-            <input
-              id="wallet-address"
-              name="wallet-address"
-              type="text"
-              class="command-bar__input command-bar__wallet"
-              placeholder="Wallet (optional) 0x…"
-              autocomplete="off"
-              spellcheck="false"
-            />
-            <button type="submit" id="analyze-btn" class="btn btn--primary">
-              <span class="btn__label">Run intelligence</span>
-            </button>
-          </form>
+            <form id="protocol-form" class="command-bar">
+              <div class="command-bar__field">
+                <input
+                  id="protocol-url"
+                  name="protocol-url"
+                  type="url"
+                  class="command-bar__input"
+                  placeholder="Enter protocol URL — e.g. https://app.aave.com"
+                  required
+                  autocomplete="off"
+                />
+              </div>
+              <input
+                id="wallet-address"
+                name="wallet-address"
+                type="text"
+                class="command-bar__input command-bar__wallet"
+                placeholder="Wallet (optional) 0x…"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <button type="submit" id="analyze-btn" class="btn btn--primary">
+                <span class="btn__label">Run intelligence</span>
+              </button>
+            </form>
+            <form id="graph-search-form" class="command-bar" hidden>
+              <div class="command-bar__field">
+                <input
+                  id="graph-search-q"
+                  name="graph-search-q"
+                  type="search"
+                  class="command-bar__input"
+                  placeholder="Search pools, markets, vaults, tokens — e.g. stETH, Pendle, Morpho"
+                  autocomplete="off"
+                />
+              </div>
+              <button type="submit" id="graph-search-btn" class="btn btn--primary">
+                <span class="btn__label">Search graph</span>
+              </button>
+            </form>
+          </div>
           <div class="topbar__actions">
             <button type="button" id="report-pdf-btn" class="btn btn--ghost" disabled>PDF</button>
             <button type="button" id="report-json-btn" class="btn btn--ghost" disabled>JSON</button>
@@ -67,6 +88,7 @@
         </header>
 
         <div id="platform-status" class="platform-status" hidden></div>
+        <div id="graph-search-results" class="graph-search-drop" hidden aria-live="polite"></div>
 
         <label class="checkbox-row" style="padding: 0 24px 8px;">
           <input type="checkbox" id="force-refresh" name="force-refresh" />
