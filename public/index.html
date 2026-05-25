@@ -71,12 +71,15 @@
                   name="graph-search-q"
                   type="search"
                   class="command-bar__input"
-                  placeholder="Search pools, markets, vaults, tokens — e.g. stETH, Pendle, Morpho"
+                  placeholder="Pool URL, 0x address, or name — e.g. Morpho vault URL, base:0x…"
                   autocomplete="off"
                 />
               </div>
-              <button type="submit" id="graph-search-btn" class="btn btn--primary">
+              <button type="submit" id="graph-search-btn" class="btn btn--primary" title="Live DefiLlama discovery + integrator protocols (LLM when needed)">
                 <span class="btn__label">Search graph</span>
+              </button>
+              <button type="button" id="pool-intel-btn" class="btn btn--primary" title="Playwright crawl + web search + DefiLlama + LLM + risk + save to SQLite + Neo4j">
+                <span class="btn__label">Run pool intelligence</span>
               </button>
             </form>
           </div>
@@ -89,6 +92,15 @@
 
         <div id="platform-status" class="platform-status" hidden></div>
         <div id="graph-search-results" class="graph-search-drop" hidden aria-live="polite"></div>
+        <section id="pool-protocols-panel" class="pool-protocols-panel" hidden aria-live="polite">
+          <div class="pool-protocols-panel__head">
+            <h3 class="pool-protocols-panel__title">Pool intelligence</h3>
+            <p id="pool-protocols-meta" class="panel__desc" style="margin:0;"></p>
+          </div>
+          <div id="pool-underlying-tokens" class="field__hint" style="margin-bottom:10px;"></div>
+          <div id="pool-risk-summary" class="card" style="margin-bottom:12px;padding:12px;display:none;"></div>
+          <ul id="pool-protocols-list" class="list-clean"></ul>
+        </section>
 
         <label class="checkbox-row" style="padding: 0 24px 8px;">
           <input type="checkbox" id="force-refresh" name="force-refresh" />

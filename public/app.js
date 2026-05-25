@@ -18,6 +18,12 @@ const form = document.getElementById("protocol-form");
 const graphSearchForm = document.getElementById("graph-search-form");
 const graphSearchQ = document.getElementById("graph-search-q");
 const graphSearchResults = document.getElementById("graph-search-results");
+const poolProtocolsPanel = document.getElementById("pool-protocols-panel");
+const poolProtocolsMeta = document.getElementById("pool-protocols-meta");
+const poolProtocolsList = document.getElementById("pool-protocols-list");
+const poolUnderlyingEl = document.getElementById("pool-underlying-tokens");
+const poolRiskSummaryEl = document.getElementById("pool-risk-summary");
+const poolIntelBtn = document.getElementById("pool-intel-btn");
 const searchModeBtns = document.querySelectorAll("[data-search-mode]");
 const urlInput = document.getElementById("protocol-url");
 const walletInput = document.getElementById("wallet-address");
@@ -173,13 +179,374 @@ function renderGraphSearchResults(rows, meta) {
   `;
 }
 
-async function openGraphRef(ref) {
-  const hops = Number(graphDepthEl?.value || 3) || 3;
-  lastGraphRef = ref;
-  setPlatformStatus("Loading graph neighborhood…");
+function parsePoolInput(q) {
+  const s = String(q || "").trim();
+  const key = s.match(/^([a-z0-9_-]+):(0x[a-fA-F0-9]{40})$/i);
+  if (key) return { chain: key[1].toLowerCase(), address: key[2].toLowerCase() };
+  const bare = s.match(/^(0x[a-fA-F0-9]{40})$/i);
+  if (bare) return { chain: "ethereum", address: bare[1].toLowerCase() };
+  const cref = s.match(/^contract:([a-z0-9_-]+):(0x[a-fA-F0-9]{40})$/i);
+  if (cref) return { chain: cref[1].toLowerCase(), address: cref[2].toLowerCase() };
+  return null;
+}
+
+function buildGraphFromPoolNeighborhood(r, chain, address) {
+  const ref = `contract:${chain}:${address}`;
+  const rootLabel = r?.root?.label || `Pool ${address.slice(0, 10)}…`;
+  const nodes = [{ ref, kind: "contract", label: rootLabel }];
+  const edges = [];
+  const seen = new Set([ref]);
+
+  for (const p of Array.isArray(r?.protocols) ? r.protocols : []) {
+    const pid = String(p?.id || "").trim();
+    if (!pid || seen.has(pid)) continue;
+    seen.add(pid);
+    nodes.push({ ref: pid, kind: "protocol", label: p.name || pid });
+    edges.push({ from: ref, to: pid, relation: p.link === "yields" ? "yields_listing" : "ecosystem" });
+  }
+  for (const c of Array.isArray(r?.pools) ? r.pools : []) {
+    const pk = `contract:${c.chain || chain}:${c.address}`;
+    if (!c?.address || seen.has(pk) || pk === ref) continue;
+    seen.add(pk);
+    nodes.push({ ref: pk, kind: "contract", label: c.label || "Related pool" });
+    edges.push({ from: ref, to: pk, relation: "related_pool" });
+  }
+  return { ref, nodes, edges };
+}
+
+function formatPoolSaveStatus(persisted) {
+  if (!persisted) return "";
+  const saved = [];
+  if (persisted.local) saved.push("SQLite");
+  if (persisted.neo4j) saved.push("Neo4j");
+  if (!saved.length && !(persisted.errors || []).length) return "";
+  let text = saved.length ? `Saved: ${saved.join(" + ")}` : "Saved locally (SQLite)";
+  const err = (persisted.errors || [])[0];
+  if (err && !persisted.neo4j) {
+    text += ` · ${err}`;
+  }
+  return text;
+}
+
+function renderPoolProtocolsPanel(r, contextLabel) {
+  if (!poolProtocolsPanel || !poolProtocolsList) return;
+  const issuer = Array.isArray(r?.issuer)
+    ? r.issuer
+    : (r?.protocols || r?.integrators || []).filter((p) => p.tier === "issuer" || p.tier === "primary");
+  const using = Array.isArray(r?.usingProtocols)
+    ? r.usingProtocols
+    : (r?.protocols || r?.integrators || []).filter((p) => p.tier === "integrator");
+  const related = Array.isArray(r?.related) ? r.related : [];
+  const total = issuer.length + using.length + related.length;
+  if (!total) {
+    poolProtocolsPanel.hidden = true;
+    poolProtocolsList.innerHTML = "";
+    return;
+  }
+  poolProtocolsPanel.hidden = false;
+  if (poolProtocolsMeta) {
+    const webSrc = r?.webResearch?.enabled
+      ? ` · ${(r.webResearch.providers || []).join(" + ") || "web"}${r.webResearch.crawl?.pages?.length ? ` · ${r.webResearch.crawl.pages.length} page(s) crawled` : ""}`
+      : "";
+    poolProtocolsMeta.textContent = `${contextLabel} — ${issuer.length} issuer · ${using.length} integrator(s) (DefiLlama + web search + LLM)${webSrc}.`;
+  }
+  if (poolUnderlyingEl && Array.isArray(r?.underlyingTokens) && r.underlyingTokens.length) {
+    poolUnderlyingEl.innerHTML = `<b>Underlying tokens:</b> ${r.underlyingTokens
+      .map((t) => `<span class="mono">${escapeHtml(t.symbol || "")}</span> ${escapeHtml(t.chain)}:${escapeHtml(String(t.address).slice(0, 10))}…`)
+      .join(" · ")}`;
+  } else if (poolUnderlyingEl) {
+    poolUnderlyingEl.innerHTML = "";
+  }
+  if (poolRiskSummaryEl && r?.risk?.pool) {
+    const sc = Math.round((r.risk.pool.overallTotal || 0) * 100);
+    poolRiskSummaryEl.style.display = "block";
+    poolRiskSummaryEl.innerHTML = `
+      <div><b>Pool risk score (heuristic):</b> ${sc}/100</div>
+      <div class="metric metric--muted" style="margin-top:6px;font-size:12px;">${escapeHtml((r.risk.pool.notes || []).join(" "))}</div>
+      <div class="metric metric--muted" style="margin-top:4px;font-size:12px;">${formatPoolSaveStatus(r.persisted)}</div>
+    `;
+  } else if (poolRiskSummaryEl) {
+    poolRiskSummaryEl.style.display = "none";
+  }
+  const row = (p, extra = "") => `
+    <li class="pool-protocols-panel__item">
+      <div>
+        <div>${escapeHtml(String(p.name || p.id).slice(0, 80))}${extra}</div>
+        <div class="metric metric--muted mono-inline" style="font-size:11px;">${escapeHtml(p.id)} · ${escapeHtml(p.link || "yields")}${p.relationship ? ` · ${escapeHtml(p.relationship)}` : ""}${p.confidence ? ` · ${escapeHtml(p.confidence)}` : ""}${typeof p.overallTotal === "number" ? ` · risk ${Math.round(p.overallTotal * 100)}` : p.totalTvlUsd ? ` · TVL $${Math.round(p.totalTvlUsd).toLocaleString()}` : ""}</div>
+      </div>
+      <button type="button" class="btn btn--ghost" style="padding:6px 12px;font-size:12px;" data-open-protocol="${escapeHtml(p.id)}">Open graph</button>
+    </li>`;
+  const perRisk = Object.fromEntries((r?.risk?.perProtocol || []).map((x) => [x.id, x.overallTotal]));
+  const withRisk = (p) => ({ ...p, overallTotal: perRisk[p.id] });
+  poolProtocolsList.innerHTML =
+    (issuer.length
+      ? `<li class="metric metric--muted" style="list-style:none;padding:4px 0 8px;font-size:12px;">Pool issuer</li>${issuer.map((p) => row(withRisk(p))).join("")}`
+      : "") +
+    (using.length
+      ? `<li class="metric metric--muted" style="list-style:none;padding:12px 0 8px;font-size:12px;">Protocols using same underlying / exposure (DefiLlama)</li>${using.slice(0, 40).map((p) => row(withRisk(p))).join("")}`
+      : "") +
+    (related.length
+      ? `<li class="metric metric--muted" style="list-style:none;padding:12px 0 8px;font-size:12px;">Extended token-linked</li>${related.map((p) => row(p)).join("")}`
+      : "");
+}
+
+async function runPoolIntelligenceFromQuery() {
+  const q = String(graphSearchQ?.value || "").trim();
+  if (!q) return;
+  setSearchMode("graph");
+  setPlatformStatus("Running pool intelligence (DefiLlama discovery + risk + graph save)…");
   shellApi?.setTab("graph");
   setViewMode("landing");
   if (resultsHero) resultsHero.hidden = true;
+  if (graphSearchResults) graphSearchResults.hidden = true;
+  if (poolIntelBtn) poolIntelBtn.disabled = true;
+  try {
+    const body = /^https?:\/\//i.test(q) ? { url: q, query: q } : { query: q };
+    const r = await fetch("/api/pool/intelligence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...body, persist: true }),
+    });
+    const data = await r.json();
+    if (!r.ok || data?.ok === false) throw new Error(data?.error || `Request failed (${r.status})`);
+    const label = data.label || q;
+    renderPoolProtocolsPanel(
+      {
+        issuer: data.issuer,
+        usingProtocols: data.usingProtocols,
+        integrators: data.integrators,
+        underlyingTokens: data.underlyingTokens,
+        risk: data.risk,
+        persisted: data.persisted,
+        webResearch: data.webResearch,
+      },
+      label
+    );
+    const graph = data.graph || { ref: data.poolRef, nodes: [], edges: [] };
+    const displayGraph = {
+      ref: graph.ref,
+      nodes: (graph.nodes || []).slice(0, 32),
+      edges: (graph.edges || []).filter(
+        (e) =>
+          (graph.nodes || []).slice(0, 32).some((n) => n.ref === e.from) &&
+          (graph.nodes || []).slice(0, 32).some((n) => n.ref === e.to)
+      ),
+    };
+    tabGraph.setDepth(3);
+    tabGraph.render(displayGraph.nodes.length ? displayGraph : { ref: "pool", nodes: [{ ref: "pool", kind: "yield_pool", label }], edges: [] });
+    landingGraph.render(displayGraph.nodes.length ? displayGraph : { ref: "pool", nodes: [{ ref: "pool", kind: "yield_pool", label }], edges: [] });
+    setPlatformStatus(
+      `Pool intelligence complete — ${(data.usingProtocols || []).length} integrator protocol(s), ${(data.underlyingTokens || []).length} underlying token(s).`,
+      "success"
+    );
+  } catch (e) {
+    setPlatformStatus(String(e?.message || e), "error");
+    showToast(String(e?.message || e), "error");
+  } finally {
+    if (poolIntelBtn) poolIntelBtn.disabled = false;
+  }
+}
+
+poolIntelBtn?.addEventListener("click", () => runPoolIntelligenceFromQuery());
+
+function buildGraphFromYieldsMarket(r, label) {
+  const ref = `market:${String(label || "pool").slice(0, 48)}`;
+  const nodes = [{ ref, kind: "yield_pool", label: String(label || "Pool market").slice(0, 28) }];
+  const edges = [];
+  const seen = new Set([ref]);
+  const issuer = Array.isArray(r?.issuer)
+    ? r.issuer
+    : (r?.integrators || r?.protocols || []).filter((p) => p.tier === "issuer");
+  const using = Array.isArray(r?.usingProtocols)
+    ? r.usingProtocols
+    : (r?.integrators || []).filter((p) => p.tier === "integrator");
+  const primary = Array.isArray(r?.primary)
+    ? r.primary
+    : (r?.protocols || []).filter((p) => p.tier !== "related" && p.link !== "underlying_token");
+  const addProtocol = (p, relation, limit = 20) => {
+    const pid = String(p?.id || "").trim();
+    if (!pid || seen.has(pid) || nodes.length >= limit) return;
+    seen.add(pid);
+    nodes.push({ ref: pid, kind: "protocol", label: String(p.name || pid).replace(/^defillama:/i, "").slice(0, 22) });
+    edges.push({ from: ref, to: pid, relation: p.link || relation });
+  };
+  for (const p of issuer.slice(0, 4)) addProtocol(p, "pool_issuer", 24);
+  for (const p of using.slice(0, 16)) addProtocol(p, "integrator", 24);
+  if (nodes.length <= 1) {
+    for (const p of primary.slice(0, 12)) addProtocol(p, "pool_issuer", 24);
+  }
+  for (const t of (r?.underlyingTokens || []).slice(0, 6)) {
+    const addr = String(t?.address || "").toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(addr) || seen.has(addr)) continue;
+    const ch = String(t?.chain || "ethereum").toLowerCase();
+    const tk = `token:${ch}:${addr}`;
+    seen.add(tk);
+    nodes.push({ ref: tk, kind: "token", label: t.symbol || addr.slice(0, 10) });
+    edges.push({ from: ref, to: tk, relation: "underlying" });
+  }
+  return { ref, nodes, edges };
+}
+
+async function openPoolDiscoverResult(r, label) {
+  const hasIntegrators = (r?.usingProtocols || []).length || (r?.integrators || []).length;
+  if (!r?.hit && !(r?.protocols || []).length && !hasIntegrators) {
+    setPlatformStatus("No pool market found on DefiLlama for this URL. Try a vault link with 0x… or Run pool intelligence.", "error");
+    renderPoolProtocolsPanel({ protocols: [] }, label);
+    tabGraph.renderDemo();
+    return;
+  }
+  const graph = buildGraphFromYieldsMarket(r, label);
+  tabGraph.setDepth(Number(graphDepthEl?.value || 3) || 3);
+  tabGraph.render(graph);
+  landingGraph.render(graph);
+  renderPoolProtocolsPanel(
+    {
+      issuer: r.issuer,
+      usingProtocols: r.usingProtocols,
+      integrators: r.integrators,
+      underlyingTokens: r.underlyingTokens,
+      risk: r.risk,
+      protocols: r.protocols,
+      webResearch: r.webResearch,
+    },
+    label
+  );
+  const usingN = (r.usingProtocols || []).length;
+  const issuerN = (r.issuer || []).length;
+  if (graphNodeDetail) {
+    graphNodeDetail.innerHTML = `<b>${escapeHtml(label)}</b> · ${escapeHtml(r.source || "DefiLlama")} · <b>${issuerN}</b> issuer · <b>${usingN}</b> integrator(s)`;
+  }
+  setPlatformStatus(
+    `Pool search — ${issuerN} issuer, ${usingN} protocol(s) using this pool${usingN < 2 ? " (try Run pool intelligence for LLM + DB save)" : ""}.`,
+    "success"
+  );
+}
+
+async function openPoolByWebsiteUrl(url) {
+  setSearchMode("graph");
+  setPlatformStatus("Discovering pool from website (DefiLlama live)…");
+  shellApi?.setTab("graph");
+  setViewMode("landing");
+  if (resultsHero) resultsHero.hidden = true;
+  if (graphSearchResults) graphSearchResults.hidden = true;
+  try {
+    const r = await apiGetJson(`/api/pool/discover-url?url=${encodeURIComponent(url)}`);
+    const label = r.marketLabel || url;
+    await openPoolDiscoverResult(r, label);
+  } catch (e) {
+    setPlatformStatus(String(e?.message || e), "error");
+    showToast(String(e?.message || e), "error");
+  }
+}
+
+async function openPoolByYieldsMarket(project, symbolHint) {
+  setSearchMode("graph");
+  shellApi?.setTab("graph");
+  setViewMode("landing");
+  if (resultsHero) resultsHero.hidden = true;
+  if (graphSearchResults) graphSearchResults.hidden = true;
+  try {
+    const r = await apiGetJson(
+      `/api/pool/yields-market?project=${encodeURIComponent(project)}&symbol=${encodeURIComponent(symbolHint || "")}`
+    );
+    await openPoolDiscoverResult(r, r.marketLabel || `${project} ${symbolHint}`.trim());
+  } catch (e) {
+    setPlatformStatus(String(e?.message || e), "error");
+    showToast(String(e?.message || e), "error");
+  }
+}
+
+async function openPoolByAddress(chain, address) {
+  const ch = String(chain || "ethereum").toLowerCase();
+  const addr = String(address || "").toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(addr)) {
+    showToast("Invalid pool address", "error");
+    return;
+  }
+  setSearchMode("graph");
+  setPlatformStatus("Loading protocols that use this pool…");
+  shellApi?.setTab("graph");
+  setViewMode("landing");
+  if (resultsHero) resultsHero.hidden = true;
+  if (graphSearchResults) graphSearchResults.hidden = true;
+
+  try {
+    const r = await apiGetJson(
+      `/api/db/pool/neighborhood?chain=${encodeURIComponent(ch)}&address=${encodeURIComponent(addr)}&hops=4`
+    );
+    if (!r.hit && !(Array.isArray(r.protocols) && r.protocols.length)) {
+      setPlatformStatus("No protocols found for this pool. Try Run intelligence on the vault protocol site first.", "error");
+      renderPoolProtocolsPanel({ protocols: [] }, `${ch}:${addr.slice(0, 10)}…`);
+      tabGraph.renderDemo();
+      return;
+    }
+    const hops = Number(graphDepthEl?.value || 4) || 4;
+    const graph = buildGraphFromPoolNeighborhood(r, ch, addr);
+    tabGraph.setDepth(hops);
+    tabGraph.render(graph);
+    landingGraph.render(graph);
+    renderPoolProtocolsPanel(r, `${ch}:${addr.slice(0, 10)}…`);
+    if (graphNodeDetail) {
+      graphNodeDetail.innerHTML = `<b>${escapeHtml(r.root?.label || "Pool")}</b> · contract · <span class="mono">${escapeHtml(ch)}:${escapeHtml(addr)}</span> — <b>${(r.protocols || []).length}</b> protocol(s)`;
+    }
+    const sec = r.security || {};
+    const secNote =
+      sec?.hacked && sec.incidents?.length
+        ? ` Security: ${sec.incidents.length} hack(s) in related protocols.`
+        : "";
+    setPlatformStatus(`Pool loaded — ${(r.protocols || []).length} protocol(s), ${(r.pools || []).length} related pool(s).${secNote}`, "success");
+  } catch (e) {
+    setPlatformStatus(String(e?.message || e), "error");
+    showToast(String(e?.message || e), "error");
+  }
+}
+
+poolProtocolsList?.addEventListener("click", (e) => {
+  const btn = e.target?.closest?.("button[data-open-protocol]");
+  const id = btn?.getAttribute?.("data-open-protocol");
+  if (id) openGraphRef(id);
+});
+
+function graphFromRelatedApi(related, rootRef) {
+  const rawNodes = Array.isArray(related?.graph?.nodes) ? related.graph.nodes : [];
+  const nodes = rawNodes.map((n) => ({
+    ref: n.id || n.ref,
+    kind: "protocol",
+    label: n.name || n.id || rootRef,
+  }));
+  if (rootRef && !nodes.some((n) => n.ref === rootRef)) {
+    nodes.unshift({
+      ref: rootRef,
+      kind: "protocol",
+      label: rootRef.replace(/^defillama:/i, "").replace(/^protocol:/i, ""),
+    });
+  }
+  const edges = (Array.isArray(related?.graph?.edges) ? related.graph.edges : [])
+    .filter((e) => e?.from && e?.to)
+    .map((e) => ({ from: e.from, to: e.to, relation: e.relation || "linked" }));
+  return { ref: rootRef, nodes, edges };
+}
+
+async function openGraphRef(ref) {
+  const hops = Number(graphDepthEl?.value || 3) || 3;
+  lastGraphRef = ref;
+  setPlatformStatus("Loading protocol graph…");
+  shellApi?.setTab("graph");
+  setViewMode("landing");
+  if (resultsHero) resultsHero.hidden = true;
+  if (graphSearchResults) graphSearchResults.hidden = true;
+
+  const renderGraph = (graph, statusMsg) => {
+    tabGraph.setDepth(hops);
+    tabGraph.render(graph);
+    landingGraph.render(graph);
+    if (graphNodeDetail) {
+      const root = graph.nodes.find((n) => n.ref === ref) || graph.nodes[0];
+      graphNodeDetail.innerHTML = `<b>${escapeHtml(root?.label || ref)}</b> · ${escapeHtml(root?.kind || "protocol")} · <span class="mono">${escapeHtml(ref)}</span>`;
+    }
+    setPlatformStatus(statusMsg, "success");
+  };
+
   try {
     const r = await apiGetJson(`/api/graph/neighborhood?ref=${encodeURIComponent(ref)}&hops=${encodeURIComponent(String(hops))}`);
     const graph = {
@@ -187,24 +554,35 @@ async function openGraphRef(ref) {
       nodes: Array.isArray(r?.graph?.nodes) ? r.graph.nodes : [],
       edges: Array.isArray(r?.graph?.edges) ? r.graph.edges : [],
     };
-    if (!graph.nodes.length) {
-      setPlatformStatus("No graph neighborhood for this ref. Run Neo4j ingest jobs or try another query.", "error");
-      tabGraph.renderDemo();
+    if (graph.nodes.length) {
+      renderGraph(graph, `Graph loaded (${graph.nodes.length} nodes, ${graph.edges.length} edges).`);
       return;
     }
-    tabGraph.setDepth(hops);
-    tabGraph.render(graph);
-    landingGraph.render(graph);
-    if (graphNodeDetail) {
-      const root = graph.nodes.find((n) => n.ref === ref) || graph.nodes[0];
-      graphNodeDetail.innerHTML = `<b>${escapeHtml(root?.label || ref)}</b> · ${escapeHtml(root?.kind || "")} · <span class="mono">${escapeHtml(ref)}</span>`;
-    }
-    setPlatformStatus(`Graph loaded (${graph.nodes.length} nodes, ${graph.edges.length} edges).`, "success");
-    if (graphSearchResults) graphSearchResults.hidden = true;
-  } catch (e) {
-    setPlatformStatus(String(e?.message || e), "error");
-    showToast(String(e?.message || e), "error");
+  } catch {
+    // fall through to related-protocol API
   }
+
+  if (ref.startsWith("defillama:") || ref.startsWith("protocol:") || ref.startsWith("url:")) {
+    try {
+      const related = await apiGetJson(`/api/db/related?id=${encodeURIComponent(ref)}&hops=${encodeURIComponent(String(hops))}`);
+      const graph = graphFromRelatedApi(related, ref);
+      if (graph.nodes.length > 1 || graph.edges.length) {
+        const note = related.neo4jError ? " (Neo4j DB name may be wrong in .env)" : "";
+        renderGraph(graph, `Related protocols graph — ${graph.nodes.length} nodes${note}.`);
+        if (related.neo4jError) showToast(related.neo4jError, "error");
+        return;
+      }
+    } catch (e) {
+      showToast(String(e?.message || e), "error");
+    }
+  }
+
+  const label = ref.replace(/^defillama:/i, "").replace(/^protocol:/i, "");
+  renderGraph(
+    { ref, nodes: [{ ref, kind: "protocol", label }], edges: [] },
+    "Graph preview only — Neo4j save unavailable. Pool data is still in SQLite."
+  );
+  showToast("Neo4j graph unavailable. Check NEO4J_USER=neo4j and your Aura password in .env.", "error");
 }
 
 async function runGraphSearch() {
@@ -213,17 +591,62 @@ async function runGraphSearch() {
   setSearchMode("graph");
   setPlatformStatus("Searching graph database…");
   try {
+    const directPool = parsePoolInput(q);
+    if (directPool) {
+      await openPoolByAddress(directPool.chain, directPool.address);
+      return;
+    }
+
     if (/^https?:\/\//i.test(q)) {
-      const rr = await apiGetJson(`/api/resolve?url=${encodeURIComponent(q)}`);
-      if (rr?.hit && rr.ref) {
-        await openGraphRef(rr.ref);
+      const rr = await apiGetJson(`/api/resolve?url=${encodeURIComponent(q)}`).catch(() => ({ hit: false }));
+      if (rr?.kind === "pool_website" && rr.url) {
+        await openPoolByWebsiteUrl(rr.url);
         return;
       }
+      if (rr?.hit) {
+        if (rr.kind === "yields_market" && rr.project) {
+          await openPoolByYieldsMarket(rr.project, rr.symbolHint || "");
+          return;
+        }
+        if (rr.kind === "pool" && rr.poolKey) {
+          const [ch, addr] = String(rr.poolKey).split(":");
+          if (ch && addr) {
+            await openPoolByAddress(ch, addr);
+            return;
+          }
+        }
+        if (rr.ref?.startsWith("contract:")) {
+          const m = rr.ref.match(/^contract:([^:]+):(0x[a-f0-9]{40})$/i);
+          if (m) {
+            await openPoolByAddress(m[1].toLowerCase(), m[2].toLowerCase());
+            return;
+          }
+        }
+        if (rr.kind === "protocol" && rr.protocolHint) {
+          const slug = String(rr.protocolHint).replace(/^defillama:/i, "");
+          await openPoolByYieldsMarket(slug, "");
+          return;
+        }
+        if (rr.ref) {
+          await openGraphRef(rr.ref);
+          return;
+        }
+      }
+      await openPoolByWebsiteUrl(q);
+      return;
     }
     const r = await apiGetJson(`/api/graph/search?q=${encodeURIComponent(q)}&limit=25`);
     const rows = Array.isArray(r.results) ? r.results : [];
     if (rows.length === 1 && rows[0]?.ref) {
-      await openGraphRef(rows[0].ref);
+      const only = rows[0];
+      if (only.ref?.startsWith("contract:") || only.kind === "contract") {
+        const m = String(only.ref).match(/^contract:([^:]+):(0x[a-f0-9]{40})$/i);
+        if (m) {
+          await openPoolByAddress(m[1].toLowerCase(), m[2].toLowerCase());
+          return;
+        }
+      }
+      await openGraphRef(only.ref);
       return;
     }
     renderGraphSearchResults(rows, `Source: ${r.source || "neo4j"} · ${rows.length} result(s)`);
@@ -242,7 +665,10 @@ graphSearchForm?.addEventListener("submit", (e) => {
 graphSearchResults?.addEventListener("click", (e) => {
   const btn = e.target?.closest?.("button[data-graph-ref]");
   const ref = btn?.getAttribute?.("data-graph-ref");
-  if (ref) openGraphRef(ref);
+  if (!ref) return;
+  const m = ref.match(/^contract:([^:]+):(0x[a-f0-9]{40})$/i);
+  if (m) openPoolByAddress(m[1].toLowerCase(), m[2].toLowerCase());
+  else openGraphRef(ref);
 });
 
 function setViewMode(mode) {

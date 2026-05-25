@@ -31,6 +31,12 @@ import {
 } from "./backend/db/protocolCache.js";
 import { discoverContractConnections } from "./backend/services/contractConnections.js";
 import {
+  discoverProtocolsForPoolAddress,
+  discoverProtocolsForYieldsMarket,
+  discoverProtocolsForPoolWebsite,
+} from "./backend/services/yieldsDiscover.js";
+import { runPoolIntelligence, enrichPoolDiscoverPayload } from "./backend/services/poolIntelligence.js";
+import {
   localGraphInit,
   getProtocolGraph as getProtocolGraphLocal,
   getProtocolGraphById as getProtocolGraphLocalById,
@@ -55,6 +61,7 @@ import {
   searchYieldPoolsNeo4j,
   searchGraphNeo4j,
   getNeighborhoodGraphNeo4j,
+  upsertConnectionsGraphNeo4j,
 } from "./backend/db/neo4jGraph.js";
 import { fetchDocsSnippets } from "./backend/services/docsSnippets.js";
 import { ingestAuditPdfsIntoDocsPack } from "./backend/services/auditPdfIngest.js";
@@ -151,6 +158,32 @@ function tryResolveUrlToGraphRef(rawUrl) {
     }
   }
 
+  // Avantis earn / vault pages (no on-chain address) → DefiLlama yields market lookup
+  if (host === "avantisfi.com" || host.endsWith(".avantisfi.com")) {
+    const seg = (u.pathname || "").split("/").filter(Boolean).pop() || "vault";
+    const hint = seg.replace(/-vault$/i, "").replace(/-/g, " ");
+    return {
+      kind: "yields_market",
+      project: "avantis",
+      symbolHint: hint || "vault",
+      searchText: `avantis ${hint}`,
+    };
+  }
+
+  // Morpho marketing URLs: morpho.org/usdt-pool (no 0x in path)
+  if (host === "morpho.org" || host.endsWith(".morpho.org")) {
+    const seg = (u.pathname || "").split("/").filter(Boolean)[0] || "";
+    const hint = seg.replace(/-pool$/i, "").replace(/-/g, "");
+    if (hint) {
+      return {
+        kind: "yields_market",
+        project: "morpho",
+        symbolHint: hint,
+        searchText: `morpho ${hint}`,
+      };
+    }
+  }
+
   // Aave reserve overview: underlying token + marketName
   // https://app.aave.com/reserve-overview/?underlyingAsset=0x...&marketName=proto_mainnet_v3
   if (host === "app.aave.com" && u.pathname.includes("reserve-overview")) {
@@ -165,14 +198,80 @@ function tryResolveUrlToGraphRef(rawUrl) {
     if (underlying && /^0x[a-fA-F0-9]{40}$/.test(underlying)) {
       const addr = underlying.toLowerCase();
       return {
-        kind: "token",
-        ref: `token:${chain}:${addr}`,
+        kind: "pool",
+        ref: `contract:${chain}:${addr}`,
+        poolKey: `${chain}:${addr}`,
         protocolHint: marketName.includes("v3") ? "defillama:aave-v3" : "defillama:aave",
       };
     }
   }
 
+  // Generic pool/vault URL with 0x address in path or query (Uniswap, Curve, etc.)
+  const pathAddr = (u.pathname || "").match(/(0x[a-fA-F0-9]{40})/);
+  const qAddr =
+    u.searchParams.get("address") ||
+    u.searchParams.get("vault") ||
+    u.searchParams.get("pool") ||
+    u.searchParams.get("id");
+  const rawAddr = pathAddr?.[1] || (qAddr && /^0x[a-fA-F0-9]{40}$/.test(qAddr) ? qAddr : null);
+  if (rawAddr) {
+    const address = String(rawAddr).toLowerCase();
+    const path = (u.pathname || "").toLowerCase();
+    let chain = normalizeChainSegment(u.searchParams.get("chain") || u.searchParams.get("network"));
+    if (path.includes("/arbitrum") || host.includes("arbitrum")) chain = "arbitrum";
+    else if (path.includes("/optimism") || host.includes("optimism")) chain = "optimism";
+    else if (path.includes("/base") || host.includes("base.")) chain = "base";
+    else if (path.includes("/polygon") || host.includes("polygon")) chain = "polygon";
+    return {
+      kind: "pool",
+      ref: `contract:${chain}:${address}`,
+      poolKey: `${chain}:${address}`,
+    };
+  }
+
+  // Any other pool/product page — resolved live via DefiLlama (no DB required)
+  if (u.protocol === "https:" || u.protocol === "http:") {
+    return { kind: "pool_website", url: s };
+  }
+
   return null;
+}
+
+async function enrichPoolNeighborhoodWithDiscover(r, { chain, address }) {
+  const out = { ...(r || {}) };
+  const discover = await discoverProtocolsForPoolAddress({ chain, address }).catch(() => ({
+    protocols: [],
+    yieldsPools: [],
+  }));
+  const seen = new Set((Array.isArray(out.protocols) ? out.protocols : []).map((p) => String(p?.id || "")));
+  const protocols = Array.isArray(out.protocols) ? [...out.protocols] : [];
+  for (const p of discover.protocols || []) {
+    const id = String(p?.id || "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    protocols.push({
+      id,
+      name: p.name || id,
+      url: p.url || null,
+      link: "yields",
+      yieldsPools: Array.isArray(p.pools) ? p.pools : [],
+    });
+  }
+  out.protocols = protocols;
+  out.discover = {
+    yieldsPools: discover.yieldsPools || [],
+    protocolCount: (discover.protocols || []).length,
+  };
+  if (!out.hit && protocols.length) {
+    out.hit = true;
+    out.root = {
+      chain,
+      address: String(address || "").toLowerCase(),
+      label: out.root?.label || "Pool (DefiLlama yields)",
+      type: out.root?.type || "pool",
+    };
+  }
+  return out;
 }
 
 function extractAuditorsHeuristic({ docsPack, defillamaApi } = {}) {
@@ -1090,15 +1189,141 @@ app.get("/api/db/pool/search", async (req, res) => {
   }
 });
 
+app.post("/api/pool/intelligence", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const query = String(body.query || body.url || body.q || "").trim();
+    if (!query && !body.address) {
+      return res.status(400).json({ ok: false, error: "Provide url, query, or address" });
+    }
+    if (neo4jEnabled()) {
+      await neo4jInit().catch((err) => {
+        console.warn("Neo4j init for pool intelligence:", err?.message || err);
+      });
+    }
+    await localGraphInit().catch(() => {});
+    const result = await runPoolIntelligence(
+      {
+        url: body.url || (/^https?:\/\//i.test(query) ? query : undefined),
+        query: body.query || query,
+        address: body.address,
+        chain: body.chain,
+        project: body.project,
+        symbolHint: body.symbolHint,
+      },
+      {
+        persistNeo4j: neo4jEnabled() && body.persist !== false,
+        persistLocal: body.persist !== false,
+        upsertConnectionsGraphNeo4j,
+        upsertProtocolGraphNeo4j,
+        localGraphInit,
+        upsertProtocolGraphLocal: upsertProtocolGraphLocal,
+      }
+    );
+    return res.json(result);
+  } catch (err) {
+    console.error("/api/pool/intelligence:", err);
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.get("/api/pool/discover-url", async (req, res) => {
+  try {
+    const url = String(req.query.url || "").trim();
+    if (!url) return res.status(400).json({ ok: false, error: "Missing url" });
+    const expandUnderlying = /^(1|true|yes)$/i.test(String(req.query.expandUnderlying || ""));
+    const discover = await discoverProtocolsForPoolWebsite(url, { expandUnderlying });
+    if (!discover.ok) return res.status(400).json(discover);
+    const useLlm = !/^(0|false|no)$/i.test(String(req.query.useLlm || "1"));
+    const enriched = await enrichPoolDiscoverPayload(discover, { poolUrl: url, useLlm });
+    return res.json({
+      ok: true,
+      hit: (discover.protocols || []).length > 0 || (enriched.integrators || []).length > 0,
+      source: discover.source,
+      matchedSlug: discover.matchedSlug || null,
+      marketLabel: discover.marketLabel,
+      protocols: discover.protocols || [],
+      primary: discover.primary || [],
+      related: discover.related || [],
+      yieldsPools: enriched.yieldsPools || discover.yieldsPools || [],
+      integrators: enriched.integrators || [],
+      issuer: enriched.issuer || [],
+      usingProtocols: enriched.usingProtocols || [],
+      underlyingTokens: enriched.underlyingTokens || [],
+      risk: enriched.risk || null,
+      webResearch: enriched.webResearch || null,
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.get("/api/pool/yields-market", async (req, res) => {
+  try {
+    const project = String(req.query.project || "").trim();
+    const symbolHint = String(req.query.symbol || req.query.symbolHint || "").trim();
+    const expandUnderlying = /^(1|true|yes)$/i.test(String(req.query.expandUnderlying || ""));
+    if (!project) return res.status(400).json({ ok: false, error: "Missing project" });
+    const discover = await discoverProtocolsForYieldsMarket({ project, symbolHint, expandUnderlying });
+    const useLlm = !/^(0|false|no)$/i.test(String(req.query.useLlm || "1"));
+    const enriched = await enrichPoolDiscoverPayload(
+      { ...discover, matchedSlug: project.toLowerCase() },
+      { useLlm }
+    );
+    const protocols = (discover.protocols || []).map((p) => ({
+      id: p.id,
+      name: p.name || p.id,
+      url: p.url || null,
+      link: p.link || "yields",
+      yieldsPools: p.yieldsPools || [],
+    }));
+    return res.json({
+      ok: true,
+      hit: protocols.length > 0 || (enriched.integrators || []).length > 0,
+      source: "yields.llama.fi",
+      marketLabel: discover.marketLabel,
+      protocols,
+      primary: discover.primary || protocols,
+      related: discover.related || [],
+      yieldsPools: enriched.yieldsPools || discover.yieldsPools || [],
+      integrators: enriched.integrators || [],
+      issuer: enriched.issuer || [],
+      usingProtocols: enriched.usingProtocols || [],
+      underlyingTokens: enriched.underlyingTokens || [],
+      risk: enriched.risk || null,
+      webResearch: enriched.webResearch || null,
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
 app.get("/api/db/pool/neighborhood", async (req, res) => {
   try {
-    const chain = String(req.query.chain || "ethereum").trim();
-    const address = String(req.query.address || "").trim();
+    const chain = String(req.query.chain || "ethereum").trim().toLowerCase();
+    const address = String(req.query.address || "").trim().toLowerCase();
     const hops = Number(req.query.hops || 4);
-    if (!neo4jEnabled()) return res.json({ ok: true, source: "local_graph", hit: false });
-    const r = await getPoolNeighborhoodNeo4j({ chain, address, hops });
-    if (!r.ok) return res.status(400).json(r);
-    const out = { ok: true, source: "neo4j", ...r };
+    if (!/^0x[a-f0-9]{40}$/.test(address)) {
+      return res.status(400).json({ ok: false, error: "Invalid pool address" });
+    }
+
+    let r = { ok: true, hit: false, chain, address, protocols: [], pools: [] };
+    let source = "discover";
+
+    if (neo4jEnabled()) {
+      try {
+        await neo4jInit();
+        const neo = await getPoolNeighborhoodNeo4j({ chain, address, hops });
+        if (!neo.ok) return res.status(400).json(neo);
+        r = neo;
+        source = neo.hit ? "neo4j" : "neo4j+discover";
+      } catch (e) {
+        console.warn("Neo4j pool neighborhood failed:", e?.message || e);
+      }
+    }
+
+    r = await enrichPoolNeighborhoodWithDiscover(r, { chain, address });
+    const out = { ok: true, source, ...r };
     try {
       const hacks = await getDefiLlamaHacksCached().catch(() => []);
       const protos = Array.isArray(r.protocols) ? r.protocols : [];
@@ -1139,9 +1364,25 @@ app.get("/api/graph/neighborhood", async (req, res) => {
     const ref = String(req.query.ref || "").trim();
     const hops = Number(req.query.hops || 2);
     if (!neo4jEnabled()) return res.json({ ok: true, source: "local_graph", hit: false, graph: { nodes: [], edges: [] } });
-    await neo4jInit();
+    let neo4jError = null;
+    try {
+      await neo4jInit();
+    } catch (e) {
+      neo4jError = String(e?.message || e);
+      if (ref.startsWith("defillama:") || ref.startsWith("protocol:") || ref.startsWith("url:")) {
+        return res.json({
+          ok: true,
+          hit: false,
+          ref,
+          source: "neo4j_unavailable",
+          neo4jError,
+          graph: { nodes: [], edges: [] },
+        });
+      }
+      return res.status(503).json({ ok: false, error: neo4jError });
+    }
     const r = await getNeighborhoodGraphNeo4j({ ref, hops }).catch((e) => ({ ok: false, error: String(e?.message || e) }));
-    if (!r.ok) return res.status(400).json({ ok: false, error: r.error || "Neighborhood failed" });
+    if (!r.ok) return res.status(400).json({ ok: false, error: r.error || "Neighborhood failed", neo4jError });
     // Attach security summary by matching hacked protocol names within returned nodes
     const out = { ok: true, source: "neo4j", ...r };
     try {

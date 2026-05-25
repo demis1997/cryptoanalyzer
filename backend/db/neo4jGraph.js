@@ -44,20 +44,116 @@ export function normalizeNeo4jUri(rawUri) {
   return uri;
 }
 
+function auraInstanceIdFromUri(uri) {
+  const m = String(uri || "").match(/\/\/([a-f0-9]+)\.databases\.neo4j\.io/i);
+  return m ? m[1] : "";
+}
+
+function isAuraUri(uri) {
+  return /\.databases\.neo4j\.io\b/i.test(String(uri || ""));
+}
+
 function neo4jConfig() {
   const rawUri = env("NEO4J_URI");
   const uri = normalizeNeo4jUri(rawUri);
-  const user = env("NEO4J_USER", "neo4j");
+  const auraId = env("AURA_INSTANCEID") || auraInstanceIdFromUri(uri);
+  let user = env("NEO4J_USER", "neo4j");
   const password = env("NEO4J_PASSWORD");
-  const database = env("NEO4J_DATABASE", "neo4j");
-  if (!uri || !user || !password) {
+  let database = env("NEO4J_DATABASE", "neo4j");
+  if (!uri || !password) {
     throw new Error("Neo4j is not configured. Set NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD (and optionally NEO4J_DATABASE).");
   }
-  return { uri, rawUri, user, password, database };
+  if (isAuraUri(uri)) {
+    if (!user || user === auraId || user.includes("@")) user = "neo4j";
+    if (!database || database === "neo4j") database = auraId || database;
+  }
+  if (!user) user = "neo4j";
+  return { uri, rawUri, user, password, database, auraId };
 }
 
 let driverSingleton = null;
 let driverMeta = null;
+let resolvedDatabase = null;
+
+function databaseCandidates(cfg) {
+  const fromEnv = String(cfg.database || "").trim();
+  const fromHost = auraInstanceIdFromUri(cfg.uri);
+  const auraDb = fromEnv || cfg.auraId || fromHost;
+  if (isAuraUri(cfg.uri)) {
+    return [...new Set([resolvedDatabase, auraDb].filter(Boolean))];
+  }
+  return [...new Set([resolvedDatabase, fromEnv, fromHost, "neo4j"].filter(Boolean))];
+}
+
+async function discoverOnlineDatabases(driver) {
+  const sys = driver.session({ database: "system" });
+  try {
+    const res = await sys.run("SHOW DATABASES");
+    const names = [];
+    for (const rec of res.records) {
+      const name = rec.get("name");
+      const status = String(rec.get("currentStatus") || rec.get("status") || "").toLowerCase();
+      if (!name || name === "system") continue;
+      if (status && status !== "online") continue;
+      names.push(name);
+    }
+    return names;
+  } catch {
+    return [];
+  } finally {
+    await sys.close().catch(() => {});
+  }
+}
+
+async function openSession(driver, cfg) {
+  const discovered = await discoverOnlineDatabases(driver);
+  const candidates = [...new Set([...discovered, ...databaseCandidates(cfg)])];
+  let lastErr = null;
+  for (const db of candidates) {
+    const session = driver.session({ database: db });
+    try {
+      await session.run("RETURN 1 AS ok");
+      resolvedDatabase = db;
+      driverMeta = { ...(driverMeta || {}), database: db };
+      return session;
+    } catch (err) {
+      lastErr = err;
+      await session.close().catch(() => {});
+      const msg = String(err?.message || err);
+      if (!/Database.*not found|does not exist|system database/i.test(msg)) {
+        throw err;
+      }
+    }
+  }
+  const err = new Error("Neo4j database connection failed");
+  err.code = "neo4j_database";
+  err.details = String(lastErr?.message || lastErr);
+  throw err;
+}
+
+/** Short message for API/UI — no internal DB names or candidate lists. */
+export function formatNeo4jErrorForUser(err) {
+  const msg = String(err?.details || err?.message || err || "");
+  if (/unauthorized|authentication/i.test(msg)) {
+    return "Neo4j credentials rejected — use username neo4j and your Aura password in .env.";
+  }
+  if (/database.*not found|does not exist/i.test(msg) || err?.code === "neo4j_database") {
+    return "Neo4j graph save unavailable; pool data saved locally.";
+  }
+  if (/routing servers|discovery|enotfound|eai_again/i.test(msg)) {
+    return "Neo4j unreachable — check NEO4J_URI (use bolt+s:// from Aura Connect).";
+  }
+  return "Neo4j graph save skipped; pool data saved locally.";
+}
+
+async function sessionFor(driver, cfg) {
+  if (resolvedDatabase) return driver.session({ database: resolvedDatabase });
+  return openSession(driver, cfg);
+}
+
+export function getResolvedNeo4jDatabase() {
+  return resolvedDatabase;
+}
 
 function getDriver() {
   if (driverSingleton) return { driver: driverSingleton, meta: driverMeta };
@@ -93,7 +189,7 @@ export async function neo4jInit() {
       `Neo4j connectivity check failed${code ? ` (${code})` : ""}: ${msg}${hint ? ` — ${hint}` : ""}`
     );
   }
-  const session = driver.session({ database: cfg.database });
+  const session = await openSession(driver, cfg);
   try {
     // Neo4j 5 supports IF NOT EXISTS for constraints. These are safe to run repeatedly.
     await session.run(
@@ -153,7 +249,7 @@ export async function searchProtocolsNeo4j({ q, limit = 25 } = {}) {
 
   const { driver } = getDriver();
   const cfg = neo4jConfig();
-  const session = driver.session({ database: cfg.database });
+  const session = await sessionFor(driver, cfg);
   try {
     const res = await session.run(
       `
@@ -187,7 +283,7 @@ export async function protocolExistsNeo4j({ id }) {
   if (!pid) return false;
   const { driver } = getDriver();
   const cfg = neo4jConfig();
-  const session = driver.session({ database: cfg.database });
+  const session = await sessionFor(driver, cfg);
   try {
     const r = await session.run(`MATCH (p:Protocol {id:$id}) RETURN p.id AS id LIMIT 1`, { id: pid });
     return r.records.length > 0;
@@ -201,7 +297,7 @@ export async function findProtocolIdByUrlNeo4j({ url }) {
   if (!u) return null;
   const { driver } = getDriver();
   const cfg = neo4jConfig();
-  const session = driver.session({ database: cfg.database });
+  const session = await sessionFor(driver, cfg);
   try {
     const r = await session.run(
       `MATCH (p:Protocol) WHERE p.url = $url RETURN p.id AS id ORDER BY p.updatedAt DESC LIMIT 1`,
@@ -224,7 +320,7 @@ export async function getRelatedProtocolsNeo4j({ id, hops = 4, limitNodes = 220,
 
   const { driver } = getDriver();
   const cfg = neo4jConfig();
-  const session = driver.session({ database: cfg.database });
+  const session = await sessionFor(driver, cfg);
   try {
     // Return protocol nodes reachable via ecosystem graph even when paths traverse tokens/contracts.
     // Then optionally include protocol<->protocol edges among the discovered protocol set.
@@ -281,7 +377,7 @@ export async function searchPoolsNeo4j({ q, limit = 25 } = {}) {
 
   const { driver } = getDriver();
   const cfg = neo4jConfig();
-  const session = driver.session({ database: cfg.database });
+  const session = await sessionFor(driver, cfg);
   try {
     const res = await session.run(
       `
@@ -318,7 +414,7 @@ export async function searchYieldPoolsNeo4j({ q, limit = 25 } = {}) {
   const query = String(q || "").trim().toLowerCase();
   if (!query) return [];
   const lim = Math.trunc(Math.min(100, Math.max(1, Number(limit) || 25)));
-  const session = driver.session({ database: cfg.database });
+  const session = await sessionFor(driver, cfg);
   try {
     const like = `(?i).*${query.replace(/[^a-z0-9_-]+/g, ".*")}.*`;
     const res = await session.run(
@@ -363,7 +459,7 @@ export async function searchGraphNeo4j({ q, limit = 25 } = {}) {
   const lim = Math.trunc(Math.min(50, Math.max(1, Number(limit) || 25)));
   const { driver } = getDriver();
   const cfg = neo4jConfig();
-  const session = driver.session({ database: cfg.database });
+  const session = await sessionFor(driver, cfg);
   try {
     const res = await session.run(
       `
@@ -427,7 +523,7 @@ export async function getNeighborhoodGraphNeo4j({ ref, hops = 2, limitNodes = 26
   const maxHops = Math.min(6, Math.max(1, Number(hops) || 2));
   const { driver } = getDriver();
   const cfg = neo4jConfig();
-  const session = driver.session({ database: cfg.database });
+  const session = await sessionFor(driver, cfg);
 
   const match = (() => {
     if (startRef.startsWith("contract:")) {
@@ -511,7 +607,7 @@ export async function getPoolNeighborhoodNeo4j({ chain = "ethereum", address, ho
 
   const { driver } = getDriver();
   const cfg = neo4jConfig();
-  const session = driver.session({ database: cfg.database });
+  const session = await sessionFor(driver, cfg);
   try {
     const res = await session.run(
       `
@@ -519,15 +615,19 @@ export async function getPoolNeighborhoodNeo4j({ chain = "ethereum", address, ho
       OPTIONAL MATCH path = (root)-[:ECOSYSTEM_LINK*1..${maxHops}]-(m)
       UNWIND (CASE WHEN path IS NULL THEN [root] ELSE nodes(path) END) AS n
       WITH root, collect(DISTINCT n) AS allNodes
+      OPTIONAL MATCH (owner:Protocol)-[:HAS_CONTRACT]->(root)
+      WITH root, allNodes, collect(DISTINCT owner) AS owners
       WITH root,
-        [x IN allNodes WHERE x:Protocol] AS protos,
+        [x IN allNodes WHERE x:Protocol] + owners AS protoNodes,
         [x IN allNodes WHERE x:Contract AND (toLower(coalesce(x.type,'')) IN ['pool','market','vault','amm','lp','staking'] OR toLower(coalesce(x.label,'')) CONTAINS 'pool' OR toLower(coalesce(x.label,'')) CONTAINS 'market' OR toLower(coalesce(x.label,'')) CONTAINS 'vault')] AS pools
+      WITH root, pools,
+        [p IN protoNodes WHERE p:Protocol | {id:p.id, name:p.name, url:p.url, link: 'graph'}] AS graphProtos
       RETURN
         root.chain AS chain,
         root.address AS address,
         root.label AS label,
         root.type AS type,
-        [p IN protos | {id:p.id, name:p.name, url:p.url}] AS protocols,
+        graphProtos AS protocols,
         [c IN pools | {chain:c.chain, address:c.address, label:c.label, type:c.type}] AS pools
       `,
       { chain: ch, address: addr }
@@ -535,7 +635,14 @@ export async function getPoolNeighborhoodNeo4j({ chain = "ethereum", address, ho
 
     if (!res.records.length) return { ok: true, hit: false, chain: ch, address: addr };
     const rec = res.records[0];
-    const protocols = Array.isArray(rec.get("protocols")) ? rec.get("protocols") : [];
+    const seen = new Set();
+    const protocols = [];
+    for (const p of Array.isArray(rec.get("protocols")) ? rec.get("protocols") : []) {
+      const id = String(p?.id || "").trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      protocols.push({ id, name: p.name || id, url: p.url || null, link: p.link || "graph" });
+    }
     const pools = Array.isArray(rec.get("pools")) ? rec.get("pools") : [];
 
     return {
@@ -570,7 +677,7 @@ export async function getProtocolGraphNeo4j({ origin, defillamaSlug }) {
   const { driver } = getDriver();
   const cfg = neo4jConfig();
   const id = protocolIdFrom({ origin, defillamaSlug });
-  const session = driver.session({ database: cfg.database });
+  const session = await sessionFor(driver, cfg);
   try {
     const pRes = await session.run(
       `MATCH (p:Protocol {id:$id}) RETURN p LIMIT 1`,
@@ -651,7 +758,7 @@ export async function getProtocolGraphNeo4jById({ id }) {
   const cfg = neo4jConfig();
   const pid = String(id || "").trim();
   if (!pid) return { ok: false, error: "Missing id" };
-  const session = driver.session({ database: cfg.database });
+  const session = await sessionFor(driver, cfg);
   try {
     const pRes = await session.run(`MATCH (p:Protocol {id:$id}) RETURN p LIMIT 1`, { id: pid });
     if (!pRes.records.length) return { ok: true, hit: false, id: pid };
@@ -728,7 +835,7 @@ export async function upsertProtocolGraphNeo4j({
   const id = String(p.id || protocolIdFrom({ origin: p.url, defillamaSlug: p.defillamaSlug }));
   const now = new Date().toISOString();
 
-  const session = driver.session({ database: cfg.database });
+  const session = await sessionFor(driver, cfg);
   try {
     await session.executeWrite(async (tx) => {
       await tx.run(
@@ -845,7 +952,7 @@ export async function upsertProtocolExtraNeo4j({ id, extra } = {}) {
   const pid = String(id || "").trim();
   if (!pid) return { ok: false, error: "Missing id" };
   const now = new Date().toISOString();
-  const session = driver.session({ database: cfg.database });
+  const session = await sessionFor(driver, cfg);
   try {
     await session.executeWrite(async (tx) => {
       await tx.run(
@@ -885,7 +992,7 @@ export async function upsertConnectionsGraphNeo4j({ rootProtocolId, subjectProto
 
   const { driver } = getDriver();
   const cfg = neo4jConfig();
-  const session = driver.session({ database: cfg.database });
+  const session = await sessionFor(driver, cfg);
   const now = new Date().toISOString();
 
   const nodeIndex = new Map(); // idLower -> normalized descriptor

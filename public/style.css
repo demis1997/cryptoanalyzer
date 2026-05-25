@@ -303,6 +303,37 @@ a:hover {
   border-bottom: none;
 }
 
+.pool-protocols-panel {
+  margin: 0 24px 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(2, 6, 23, 0.72);
+}
+
+.pool-protocols-panel__head {
+  margin-bottom: 10px;
+}
+
+.pool-protocols-panel__title {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.pool-protocols-panel__item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(51, 65, 85, 0.35);
+}
+
+.pool-protocols-panel__item:last-child {
+  border-bottom: none;
+}
+
 .command-bar {
   flex: 1;
   display: flex;
