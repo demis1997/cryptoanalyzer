@@ -258,6 +258,22 @@ a:hover {
   background: rgba(56, 189, 248, 0.12);
 }
 
+.link-btn {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.link-btn:hover {
+  color: #7dd3fc;
+}
+
 .graph-search-drop {
   margin: 0 24px 8px;
   padding: 10px 12px;
