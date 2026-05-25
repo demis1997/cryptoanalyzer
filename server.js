@@ -1031,9 +1031,30 @@ app.get("/api/db/related", async (req, res) => {
     if (!neo4jEnabled()) {
       return res.json({ ok: true, source: "local_graph", hit: true, id, graph: { nodes: [], edges: [] } });
     }
-    const r = await getRelatedProtocolsNeo4j({ id, hops });
-    if (!r.ok) return res.status(500).json(r);
-    return res.json({ ok: true, source: "neo4j", ...r });
+    try {
+      await neo4jInit();
+      const r = await getRelatedProtocolsNeo4j({ id, hops });
+      if (!r.ok) {
+        return res.json({
+          ok: true,
+          source: "local_graph",
+          hit: true,
+          id,
+          graph: { nodes: [], edges: [] },
+          neo4jError: r.error || "Related graph query failed",
+        });
+      }
+      return res.json({ ok: true, source: "neo4j", ...r });
+    } catch (e) {
+      return res.json({
+        ok: true,
+        source: "local_graph",
+        hit: true,
+        id,
+        graph: { nodes: [], edges: [] },
+        neo4jError: String(e?.message || e),
+      });
+    }
   } catch (err) {
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }

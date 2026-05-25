@@ -29,15 +29,31 @@ export function neo4jEnabled() {
   return truthyEnv("ENABLE_NEO4J_GRAPH") || Boolean(env("NEO4J_URI"));
 }
 
+/**
+ * Aura often gives neo4j+s:// (cluster routing). On serverless (Vercel) that frequently fails with
+ * "Could not perform discovery. No routing servers available". Direct bolt+s:// works reliably.
+ */
+export function normalizeNeo4jUri(rawUri) {
+  const uri = String(rawUri || "").trim();
+  if (!uri) return uri;
+  const forceBolt = truthyEnv("NEO4J_FORCE_BOLT");
+  const isAuraHost = /\.databases\.neo4j\.io\b/i.test(uri);
+  if (!forceBolt && !isAuraHost) return uri;
+  if (/^neo4j\+s:\/\//i.test(uri)) return uri.replace(/^neo4j\+s:\/\//i, "bolt+s://");
+  if (/^neo4j:\/\//i.test(uri)) return uri.replace(/^neo4j:\/\//i, "bolt://");
+  return uri;
+}
+
 function neo4jConfig() {
-  const uri = env("NEO4J_URI");
+  const rawUri = env("NEO4J_URI");
+  const uri = normalizeNeo4jUri(rawUri);
   const user = env("NEO4J_USER", "neo4j");
   const password = env("NEO4J_PASSWORD");
   const database = env("NEO4J_DATABASE", "neo4j");
   if (!uri || !user || !password) {
     throw new Error("Neo4j is not configured. Set NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD (and optionally NEO4J_DATABASE).");
   }
-  return { uri, user, password, database };
+  return { uri, rawUri, user, password, database };
 }
 
 let driverSingleton = null;
@@ -64,13 +80,15 @@ export async function neo4jInit() {
     const msg = String(err?.message || err || "");
     const code = err?.code ? String(err.code) : "";
     const hint =
-      /unauthorized|authentication/i.test(msg)
-        ? "Aura rejected credentials. Reset the Aura instance DB password and update NEO4J_PASSWORD in .env (username is usually neo4j)."
-        : /enotfound|eai_again|dns/i.test(msg)
-          ? "DNS/network error. Confirm NEO4J_URI and that your network allows outbound neo4j+s (TLS)."
-          : /certificate|tls|ssl/i.test(msg)
-            ? "TLS error. Aura requires neo4j+s:// (or bolt+s://). Ensure the URI scheme matches Aura connection details."
-            : "";
+      /routing servers available|could not perform discovery/i.test(msg)
+        ? "Use a direct Aura URI: bolt+s://<id>.databases.neo4j.io (not neo4j+s://). In Neo4j Aura → Connect → copy the bolt URI, or set NEO4J_FORCE_BOLT=1."
+        : /unauthorized|authentication/i.test(msg)
+          ? "Aura rejected credentials. Reset the Aura instance DB password and update NEO4J_PASSWORD in .env (username is usually neo4j)."
+          : /enotfound|eai_again|dns/i.test(msg)
+            ? "DNS/network error. Confirm NEO4J_URI and that your network allows outbound Bolt (TLS port 7687)."
+            : /certificate|tls|ssl/i.test(msg)
+              ? "TLS error. Aura requires bolt+s:// (or neo4j+s://). Ensure the URI scheme matches Aura connection details."
+              : "";
     throw new Error(
       `Neo4j connectivity check failed${code ? ` (${code})` : ""}: ${msg}${hint ? ` — ${hint}` : ""}`
     );

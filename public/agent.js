@@ -486,22 +486,31 @@ form?.addEventListener("submit", async (e) => {
       riskNoteEl.textContent = `Risk scoring failed: ${String(err?.message || err)}`;
     }
 
-    // Related protocols up to 4 hops (Neo4j)
+    // Related protocols up to 4 hops (Neo4j; optional — analysis still succeeds if Neo4j is down)
     const pid = analysis?.neo4j?.protocolId || analysis?.localGraph?.protocolId || analysis?.cache?.protocolKey || null;
     lastProtocolKey = pid;
     if (pid) {
-      metaEl.textContent += " • Loading related protocols…";
-      const related = await apiGet(`/api/db/related?id=${encodeURIComponent(pid)}&hops=4`);
-      const relNodes = Array.isArray(related?.graph?.nodes) ? related.graph.nodes : [];
-      renderRelatedGraphSvg({
-        rootName: p.name || prettyId(pid),
-        relatedNodes: relNodes.filter((n) => n?.id && n.id !== pid),
-      });
-      renderRelated(related.graph, { rootId: pid });
+      try {
+        metaEl.textContent += " • Loading related protocols…";
+        const related = await apiGet(`/api/db/related?id=${encodeURIComponent(pid)}&hops=4`);
+        if (related?.neo4jError) {
+          metaEl.textContent += ` • Related graph skipped (${related.neo4jError})`;
+        }
+        const relNodes = Array.isArray(related?.graph?.nodes) ? related.graph.nodes : [];
+        renderRelatedGraphSvg({
+          rootName: p.name || prettyId(pid),
+          relatedNodes: relNodes.filter((n) => n?.id && n.id !== pid),
+        });
+        renderRelated(related.graph, { rootId: pid });
+      } catch (relErr) {
+        metaEl.textContent += ` • Related protocols unavailable (${String(relErr?.message || relErr)})`;
+      }
     }
 
     rawEl.textContent = JSON.stringify(analysis, null, 2);
-    metaEl.textContent = "Done.";
+    if (!/\bDone\.?\s*$/i.test(metaEl.textContent)) {
+      metaEl.textContent = `${metaEl.textContent || "Finished"} • Done.`;
+    }
     if (downloadBtn) downloadBtn.disabled = false;
   } catch (err) {
     metaEl.textContent = `Failed: ${String(err?.message || err)}`;

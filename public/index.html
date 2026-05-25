@@ -2,234 +2,271 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Protocol Inspector</title>
+    <title>DeFi Risk Intelligence — Protocol Analysis</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Institutional DeFi protocol risk intelligence — dependency graphs, contract verification, liquidity, and investor-ready reports." />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <div class="app">
-      <header class="app__header">
-        <h1>Protocol Inspector</h1>
-        <p class="app__subtitle">
-          Paste a DeFi protocol website to inspect real on‑chain metrics,
-          funding, and qualitative risk in one place.
-        </p>
-        <nav class="nav" aria-label="Primary">
-          <a class="nav__active" href="/">Home</a>
-          <a href="/agent.html">Agent</a>
-          <a href="/db.html">Database</a>
-          <a href="/graph.html">Graph</a>
-        </nav>
-      </header>
-
-      <section class="card card--input">
-        <form id="protocol-form">
-          <label for="protocol-url" class="field__label">
-            Protocol website
-          </label>
-          <div class="field__row">
-            <input
-              id="protocol-url"
-              name="protocol-url"
-              type="url"
-              class="field__input"
-              placeholder="https://app.uniswap.org"
-              required
-            />
-            <button type="submit" class="btn btn--primary">
-              Analyze
-            </button>
-            <button type="button" id="report-pdf-btn" class="btn btn--ghost">
-              Download PDF
-            </button>
-            <button type="button" id="report-json-btn" class="btn btn--ghost">
-              Download JSON
-            </button>
-            <button type="button" id="chatgpt-research-btn" class="btn btn--ghost">
-              Open in ChatGPT
-            </button>
+    <div id="platform-root" class="platform">
+      <aside class="sidebar" aria-label="Platform navigation">
+        <div class="sidebar__brand">
+          <div class="sidebar__logo" aria-hidden="true">RI</div>
+          <div>
+            <div class="sidebar__title">Risk Intelligence</div>
+            <div class="sidebar__tagline">DeFi protocol due diligence</div>
           </div>
-          <label for="wallet-address" class="field__label" style="margin-top: 10px;">
-            Wallet address (optional)
-          </label>
-          <div class="field__row">
+        </div>
+        <nav class="sidebar__nav" id="sidebar-nav">
+          <button type="button" class="sidebar__item sidebar__item--active" data-tab="overview"><span class="sidebar__icon">◈</span> Overview</button>
+          <button type="button" class="sidebar__item" data-tab="graph"><span class="sidebar__icon">◎</span> Risk Graph</button>
+          <button type="button" class="sidebar__item" data-tab="contracts"><span class="sidebar__icon">⬡</span> Smart Contracts</button>
+          <button type="button" class="sidebar__item" data-tab="liquidity"><span class="sidebar__icon">◆</span> Liquidity &amp; TVL</button>
+          <button type="button" class="sidebar__item" data-tab="funding"><span class="sidebar__icon">◇</span> Funding &amp; Investors</button>
+          <button type="button" class="sidebar__item" data-tab="wallet"><span class="sidebar__icon">◉</span> Wallet Exposure</button>
+          <button type="button" class="sidebar__item" data-tab="evidence"><span class="sidebar__icon">▣</span> Evidence &amp; Sources</button>
+          <button type="button" class="sidebar__item" data-tab="export"><span class="sidebar__icon">↓</span> Report Export</button>
+        </nav>
+        <div class="sidebar__footer">
+          <a href="/db.html">Protocol database</a> · <a href="/agent.html">Research agent</a>
+        </div>
+      </aside>
+
+      <div class="platform__main">
+        <header class="topbar">
+          <form id="protocol-form" class="command-bar">
+            <div class="command-bar__field">
+              <input
+                id="protocol-url"
+                name="protocol-url"
+                type="url"
+                class="command-bar__input"
+                placeholder="Enter protocol URL — e.g. https://app.aave.com"
+                required
+                autocomplete="off"
+              />
+            </div>
             <input
               id="wallet-address"
               name="wallet-address"
               type="text"
-              class="field__input"
-              placeholder="0x…"
+              class="command-bar__input command-bar__wallet"
+              placeholder="Wallet (optional) 0x…"
               autocomplete="off"
               spellcheck="false"
             />
+            <button type="submit" id="analyze-btn" class="btn btn--primary">
+              <span class="btn__label">Run intelligence</span>
+            </button>
+          </form>
+          <div class="topbar__actions">
+            <button type="button" id="report-pdf-btn" class="btn btn--ghost" disabled>PDF</button>
+            <button type="button" id="report-json-btn" class="btn btn--ghost" disabled>JSON</button>
+            <button type="button" id="chatgpt-research-btn" class="btn btn--ghost" disabled>ChatGPT</button>
           </div>
-          <div id="debank-link-wrap" class="field__hint" style="display: none;">
-            View this wallet on
-            <a id="debank-link" href="#" target="_blank" rel="noopener noreferrer">Debank</a>
+        </header>
+
+        <div id="platform-status" class="platform-status" hidden></div>
+
+        <label class="checkbox-row" style="padding: 0 24px 8px;">
+          <input type="checkbox" id="force-refresh" name="force-refresh" />
+          <span>Full refresh — bypass cache, re-crawl documentation, refresh dependency graph</span>
+        </label>
+        <div id="debank-link-wrap" class="field__hint" style="display: none; padding: 0 24px 12px;">
+          Portfolio view on <a id="debank-link" href="#" target="_blank" rel="noopener noreferrer">Debank</a>
+        </div>
+
+        <main class="workspace">
+          <!-- Pre-analysis landing -->
+          <section id="landing-state" data-panel="landing">
+            <div class="graph-hero animate-in">
+              <div class="graph-hero__head">
+                <div>
+                  <h2 class="graph-hero__title">Dependency &amp; exposure graph</h2>
+                  <p class="panel__desc" style="margin:0;">Map protocol, custody, oracle, and liquidity dependencies before capital allocation.</p>
+                </div>
+              </div>
+              <div id="landing-graph" class="graph-panel-wrap"></div>
+            </div>
+            <div class="empty-state animate-in" style="margin-top:20px;">
+              <div class="empty-state__icon">◇</div>
+              <h3 class="empty-state__title">Run protocol intelligence</h3>
+              <p class="empty-state__body">Enter a DeFi protocol URL above to generate an institutional risk profile with on-chain contracts, TVL, audit coverage, and exportable investor materials.</p>
+            </div>
+          </section>
+
+          <div id="results-hero" class="results-hero" hidden>
+            <div class="protocol-hero animate-in">
+              <div>
+                <h1 id="protocol-name" class="protocol-hero__name">—</h1>
+                <div class="protocol-hero__meta">
+                  <span id="protocol-category" class="chip">Category pending</span>
+                  <span id="protocol-chains" class="chip">—</span>
+                </div>
+                <div id="protocol-url-display" class="protocol-hero__url">—</div>
+                <p id="protocol-information" class="protocol-hero__desc"></p>
+                <p id="protocol-audits" class="field__hint" style="margin-top:10px;"></p>
+                <p id="llm-enrich-meta" class="field__hint"></p>
+                <p id="protocol-methodology" class="field__hint"></p>
+              </div>
+              <div id="hero-risk-score"></div>
+            </div>
+
+            <div class="graph-hero animate-in" style="margin-top:18px;">
+              <div class="graph-hero__head">
+                <h2 class="graph-hero__title">Risk dependency graph</h2>
+                <div class="graph-hero__controls">
+                  <label class="muted" style="font-size:12px;">Depth
+                    <select id="graph-depth">
+                      <option value="2">2</option>
+                      <option value="3" selected>3</option>
+                      <option value="4">4</option>
+                      <option value="5">5</option>
+                    </select>
+                  </label>
+                  <button type="button" id="graph-expand-btn" class="btn btn--ghost" style="padding:8px 12px;font-size:12px;">Expand graph</button>
+                </div>
+              </div>
+              <div id="hero-graph-panel" class="graph-panel-wrap"></div>
+              <div id="graph-node-detail" class="graph-detail">Select a node to inspect dependency context.</div>
+            </div>
           </div>
-          <label class="field__hint" style="display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; cursor: pointer; max-width: 42rem;">
-            <input type="checkbox" id="force-refresh" name="force-refresh" style="margin-top: 3px;" />
-            <span>Full refresh — ignore graph/DB cache, re-crawl the site, run hosted LLM, update SQLite graph.</span>
-          </label>
-        </form>
-      </section>
 
-      <section class="grid grid--meta">
-        <article class="card">
-          <h2 class="card__title">Protocol overview</h2>
-          <div id="protocol-name" class="metric metric--primary">–</div>
-          <div id="protocol-url-display" class="metric metric--muted">Paste a URL and click Analyze.</div>
-          <div id="protocol-chains" class="metric metric--muted"></div>
-          <div id="protocol-audits" class="metric metric--muted"></div>
-          <div id="llm-enrich-meta" class="metric metric--muted" style="font-size: 12px;"></div>
-          <div id="protocol-methodology" class="metric metric--muted"></div>
-          <div class="small muted" style="margin-top:10px;">
-            Protocol information
+          <div id="analysis-loading" hidden>
+            <div class="skeleton skeleton--graph" style="margin-bottom:18px;"></div>
+            <div id="loading-metrics" class="skeleton-grid"></div>
+            <div style="margin-top:18px;" id="loading-lines"></div>
           </div>
-          <div id="protocol-information" class="metric metric--muted"></div>
-        </article>
 
-        <article class="card">
-          <h2 class="card__title">Overall rating</h2>
-          <div id="overall-score" class="metric metric--primary">–</div>
-          <div id="overall-notes" class="metric metric--muted">
-            Risk assessment is generated automatically after Analyze.
-          </div>
-        </article>
-      </section>
+          <!-- Overview -->
+          <section class="panel" data-panel="overview" hidden>
+            <header class="panel__header animate-in">
+              <h2 class="panel__title">Executive overview</h2>
+              <p class="panel__desc">Consolidated risk posture, market footprint, and intelligence pipeline status for investment committee review.</p>
+            </header>
+            <div id="overview-metrics" class="grid-metrics animate-in"></div>
+            <div class="grid-2">
+              <div class="card animate-in">
+                <h3 class="card__title">Risk decomposition</h3>
+                <div id="risk-breakdown"></div>
+              </div>
+              <div class="card animate-in">
+                <h3 class="card__title">Assessment summary</h3>
+                <div id="overall-score" class="metric--primary">—</div>
+                <p id="overall-notes" class="metric--muted">Awaiting analysis.</p>
+                <div id="risk-overall" class="metric--primary" style="font-size:14px;margin-top:12px;">—</div>
+                <p id="risk-status" class="metric--muted"></p>
+                <ul id="risk-sections" class="list-clean"></ul>
+                <ul id="risk-notes" class="list-clean"></ul>
+              </div>
+            </div>
+          </section>
 
-      <section class="grid">
-        <article class="card">
-          <h2 class="card__title">Smart Contracts</h2>
-          <ul id="contract-list" class="list"></ul>
-          <p class="card__empty" id="contracts-empty">
-            No data yet. Paste a URL and click Analyze.
-          </p>
-        </article>
+          <!-- Risk Graph tab -->
+          <section class="panel" data-panel="graph" hidden>
+            <header class="panel__header animate-in">
+              <h2 class="panel__title">Risk graph explorer</h2>
+              <p class="panel__desc">Interactive dependency map across protocols, pools, tokens, and contracts — weakest-link analysis for bridge and custody paths.</p>
+            </header>
+            <div id="tab-graph-panel" class="graph-panel-wrap" style="min-height:520px;border:1px solid var(--border);border-radius:var(--radius);"></div>
+            <ul id="connections-list" class="list-clean" style="margin-top:18px;"></ul>
+            <p class="card__empty" id="connections-empty">No dependency edges detected. Configure ETH_RPC_URL for on-chain link discovery.</p>
+          </section>
 
-        <article class="card">
-          <h2 class="card__title">Connected contracts</h2>
-          <ul id="connections-list" class="list"></ul>
-          <p class="card__empty" id="connections-empty">
-            No connected-contract graph yet. Run Analyze (and set `ETH_RPC_URL` for on-chain links).
-          </p>
-        </article>
+          <!-- Contracts -->
+          <section class="panel" data-panel="contracts" hidden>
+            <header class="panel__header animate-in">
+              <h2 class="card__title" style="text-transform:none;font-size:20px;margin:0 0 8px;">Smart contract registry</h2>
+              <p class="panel__desc">Verified deployment addresses with audit attribution and evidence trails.</p>
+            </header>
+            <div class="card animate-in" style="overflow-x:auto;">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Contract</th>
+                    <th>Network</th>
+                    <th>Address</th>
+                    <th>Audit status</th>
+                    <th>Evidence</th>
+                  </tr>
+                </thead>
+                <tbody id="contract-table-body"></tbody>
+              </table>
+              <ul id="contract-list" class="list-clean" hidden></ul>
+              <p class="card__empty" id="contracts-empty">No contracts indexed. Run intelligence on a protocol URL.</p>
+            </div>
+          </section>
 
-        <article class="card">
-          <h2 class="card__title">Total Value Locked (TVL)</h2>
-          <div id="tvl-value" class="metric metric--primary">–</div>
-          <div id="tvl-change" class="metric metric--muted"></div>
-        </article>
+          <!-- Liquidity -->
+          <section class="panel" data-panel="liquidity" hidden>
+            <header class="panel__header animate-in">
+              <h2 class="panel__title">Liquidity &amp; market depth</h2>
+              <p class="panel__desc">TVL, native token volume, and per-asset liquidity concentration.</p>
+            </header>
+            <div id="liquidity-metrics" class="grid-metrics animate-in"></div>
+            <div class="card animate-in">
+              <h3 class="card__title">Token liquidity</h3>
+              <ul id="token-liquidity-list" class="list-clean"></ul>
+              <p class="card__empty" id="token-liquidity-empty">No liquidity breakdown available.</p>
+            </div>
+          </section>
 
-        <article class="card">
-          <h2 class="card__title">Total raised</h2>
-          <ul id="investor-list" class="list"></ul>
-          <p class="card__empty" id="investors-empty">
-            No total raised data yet. Paste a URL and click Analyze.
-          </p>
-        </article>
+          <!-- Funding -->
+          <section class="panel" data-panel="funding" hidden>
+            <header class="panel__header animate-in">
+              <h2 class="panel__title">Funding &amp; capitalization</h2>
+              <p class="panel__desc">Total capital raised and disclosed backing (DefiLlama / public filings).</p>
+            </header>
+            <div id="funding-metrics" class="grid-metrics animate-in"></div>
+            <ul id="investor-list" class="list-clean"></ul>
+            <p class="card__empty" id="investors-empty">No funding data available for this protocol.</p>
+          </section>
 
-        <article class="card">
-          <h2 class="card__title">Native token volume (24h)</h2>
-          <div id="tx-per-day" class="metric metric--primary">–</div>
-          <div id="tx-trend" class="metric metric--muted"></div>
-        </article>
+          <!-- Wallet -->
+          <section class="panel" data-panel="wallet" hidden>
+            <header class="panel__header animate-in">
+              <h2 class="panel__title">Wallet exposure analysis</h2>
+              <p class="panel__desc">Position-level allocations and counterparty risk for the submitted address.</p>
+            </header>
+            <ul id="allocation-list" class="list-clean"></ul>
+            <p class="card__empty" id="allocations-empty">Provide a wallet address in the command bar to surface holdings and protocol exposures.</p>
+          </section>
 
-        <article class="card">
-          <h2 class="card__title">Token liquidity</h2>
-          <ul id="token-liquidity-list" class="list"></ul>
-          <p class="card__empty" id="token-liquidity-empty">
-            No token liquidity list detected on this page yet.
-          </p>
-        </article>
+          <!-- Evidence -->
+          <section class="panel" data-panel="evidence" hidden>
+            <header class="panel__header animate-in">
+              <h2 class="panel__title">Evidence &amp; source attribution</h2>
+              <p class="panel__desc">Every material metric linked to primary sources for audit and compliance workflows.</p>
+            </header>
+            <div id="evidence-grid" class="evidence-grid animate-in"></div>
+            <ul id="evidence-list" class="list-clean" hidden></ul>
+            <p class="card__empty" id="evidence-empty">Evidence cards populate after intelligence run completes.</p>
+          </section>
 
-        <article class="card">
-          <h2 class="card__title">Allocations & exposures</h2>
-          <ul id="allocation-list" class="list"></ul>
-          <p class="card__empty" id="allocations-empty">
-            Enter your wallet address above to show your allocated funds.
-          </p>
-        </article>
+          <!-- Export -->
+          <section class="panel" data-panel="export" hidden>
+            <header class="panel__header animate-in">
+              <h2 class="panel__title">Investor report export</h2>
+              <p class="panel__desc">Generate committee-ready PDF packages or structured JSON for internal risk systems.</p>
+            </header>
+            <div class="card animate-in">
+              <p class="metric--muted" style="margin:0 0 16px;">Exports include protocol summary, rubric scores, contract registry, dependency graph metadata, and evidence index.</p>
+              <div class="export-actions">
+                <button type="button" id="export-pdf-cta" class="btn btn--cta" disabled>Generate investor report (PDF)</button>
+                <button type="button" id="export-json-cta" class="btn btn--ghost" disabled>Export JSON</button>
+                <button type="button" id="export-chatgpt-cta" class="btn btn--ghost" disabled>Open in ChatGPT</button>
+              </div>
+            </div>
+          </section>
 
-        <article class="card">
-          <h2 class="card__title">Risk Assessment</h2>
-          <div id="risk-overall" class="metric metric--primary">–</div>
-          <div id="risk-status" class="metric metric--muted">
-            Risk assessment is generated automatically after Analyze.
-          </div>
-          <ul id="risk-sections" class="list"></ul>
-          <ul id="risk-notes" class="list"></ul>
-        </article>
-
-        <article class="card">
-          <h2 class="card__title">Evidence & notes</h2>
-          <ul id="evidence-list" class="list"></ul>
-          <p class="card__empty" id="evidence-empty">
-            After Analyze, sources for key metrics appear here.
-          </p>
-        </article>
-      </section>
-
-      <section class="card card--footer">
-        <p>
-          Results are generated by your backend using live data sources and
-          heuristics. Double check critical decisions against primary protocol
-          documentation and audits.
-        </p>
-        <p style="margin-top: 6px;">
-          Helpful places to validate protocol facts:
-        </p>
-        <ul style="margin-top: 6px;">
-          <li>
-            <a
-              href="https://defillama.com"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              DefiLlama
-            </a>
-          </li>
-          <li>
-            <a
-              href="https://dune.com"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Dune Analytics
-            </a>
-          </li>
-          <li>
-            <a
-              href="https://nansen.ai"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Nansen
-            </a>
-          </li>
-          <li>
-            <a
-              href="https://covalent.com"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Covalent
-            </a>
-          </li>
-          <li>
-            <a
-              href="https://rekt.news"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              REKT news
-            </a>
-          </li>
-        </ul>
-      </section>
+          <footer class="muted" style="margin-top:32px;font-size:12px;max-width:720px;">
+            Intelligence outputs are model- and heuristic-assisted. Validate material findings against primary documentation,
+            on-chain state, and qualified security review before allocation decisions.
+          </footer>
+        </main>
+      </div>
     </div>
 
     <script type="module" src="app.js"></script>
   </body>
-  </html>
-
+</html>
