@@ -54,6 +54,18 @@ export function initShell() {
     u.searchParams.set("tab", tabId);
     history.replaceState(null, "", u.toString());
     document.dispatchEvent(new CustomEvent("platform-tab", { detail: { tabId } }));
+
+    // Ensure tab navigation actually takes the user to the content.
+    // (Most panels are below the fold; switching visibility without scrolling feels broken.)
+    requestAnimationFrame(() => {
+      const panel = document.querySelector(`[data-panel="${tabId}"]`);
+      if (panel && !panel.hidden) {
+        panel.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+      // Fallback: jump to top if panel isn't present yet.
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
   }
 
   tabButtons.forEach((btn) => {

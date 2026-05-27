@@ -36,6 +36,7 @@ import {
   discoverProtocolsForPoolWebsite,
 } from "./backend/services/yieldsDiscover.js";
 import { runPoolIntelligence, enrichPoolDiscoverPayload } from "./backend/services/poolIntelligence.js";
+import { getPoolScoringSchema } from "./backend/llm/poolScoring.js";
 import {
   localGraphInit,
   getProtocolGraph as getProtocolGraphLocal,
@@ -1227,6 +1228,14 @@ app.post("/api/pool/intelligence", async (req, res) => {
   }
 });
 
+app.get("/api/pool/risk-schema", (req, res) => {
+  try {
+    return res.json({ ok: true, ...getPoolScoringSchema() });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
 app.get("/api/pool/discover-url", async (req, res) => {
   try {
     const url = String(req.query.url || "").trim();
@@ -1252,6 +1261,7 @@ app.get("/api/pool/discover-url", async (req, res) => {
       underlyingTokens: enriched.underlyingTokens || [],
       risk: enriched.risk || null,
       webResearch: enriched.webResearch || null,
+      sourceNotes: enriched.sourceNotes || [],
     });
   } catch (err) {
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
@@ -1292,6 +1302,7 @@ app.get("/api/pool/yields-market", async (req, res) => {
       underlyingTokens: enriched.underlyingTokens || [],
       risk: enriched.risk || null,
       webResearch: enriched.webResearch || null,
+      sourceNotes: enriched.sourceNotes || [],
     });
   } catch (err) {
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
@@ -3090,6 +3101,141 @@ app.post("/api/report/html", async (req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
   return res.send(html);
+});
+
+function buildPoolReportHtml({ poolIntel, generatedAt }) {
+  const r = poolIntel && typeof poolIntel === "object" ? poolIntel : {};
+  const pool = r?.risk?.pool || {};
+  const label = String(r?.label || "Pool");
+  const generatedTs = generatedAt || new Date().toISOString();
+  const score = typeof pool?.poolScore === "number" ? pool.poolScore : null;
+  const poolType = String(pool?.poolType || "pool");
+  const criteria = Array.isArray(pool?.criteria) ? pool.criteria : [];
+  const sources = Array.isArray(r?.sourceNotes) ? r.sourceNotes : [];
+  const flags = Array.isArray(pool?.flags) ? pool.flags : [];
+  const underlying = Array.isArray(r?.underlyingTokens) ? r.underlyingTokens : [];
+
+  const rows = criteria
+    .map((c) => {
+      const sc = c?.na ? "N/A" : c?.unavailable ? "—" : typeof c?.score === "number" ? `${Math.round(c.score * 100)}` : "—";
+      return `<tr>
+        <td>${escapeHtml(String(c.id || ""))}</td>
+        <td>${escapeHtml(String(c.name || ""))}</td>
+        <td style="text-align:right;">${escapeHtml(String(c.weightPct ?? ""))}%</td>
+        <td style="text-align:right;">${escapeHtml(sc)}</td>
+        <td class="muted">${escapeHtml(String(c.input || ""))}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const sourcesHtml = sources
+    .slice(0, 18)
+    .map((s) => {
+      const label = escapeHtml(String(s?.label || s?.source || "Source"));
+      const src = escapeHtml(String(s?.source || ""));
+      const detail = escapeHtml(String(s?.detail || ""));
+      const url = String(s?.url || "");
+      const link = url ? `<a href="${escapeHtml(url)}">${escapeHtml(url)}</a>` : "";
+      return `<li><b>${label}</b> <span class="muted">${src}</span>${detail ? ` — <span class="muted">${detail}</span>` : ""}${link ? `<div class="mono">${link}</div>` : ""}</li>`;
+    })
+    .join("");
+
+  const underlyingHtml = underlying
+    .slice(0, 12)
+    .map((t) => `<li class="mono">${escapeHtml(String(t?.symbol || ""))} · ${escapeHtml(String(t?.chain || ""))}:${escapeHtml(String(t?.address || "").slice(0, 12))}…</li>`)
+    .join("");
+
+  const flagsHtml = flags.map((f) => `<li>${escapeHtml(String(f?.message || ""))}</li>`).join("");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(label)} • Pool Risk Report</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 28px; color: #0f172a; }
+    h1 { margin: 0 0 8px; font-size: 26px; }
+    .muted { color: #475569; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .card { border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px 16px; margin: 14px 0; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #e2e8f0; padding: 8px 6px; font-size: 12px; vertical-align: top; }
+    th { text-align: left; color: #334155; }
+    ul { margin: 8px 0 0 18px; padding: 0; }
+    li { margin: 6px 0; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>${escapeHtml(label)} — Pool Risk Report</h1>
+  <div class="muted">Generated at ${escapeHtml(generatedTs)} · Type: ${escapeHtml(poolType)} · Methodology v${escapeHtml(String(pool?.methodologyVersion || "1.0"))}</div>
+
+  <div class="card">
+    <div><b>Pool score:</b> ${score != null ? escapeHtml(String(score)) : "—"} / 100</div>
+    <div class="muted" style="margin-top:6px;">${escapeHtml((pool?.notes || []).join(" "))}</div>
+  </div>
+
+  <div class="card">
+    <b>Underlying tokens</b>
+    <ul>${underlyingHtml || "<li class=\"muted\">No underlying token data</li>"}</ul>
+  </div>
+
+  <div class="card">
+    <b>Criteria</b>
+    <table>
+      <thead><tr><th>#</th><th>Criterion</th><th style="text-align:right;">Wt</th><th style="text-align:right;">Score</th><th>Input</th></tr></thead>
+      <tbody>${rows || ""}</tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <b>Evidence / sources</b>
+    <ul>${sourcesHtml || "<li class=\"muted\">No sources captured</li>"}</ul>
+  </div>
+
+  ${flagsHtml ? `<div class="card"><b>Flags</b><ul>${flagsHtml}</ul></div>` : ""}
+</body>
+</html>`;
+}
+
+app.post("/api/pool/report/html", async (req, res) => {
+  try {
+    const { poolIntel, generatedAt } = req.body || {};
+    if (!poolIntel || typeof poolIntel !== "object") {
+      return res.status(400).json({ error: "Missing poolIntel. Run pool intelligence, then export again." });
+    }
+    const label = poolIntel?.label || poolIntel?.poolRef || "pool";
+    const html = buildPoolReportHtml({ poolIntel, generatedAt });
+    const filename = `${safePdfFilename(label)}-pool-report.html`;
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    return res.send(html);
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to build pool report HTML.", detail: String(err?.message || err) });
+  }
+});
+
+app.post("/api/pool/report/pdf", async (req, res) => {
+  try {
+    const { poolIntel, generatedAt } = req.body || {};
+    if (!poolIntel || typeof poolIntel !== "object") {
+      return res.status(400).json({ error: "Missing poolIntel. Run pool intelligence, then export again." });
+    }
+    const label = poolIntel?.label || poolIntel?.poolRef || "pool";
+    const html = buildPoolReportHtml({ poolIntel, generatedAt });
+    const pdf = await renderPdfBufferWithPlaywright(html);
+    const filename = `${safePdfFilename(label)}-pool-report.pdf`;
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    return res.send(pdf);
+  } catch (err) {
+    const detail = String(err?.message || err);
+    let hint = null;
+    if (/executable doesn't exist|browserType\.launch/i.test(detail)) {
+      hint = "Run: npm run browsers — or use HTML fallback via POST /api/pool/report/html.";
+    }
+    return res.status(500).json({ error: "Failed to generate pool PDF report.", detail, hint });
+  }
 });
 
 function csvEscape(v) {

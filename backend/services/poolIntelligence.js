@@ -8,9 +8,15 @@ import {
 import { getDefiLlamaProtocolApiDetail } from "./defillama.js";
 import { formatNeo4jErrorForUser } from "../db/neo4jGraph.js";
 import { buildHeuristicRiskAssessment } from "../llm/riskHeuristics.js";
+import { buildPoolRiskAssessment } from "../llm/poolScoring.js";
 import { runHostedLlmJson } from "../llm/provider.js";
 import { gatherPoolWebResearch } from "./webResearch.js";
 import { discoverIntegratorsFromWebResearch } from "./integratorExtract.js";
+import {
+  gatherPoolExternalData,
+  applyExternalDataToYieldsRows,
+  buildPoolSourceNotes,
+} from "./poolDataSources.js";
 
 const GENERIC_UNDERLYING = new Set(
   [
@@ -390,25 +396,42 @@ export async function enrichPoolDiscoverPayload(discover, { poolUrl, useLlm = tr
   const underlyingTokens = tokensFromRows(yieldsRows, null);
   const issuer = integrators.filter((p) => p.tier === "issuer");
   const usingProtocols = filterUsingIntegrators(integrators);
+  const issuerSlugForExt =
+    discover?.matchedSlug ||
+    issuer[0]?.id?.replace(/^defillama:/i, "") ||
+    null;
+  const externalData = await gatherPoolExternalData(
+    {
+      label: discover?.marketLabel,
+      issuerSlug: issuerSlugForExt,
+      yieldsRows,
+      underlyingTokens,
+    },
+    { webResearch }
+  );
+  const enrichedRows = applyExternalDataToYieldsRows(yieldsRows, externalData);
   const risk = buildPoolRisk(
     {
       label: discover?.marketLabel,
       url: poolUrl,
-      yieldsRows,
+      yieldsRows: enrichedRows,
       integrators,
       underlyingTokens,
+      issuerSlug: issuerSlugForExt,
     },
     new Map()
   );
   return {
     ...discover,
-    yieldsPools: yieldsRows,
+    yieldsPools: enrichedRows,
     integrators,
     issuer,
     usingProtocols,
     underlyingTokens,
     risk,
     webResearch,
+    externalData,
+    sourceNotes: buildPoolSourceNotes(externalData),
   };
 }
 
@@ -633,26 +656,14 @@ function buildPoolRisk(ctx, protocolDetails) {
   const integrators = ctx.integrators || [];
   const issuer = integrators.filter((p) => p.tier === "issuer");
   const others = filterUsingIntegrators(integrators);
-  const totalTvl = integrators.reduce((s, p) => s + (Number(p.totalTvlUsd) || 0), 0);
   const rows = ctx.yieldsRows || [];
   const maxApy = rows.reduce((m, r) => Math.max(m, Number(r?.apy) || 0), 0);
   const ilRisks = [...new Set(rows.map((r) => r?.ilRisk).filter(Boolean))];
 
-  const poolAnalysis = {
-    tvl: { valueUsd: totalTvl || null },
-    protocol: {
-      name: ctx.label,
-      auditsVerified: { count: 0, firms: [] },
-      poolsFromYields: rows,
-    },
-    integratorCount: others.length,
-    underlyingCount: (ctx.underlyingTokens || []).length,
-  };
-
-  const poolRubric = buildHeuristicRiskAssessment({
-    protocolName: ctx.label,
-    url: ctx.url || null,
-    analysis: poolAnalysis,
+  const issuerSlug = ctx.issuerSlug || issuer[0]?.id?.replace(/^defillama:/i, "");
+  const issuerDetail = issuerSlug ? protocolDetails.get(issuerSlug) : null;
+  const poolRubric = buildPoolRiskAssessment(ctx, {
+    protocolListedAt: issuerDetail?.listedAt ?? issuerDetail?.listedAtTimestamp ?? null,
   });
 
   const perProtocol = [];
@@ -682,6 +693,15 @@ function buildPoolRisk(ctx, protocolDetails) {
     });
   }
 
+  const notes = [
+    `${others.length} protocol(s) linked to this pool (docs, web search, DefiLlama).`,
+    `${(ctx.underlyingTokens || []).length} underlying token(s) identified.`,
+    `Pool type: ${poolRubric.poolType}. Methodology v${poolRubric.methodologyVersion}.`,
+  ];
+  if (poolRubric.weightApplied < 1) {
+    notes.push(`${Math.round(poolRubric.weightApplied * 100)}% of criteria weighted (N/A / data gaps excluded).`);
+  }
+
   return {
     pool: {
       ...poolRubric,
@@ -689,10 +709,7 @@ function buildPoolRisk(ctx, protocolDetails) {
       issuerCount: issuer.length,
       maxApy,
       ilRisks,
-      notes: [
-        `${others.length} protocol(s) linked to this pool (Avantis docs, web search, DefiLlama).`,
-        `${(ctx.underlyingTokens || []).length} underlying token(s) identified.`,
-      ],
+      notes,
     },
     perProtocol,
   };
@@ -714,11 +731,27 @@ async function fetchProtocolDetails(integrators) {
   return map;
 }
 
+async function enrichContextForScoring(ctx) {
+  const externalData = await gatherPoolExternalData(ctx, { webResearch: ctx.webResearch }).catch((e) => ({
+    enabled: false,
+    error: String(e?.message || e),
+    sources: [],
+    scoringHints: {},
+  }));
+  const yieldsRows = applyExternalDataToYieldsRows(ctx.yieldsRows, externalData);
+  return {
+    ...ctx,
+    yieldsRows,
+    externalData,
+    sourceNotes: buildPoolSourceNotes(externalData),
+  };
+}
+
 export async function runPoolIntelligence(
   input,
   { persistNeo4j, persistLocal, upsertConnectionsGraphNeo4j, upsertProtocolGraphNeo4j, localGraphInit, upsertProtocolGraphLocal } = {}
 ) {
-  const ctx = await resolveContext(input);
+  const ctx = await enrichContextForScoring(await resolveContext(input));
   const protocolDetails = await fetchProtocolDetails(ctx.integrators);
   const risk = buildPoolRisk(ctx, protocolDetails);
   const connections = buildConnectionsGraph(ctx);
@@ -794,5 +827,7 @@ export async function runPoolIntelligence(
     connections,
     persisted,
     webResearch: ctx.webResearch || null,
+    externalData: ctx.externalData || null,
+    sourceNotes: ctx.sourceNotes || [],
   };
 }

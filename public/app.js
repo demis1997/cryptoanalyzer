@@ -90,6 +90,7 @@ const graphExpandBtn = document.getElementById("graph-expand-btn");
 
 let lastAnalysis = null;
 let lastRubric = null;
+let lastPoolIntel = null;
 let shellApi = null;
 let searchMode = "protocol";
 let lastGraphRef = null;
@@ -248,7 +249,11 @@ function renderPoolProtocolsPanel(r, contextLabel) {
     const webSrc = r?.webResearch?.enabled
       ? ` · ${(r.webResearch.providers || []).join(" + ") || "web"}${r.webResearch.crawl?.pages?.length ? ` · ${r.webResearch.crawl.pages.length} page(s) crawled` : ""}`
       : "";
-    poolProtocolsMeta.textContent = `${contextLabel} — ${issuer.length} issuer · ${using.length} integrator(s) (DefiLlama + web search + LLM)${webSrc}.`;
+    const extSrc =
+      Array.isArray(r?.sourceNotes) && r.sourceNotes.length
+        ? ` · ${r.sourceNotes.length} data source(s) (CoinGecko/CMC/inspectors)`
+        : "";
+    poolProtocolsMeta.textContent = `${contextLabel} — ${issuer.length} issuer · ${using.length} integrator(s) (DefiLlama + web + external)${webSrc}${extSrc}.`;
   }
   if (poolUnderlyingEl && Array.isArray(r?.underlyingTokens) && r.underlyingTokens.length) {
     poolUnderlyingEl.innerHTML = `<b>Underlying tokens:</b> ${r.underlyingTokens
@@ -258,11 +263,36 @@ function renderPoolProtocolsPanel(r, contextLabel) {
     poolUnderlyingEl.innerHTML = "";
   }
   if (poolRiskSummaryEl && r?.risk?.pool) {
-    const sc = Math.round((r.risk.pool.overallTotal || 0) * 100);
+    const pool = r.risk.pool;
+    const sc = pool.poolScore != null ? pool.poolScore : Math.round((pool.overallTotal || 0) * 100);
+    const criteriaRows = Array.isArray(pool.criteria)
+      ? pool.criteria
+          .map((c) => {
+            const scCell = c.na ? "N/A" : c.unavailable ? "—" : c.score != null ? Math.round(c.score * 100) : "—";
+            return `<tr><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.name)}</td><td>${c.weightPct}%</td><td>${scCell}</td><td class="metric metric--muted" style="font-size:11px;">${escapeHtml(String(c.input || "").slice(0, 48))}</td></tr>`;
+          })
+          .join("")
+      : "";
+    const flagsHtml = (pool.flags || [])
+      .map((f) => `<li style="font-size:12px;">${escapeHtml(f.message)}</li>`)
+      .join("");
+    const sourceNotes = Array.isArray(r?.sourceNotes) ? r.sourceNotes : [];
+    const sourcesHtml = sourceNotes.length
+      ? `<div style="margin-top:10px;font-size:12px;"><b>Data sources</b><ul style="margin:6px 0 0 16px;padding:0;">${sourceNotes
+          .slice(0, 14)
+          .map(
+            (n) =>
+              `<li>${escapeHtml(n.label || n.source)}${n.url ? ` · <a href="${escapeHtml(n.url)}" target="_blank" rel="noopener">${escapeHtml(n.source || "link")}</a>` : ` · ${escapeHtml(n.source || "")}`}${n.detail ? ` — <span class="metric metric--muted">${escapeHtml(n.detail)}</span>` : ""}</li>`
+          )
+          .join("")}</ul></div>`
+      : "";
     poolRiskSummaryEl.style.display = "block";
     poolRiskSummaryEl.innerHTML = `
-      <div><b>Pool risk score (heuristic):</b> ${sc}/100</div>
-      <div class="metric metric--muted" style="margin-top:6px;font-size:12px;">${escapeHtml((r.risk.pool.notes || []).join(" "))}</div>
+      <div><b>Pool risk score:</b> ${sc}/100 <span class="metric metric--muted">(${escapeHtml(pool.poolType || "pool")} · methodology v${escapeHtml(pool.methodologyVersion || "1.0")})</span></div>
+      ${criteriaRows ? `<table class="risk-table" style="width:100%;margin-top:10px;font-size:12px;border-collapse:collapse;"><thead><tr><th align="left">#</th><th align="left">Criterion</th><th>Wt</th><th>Score</th><th>Input</th></tr></thead><tbody>${criteriaRows}</tbody></table>` : ""}
+      ${sourcesHtml}
+      ${flagsHtml ? `<ul style="margin:8px 0 0 16px;padding:0;">${flagsHtml}</ul>` : ""}
+      <div class="metric metric--muted" style="margin-top:6px;font-size:12px;">${escapeHtml((pool.notes || []).join(" "))}</div>
       <div class="metric metric--muted" style="margin-top:4px;font-size:12px;">${formatPoolSaveStatus(r.persisted)}</div>
     `;
   } else if (poolRiskSummaryEl) {
@@ -310,6 +340,8 @@ async function runPoolIntelligenceFromQuery() {
     const data = await r.json();
     if (!r.ok || data?.ok === false) throw new Error(data?.error || `Request failed (${r.status})`);
     const label = data.label || q;
+    lastPoolIntel = data;
+    setExportEnabled(true);
     renderPoolProtocolsPanel(
       {
         issuer: data.issuer,
@@ -319,6 +351,7 @@ async function runPoolIntelligenceFromQuery() {
         risk: data.risk,
         persisted: data.persisted,
         webResearch: data.webResearch,
+        sourceNotes: data.sourceNotes,
       },
       label
     );
@@ -399,6 +432,8 @@ async function openPoolDiscoverResult(r, label) {
   tabGraph.setDepth(Number(graphDepthEl?.value || 3) || 3);
   tabGraph.render(graph);
   landingGraph.render(graph);
+  lastPoolIntel = { ...r, label };
+  setExportEnabled(true);
   renderPoolProtocolsPanel(
     {
       issuer: r.issuer,
@@ -408,6 +443,7 @@ async function openPoolDiscoverResult(r, label) {
       risk: r.risk,
       protocols: r.protocols,
       webResearch: r.webResearch,
+      sourceNotes: r.sourceNotes,
     },
     label
   );
@@ -1187,38 +1223,100 @@ async function downloadPdf(filename, body) {
   URL.revokeObjectURL(url);
 }
 
+async function downloadPoolPdf(filename, body) {
+  const resp = await fetch("/api/pool/report/pdf", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    const htmlResp = await fetch("/api/pool/report/html", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (htmlResp.ok) {
+      const blob = await htmlResp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename.replace(/\.pdf$/i, "") + ".html";
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast("PDF unavailable — downloaded HTML report.", "error");
+      return;
+    }
+    throw new Error([err.error, err.detail].filter(Boolean).join(" — ") || "Pool PDF failed");
+  }
+  const blob = await resp.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 async function handleExportPdf() {
-  if (!lastAnalysis) {
-    showToast("Run intelligence first.", "error");
+  // Protocol report
+  if (lastAnalysis) {
+    const name = lastAnalysis?.protocol?.name || safeFilenamePart(lastAnalysis?.protocol?.url) || "protocol";
+    setPlatformStatus("Generating investor PDF…");
+    try {
+      await downloadPdf(`${safeFilenamePart(name)}-investor-report.pdf`, {
+        generatedAt: new Date().toISOString(),
+        protocolKey: lastAnalysis?.cache?.protocolKey || null,
+        url: lastAnalysis?.protocol?.url || lastAnalysis?.origin || null,
+        riskAssessment: lastRubric,
+      });
+      setPlatformStatus("Report ready.", "success");
+    } catch (e) {
+      showToast(String(e.message || e), "error");
+      setPlatformStatus("");
+    }
     return;
   }
-  const name = lastAnalysis?.protocol?.name || safeFilenamePart(lastAnalysis?.protocol?.url) || "protocol";
-  setPlatformStatus("Generating investor PDF…");
-  try {
-    await downloadPdf(`${safeFilenamePart(name)}-investor-report.pdf`, {
-      generatedAt: new Date().toISOString(),
-      protocolKey: lastAnalysis?.cache?.protocolKey || null,
-      url: lastAnalysis?.protocol?.url || lastAnalysis?.origin || null,
-      riskAssessment: lastRubric,
-    });
-    setPlatformStatus("Report ready.", "success");
-  } catch (e) {
-    showToast(String(e.message || e), "error");
-    setPlatformStatus("");
+
+  // Pool report
+  if (lastPoolIntel) {
+    const name = lastPoolIntel?.label || lastPoolIntel?.poolRef || "pool";
+    setPlatformStatus("Generating pool report…");
+    try {
+      await downloadPoolPdf(`${safeFilenamePart(name)}-pool-report.pdf`, {
+        generatedAt: new Date().toISOString(),
+        poolIntel: lastPoolIntel,
+      });
+      setPlatformStatus("Pool report ready.", "success");
+    } catch (e) {
+      showToast(String(e.message || e), "error");
+      setPlatformStatus("");
+    }
+    return;
   }
+
+  showToast("Run intelligence first.", "error");
 }
 
 function handleExportJson() {
-  if (!lastAnalysis) {
-    showToast("Run intelligence first.", "error");
+  if (lastAnalysis) {
+    const name = lastAnalysis?.protocol?.name || "protocol";
+    downloadJson(`${safeFilenamePart(name)}-intelligence.json`, {
+      generatedAt: new Date().toISOString(),
+      analysis: lastAnalysis,
+      riskAssessment: lastRubric,
+    });
     return;
   }
-  const name = lastAnalysis?.protocol?.name || "protocol";
-  downloadJson(`${safeFilenamePart(name)}-intelligence.json`, {
-    generatedAt: new Date().toISOString(),
-    analysis: lastAnalysis,
-    riskAssessment: lastRubric,
-  });
+  if (lastPoolIntel) {
+    const name = lastPoolIntel?.label || "pool";
+    downloadJson(`${safeFilenamePart(name)}-pool-intelligence.json`, {
+      generatedAt: new Date().toISOString(),
+      poolIntel: lastPoolIntel,
+    });
+    return;
+  }
+  showToast("Run intelligence first.", "error");
 }
 
 function bindExportButtons() {
@@ -1327,6 +1425,7 @@ document.addEventListener("DOMContentLoaded", () => {
   landingGraph.renderDemo();
   tabGraph.renderDemo();
   setExportEnabled(false);
+  lastPoolIntel = null;
 
   const u = new URL(window.location.href);
   const prefill = u.searchParams.get("url") || u.searchParams.get("protocol");
