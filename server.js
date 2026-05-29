@@ -1432,7 +1432,7 @@ const publicDir = path.join(__dirname, "public");
 app.use(express.static(publicDir));
 // Serve imported doc assets (docx + extracted media).
 app.use("/imports", express.static(path.join(process.cwd(), "data", "imports")));
-app.use(express.static(__dirname));
+// Do not serve repo root (legacy index.html / style.css) — it shadows public/ on Vercel.
 
 app.get("/api/analyze", async (req, res) => {
   const url = req.query.url;
