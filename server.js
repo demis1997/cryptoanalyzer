@@ -3118,11 +3118,17 @@ function buildPoolReportHtml({ poolIntel, generatedAt }) {
   const rows = criteria
     .map((c) => {
       const sc = c?.na ? "N/A" : c?.unavailable ? "—" : typeof c?.score === "number" ? `${Math.round(c.score * 100)}` : "—";
+      const srcs = (Array.isArray(c?.sources) ? c.sources : [])
+        .map((s) => escapeHtml(String(s?.label || "source")))
+        .join(", ");
       return `<tr>
         <td>${escapeHtml(String(c.id || ""))}</td>
         <td>${escapeHtml(String(c.name || ""))}</td>
         <td style="text-align:right;">${escapeHtml(String(c.weightPct ?? ""))}%</td>
         <td style="text-align:right;">${escapeHtml(sc)}</td>
+        <td>${escapeHtml(String(c.confidence || ""))}</td>
+        <td class="muted">${escapeHtml(String(c.confidenceReason || ""))}</td>
+        <td class="muted">${srcs || "—"}</td>
         <td class="muted">${escapeHtml(String(c.input || ""))}</td>
       </tr>`;
     })
@@ -3183,7 +3189,7 @@ function buildPoolReportHtml({ poolIntel, generatedAt }) {
   <div class="card">
     <b>Criteria</b>
     <table>
-      <thead><tr><th>#</th><th>Criterion</th><th style="text-align:right;">Wt</th><th style="text-align:right;">Score</th><th>Input</th></tr></thead>
+      <thead><tr><th>#</th><th>Criterion</th><th style="text-align:right;">Wt</th><th style="text-align:right;">Score</th><th>Confidence</th><th>Why</th><th>Sources</th><th>Input</th></tr></thead>
       <tbody>${rows || ""}</tbody>
     </table>
   </div>

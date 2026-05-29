@@ -40,7 +40,7 @@ function clamp01(x) {
   return Math.max(0, Math.min(1, x));
 }
 
-function primaryYieldsRow(rows) {
+export function primaryYieldsRow(rows) {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) return null;
   return [...list].sort((a, b) => (Number(b?.tvlUsd) || 0) - (Number(a?.tvlUsd) || 0))[0];
@@ -340,6 +340,200 @@ function scoreCurator(poolType, integrators, issuerSlug, label = "") {
   return { na: true, evidence: "No named curator in available data (P.10 N/A)." };
 }
 
+const CRITERION_GUIDE = {
+  "P.1": {
+    summary: "Risk tier of the core deposited asset (lowest-quality asset in the pool).",
+    dataSources: "DefiLlama symbol, underlying tokens, CoinGecko/CoinMarketCap rank.",
+  },
+  "P.2": {
+    summary: "How easily you can exit at full value (utilization, queues, maturity).",
+    dataSources: "DefiLlama utilization; pool type heuristics; crawl text for withdrawal terms.",
+  },
+  "P.3": {
+    summary: "Oracle quality for liquidations and pricing (N/A for pure staking).",
+    dataSources: "Protocol docs, crawl/search text, yields metadata.",
+  },
+  "P.4": {
+    summary: "LLTV and supply/borrow cap utilization (N/A for staking/LP).",
+    dataSources: "On-chain parameters, crawl text, curator vault defaults.",
+  },
+  "P.5": {
+    summary: "Depeg and volatility risk for the core asset.",
+    dataSources: "Asset symbol classification per methodology tables.",
+  },
+  "P.6": {
+    summary: "How long this specific pool has been live.",
+    dataSources: "Pool created timestamp, DefiLlama history, protocol listedAt fallback.",
+  },
+  "P.7": {
+    summary: "Whale concentration — share of TVL held by top depositors.",
+    dataSources: "On-chain deposit event aggregation (not yet automated).",
+  },
+  "P.8": {
+    summary: "Absolute pool TVL from DefiLlama yields.",
+    dataSources: "DefiLlama yields API.",
+  },
+  "P.9": {
+    summary: "Organic vs emission yield and APY stability over 30 days.",
+    dataSources: "DefiLlama apyBase/apyReward; yields chart for CV.",
+  },
+  "P.10": {
+    summary: "Curator quality for MetaMorpho-style vaults (N/A for vanilla pools).",
+    dataSources: "Vault name, integrator list, web research.",
+  },
+};
+
+const CONFIDENCE_HELP = {
+  high: "Direct measurement or explicit field from a primary API (DefiLlama, on-chain parameter, named oracle in docs).",
+  medium: "Strong heuristic from asset symbol, pool type, or partial API fields — verify in docs before relying on score.",
+  low: "Default or inferred value where key fields are missing; treat as directional only.",
+};
+
+function defillamaPoolUrl(row) {
+  const proj = String(row?.project || "").trim();
+  if (!proj) return "https://defillama.com/yields";
+  return `https://defillama.com/protocol/${encodeURIComponent(proj)}`;
+}
+
+function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
+  if (result.na) {
+    return {
+      confidence: "n/a",
+      confidenceReason: "Not applicable for this pool type per methodology.",
+      sources: [{ label: "POOL_SCORING_METHODOLOGY.md", url: null }],
+    };
+  }
+  if (result.unavailable) {
+    return {
+      confidence: "low",
+      confidenceReason: "Required data was not available; weight renormalized without this criterion.",
+      sources: [{ label: "Data gap", url: null }],
+    };
+  }
+
+  const ext = opts.externalData || ctx.externalData || {};
+  const chartUrl = ext.defillamaChart?.url || null;
+  const sources = [{ label: "DefiLlama yields", url: defillamaPoolUrl(row) }];
+
+  const pickFromNotes = (idPrefix) => {
+    for (const s of ext.sources || []) {
+      if (String(s.id || "").startsWith(idPrefix)) {
+        sources.push({ label: s.label || s.provider, url: s.url || null });
+      }
+    }
+  };
+
+  let confidence = "medium";
+  let confidenceReason = result.evidence || "";
+
+  switch (key) {
+    case "assetQuality": {
+      pickFromNotes("coingecko");
+      pickFromNotes("coinmarketcap");
+      if (row?.assetRankHint) {
+        confidence = "high";
+        confidenceReason = "Asset symbol plus CoinGecko/CMC market-cap rank for the token.";
+      } else if (/^(eth|weth|btc|wbtc|usdc|usdt|dai)$/i.test(String(row?.symbol || ""))) {
+        confidence = "high";
+        confidenceReason = "Major asset tier from well-known symbol (methodology P.1 table).";
+      } else {
+        confidence = "medium";
+        confidenceReason = "Asset tier inferred from symbol/heuristics; confirm exact wrapper (e.g. weETH vs ETH).";
+      }
+      break;
+    }
+    case "liquidityExit": {
+      if (typeof (row?.utilization ?? row?.utilizationRate) === "number") {
+        confidence = "high";
+        confidenceReason = "Utilization rate from DefiLlama yields row.";
+      } else {
+        confidence = "medium";
+        confidenceReason = "No utilization in API; score uses pool-type default (vault/LST/AMM).";
+      }
+      pickFromNotes("inspector");
+      break;
+    }
+    case "oracleQuality": {
+      const hint = String(row?.oracleType || row?.oracle || "").toLowerCase();
+      if (/chainlink|pyth|twap/i.test(hint)) {
+        confidence = "high";
+        confidenceReason = "Oracle type specified in enriched pool data or crawl text.";
+      } else if (hint && hint !== "unknown" && hint !== "not specified") {
+        confidence = "medium";
+        confidenceReason = "Oracle hint from web research/crawl parsing — verify on-chain feed addresses.";
+      } else {
+        confidence = "low";
+        confidenceReason = "Oracle not in yields API; default score for vault/lending — check protocol docs.";
+      }
+      pickFromNotes("inspector");
+      break;
+    }
+    case "parameterSafety": {
+      if (typeof (row?.lltv ?? row?.ltv) === "number") {
+        confidence = "high";
+        confidenceReason = "LLTV/LTV from enriched on-chain or crawl-parsed parameters.";
+      } else {
+        confidence = "low";
+        confidenceReason = "LLTV/caps unknown; neutral default applied.";
+      }
+      break;
+    }
+    case "depegVolatility":
+      confidence = "medium";
+      confidenceReason = "Peg risk from asset-class table (symbol), not live depeg monitoring.";
+      break;
+    case "poolAge": {
+      if (row?.poolCreatedAt || row?.createdAt) {
+        confidence = "high";
+        confidenceReason = "Pool age from deployment or listed timestamp.";
+      } else if (opts.protocolListedAt) {
+        confidence = "medium";
+        confidenceReason = "Pool age proxied from protocol listedAt on DefiLlama.";
+      } else {
+        confidence = "low";
+        confidenceReason = "Age estimated from DefiLlama sample count or unknown.";
+      }
+      if (chartUrl) sources.push({ label: "DefiLlama protocol", url: defillamaPoolUrl(row) });
+      break;
+    }
+    case "depositorConcentration":
+      confidence = "low";
+      confidenceReason = "On-chain whale % not fetched yet; criterion excluded when unavailable.";
+      break;
+    case "poolTvl":
+      confidence = "high";
+      confidenceReason = "TVL taken directly from DefiLlama yields row.";
+      break;
+    case "yieldQuality": {
+      pickFromNotes("defillama_chart");
+      if (chartUrl) sources.push({ label: "DefiLlama APY chart", url: chartUrl });
+      if (isFinite(Number(row?.apyBase))) {
+        confidence = "high";
+        confidenceReason = "Organic vs reward split from DefiLlama apyBase/apyReward.";
+      } else {
+        confidence = "medium";
+        confidenceReason = "APY breakdown estimated from total APY when base/reward split missing.";
+      }
+      break;
+    }
+    case "curatorQuality": {
+      pickFromNotes("inspector");
+      if (/steakhouse|gauntlet|re7|mev capital/i.test(String(ctx.label || ""))) {
+        confidence = "high";
+        confidenceReason = "Named curator matched from vault label or integrator list.";
+      } else if (result.score != null) {
+        confidence = "medium";
+        confidenceReason = "Curated architecture detected but curator name not confirmed.";
+      }
+      break;
+    }
+    default:
+      break;
+  }
+
+  return { confidence, confidenceReason, sources };
+}
+
 function buildQualitativeFlags(ctx, poolType) {
   const flags = [];
   const depth = Number(ctx?.dependencyDepth);
@@ -388,6 +582,7 @@ export function buildPoolRiskAssessment(ctx, opts = {}) {
       result = scorers[def.key]() || {};
     }
 
+    const meta = enrichCriterionMeta(def.key, result, row, ctx, opts);
     const entry = {
       id: def.id,
       key: def.key,
@@ -399,6 +594,9 @@ export function buildPoolRiskAssessment(ctx, opts = {}) {
       score: result.na || result.unavailable ? null : clamp01(result.score),
       input: result.input || null,
       evidence: result.evidence || null,
+      confidence: meta.confidence,
+      confidenceReason: meta.confidenceReason,
+      sources: meta.sources,
     };
     criteria.push(entry);
 
@@ -412,9 +610,20 @@ export function buildPoolRiskAssessment(ctx, opts = {}) {
   const poolScore = Math.round(overallTotal * 1000) / 10;
   const flags = buildQualitativeFlags(ctx, poolType);
 
+  const primaryPool = row
+    ? {
+        project: row.project,
+        symbol: row.symbol,
+        chain: row.chain,
+        tvlUsd: row.tvlUsd,
+        poolId: row.pool,
+      }
+    : null;
+
   return {
     methodologyVersion: METHODOLOGY_VERSION,
     poolType,
+    primaryPool,
     overallTotal: clamp01(overallTotal),
     poolScore,
     criteria,
@@ -434,12 +643,14 @@ export function buildPoolRiskAssessment(ctx, opts = {}) {
 export function getPoolScoringSchema() {
   return {
     version: METHODOLOGY_VERSION,
+    formula: "pool_score = sum(score_i × weight_i) / sum(weight_i) × 100",
+    confidenceLevels: CONFIDENCE_HELP,
     criteria: CRITERIA.map((c) => ({
       id: c.id,
       key: c.key,
       name: c.name,
       weightPct: Math.round(c.weight * 100),
+      guide: CRITERION_GUIDE[c.id] || null,
     })),
-    formula: "pool_score = sum(score_i × weight_i) / sum(weight_i) × 100",
   };
 }

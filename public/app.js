@@ -23,6 +23,7 @@ const poolProtocolsMeta = document.getElementById("pool-protocols-meta");
 const poolProtocolsList = document.getElementById("pool-protocols-list");
 const poolUnderlyingEl = document.getElementById("pool-underlying-tokens");
 const poolRiskSummaryEl = document.getElementById("pool-risk-summary");
+const poolScoringGuideEl = document.getElementById("pool-scoring-guide");
 const poolIntelBtn = document.getElementById("pool-intel-btn");
 const searchModeBtns = document.querySelectorAll("[data-search-mode]");
 const urlInput = document.getElementById("protocol-url");
@@ -253,12 +254,18 @@ function renderPoolProtocolsPanel(r, contextLabel) {
       Array.isArray(r?.sourceNotes) && r.sourceNotes.length
         ? ` · ${r.sourceNotes.length} data source(s) (CoinGecko/CMC/inspectors)`
         : "";
-    poolProtocolsMeta.textContent = `${contextLabel} — ${issuer.length} issuer · ${using.length} integrator(s) (DefiLlama + web + external)${webSrc}${extSrc}.`;
+    const primary = r?.risk?.pool?.primaryPool || null;
+    const primaryLine = primary
+      ? `Scored pool: <b>${escapeHtml(primary.project || "")}</b> · ${escapeHtml(primary.symbol || "")} · TVL $${primary.tvlUsd ? Math.round(primary.tvlUsd).toLocaleString() : "—"}`
+      : "";
+    poolProtocolsMeta.innerHTML = `${escapeHtml(contextLabel)} — <b>1</b> pool issuer · <b>${using.length}</b> integrator(s) (protocols that share this vault’s underlying)${webSrc}${extSrc}.${primaryLine ? `<br><span class="metric metric--muted">${primaryLine}</span>` : ""}`;
   }
   if (poolUnderlyingEl && Array.isArray(r?.underlyingTokens) && r.underlyingTokens.length) {
-    poolUnderlyingEl.innerHTML = `<b>Underlying tokens:</b> ${r.underlyingTokens
+    const show = r.underlyingTokens.slice(0, 12);
+    const more = r.underlyingTokens.length - show.length;
+    poolUnderlyingEl.innerHTML = `<b>Underlying tokens (this pool):</b> ${show
       .map((t) => `<span class="mono">${escapeHtml(t.symbol || "")}</span> ${escapeHtml(t.chain)}:${escapeHtml(String(t.address).slice(0, 10))}…`)
-      .join(" · ")}`;
+      .join(" · ")}${more > 0 ? ` <span class="metric metric--muted">+${more} more hidden</span>` : ""}`;
   } else if (poolUnderlyingEl) {
     poolUnderlyingEl.innerHTML = "";
   }
@@ -269,7 +276,30 @@ function renderPoolProtocolsPanel(r, contextLabel) {
       ? pool.criteria
           .map((c) => {
             const scCell = c.na ? "N/A" : c.unavailable ? "—" : c.score != null ? Math.round(c.score * 100) : "—";
-            return `<tr><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.name)}</td><td>${c.weightPct}%</td><td>${scCell}</td><td class="metric metric--muted" style="font-size:11px;">${escapeHtml(String(c.input || "").slice(0, 48))}</td></tr>`;
+            const conf = c.confidence ? escapeHtml(String(c.confidence)) : "—";
+            const confTitle = escapeHtml(String(c.confidenceReason || ""));
+            const srcList = Array.isArray(c.sources) ? c.sources : [];
+            const srcCell = srcList.length
+              ? srcList
+                  .slice(0, 2)
+                  .map((s) => {
+                    const lbl = escapeHtml(s.label || "source");
+                    return s.url
+                      ? `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${lbl}</a>`
+                      : lbl;
+                  })
+                  .join(", ")
+              : "—";
+            return `<tr title="${confTitle}">
+              <td>${escapeHtml(c.id)}</td>
+              <td>${escapeHtml(c.name)}</td>
+              <td>${c.weightPct}%</td>
+              <td>${scCell}</td>
+              <td><strong>${conf}</strong></td>
+              <td class="metric metric--muted" style="font-size:11px;max-width:140px;" title="${confTitle}">${confTitle.slice(0, 72)}${confTitle.length > 72 ? "…" : ""}</td>
+              <td class="metric metric--muted" style="font-size:11px;">${srcCell}</td>
+              <td class="metric metric--muted" style="font-size:11px;">${escapeHtml(String(c.input || "").slice(0, 40))}</td>
+            </tr>`;
           })
           .join("")
       : "";
@@ -289,7 +319,7 @@ function renderPoolProtocolsPanel(r, contextLabel) {
     poolRiskSummaryEl.style.display = "block";
     poolRiskSummaryEl.innerHTML = `
       <div><b>Pool risk score:</b> ${sc}/100 <span class="metric metric--muted">(${escapeHtml(pool.poolType || "pool")} · methodology v${escapeHtml(pool.methodologyVersion || "1.0")})</span></div>
-      ${criteriaRows ? `<table class="risk-table" style="width:100%;margin-top:10px;font-size:12px;border-collapse:collapse;"><thead><tr><th align="left">#</th><th align="left">Criterion</th><th>Wt</th><th>Score</th><th>Input</th></tr></thead><tbody>${criteriaRows}</tbody></table>` : ""}
+      ${criteriaRows ? `<div style="overflow-x:auto;"><table class="risk-table" style="width:100%;margin-top:10px;font-size:12px;border-collapse:collapse;"><thead><tr><th align="left">#</th><th align="left">Criterion</th><th>Wt</th><th>Score</th><th>Confidence</th><th align="left">Why</th><th align="left">Sources</th><th align="left">Input</th></tr></thead><tbody>${criteriaRows}</tbody></table></div>` : ""}
       ${sourcesHtml}
       ${flagsHtml ? `<ul style="margin:8px 0 0 16px;padding:0;">${flagsHtml}</ul>` : ""}
       <div class="metric metric--muted" style="margin-top:6px;font-size:12px;">${escapeHtml((pool.notes || []).join(" "))}</div>
@@ -1410,12 +1440,49 @@ if (form && urlInput) {
 
 bindExportButtons();
 
+async function renderPoolScoringGuide() {
+  if (!poolScoringGuideEl) return;
+  try {
+    const data = await apiGetJson("/api/pool/risk-schema");
+    const levels = data.confidenceLevels || {};
+    const rows = (data.criteria || [])
+      .map(
+        (c) => `<tr>
+          <td>${escapeHtml(c.id)}</td>
+          <td>${escapeHtml(c.name)}</td>
+          <td>${c.weightPct}%</td>
+          <td class="metric metric--muted">${escapeHtml(c.guide?.summary || "")}</td>
+          <td class="metric metric--muted">${escapeHtml(c.guide?.dataSources || "")}</td>
+        </tr>`
+      )
+      .join("");
+    poolScoringGuideEl.innerHTML = `
+      <p><b>Formula:</b> ${escapeHtml(data.formula || "")}</p>
+      <p class="metric metric--muted">Each criterion scores 0–100 (or N/A). Missing criteria are excluded and weights renormalize to 100%.</p>
+      <h3 style="margin:16px 0 8px;font-size:14px;">Confidence levels</h3>
+      <ul style="margin:0 0 16px 18px;">
+        <li><b>high</b> — ${escapeHtml(levels.high || "")}</li>
+        <li><b>medium</b> — ${escapeHtml(levels.medium || "")}</li>
+        <li><b>low</b> — ${escapeHtml(levels.low || "")}</li>
+      </ul>
+      <table class="risk-table" style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead><tr><th>#</th><th>Criterion</th><th>Weight</th><th>What it measures</th><th>Typical sources</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p class="metric metric--muted" style="margin-top:12px;">Full rubric: <code>POOL_SCORING_METHODOLOGY.md</code> in the repo.</p>`;
+  } catch (e) {
+    poolScoringGuideEl.textContent = `Could not load scoring schema: ${e.message || e}`;
+  }
+}
+
 document.addEventListener("platform-tab", (e) => {
   const tabId = e.detail?.tabId;
   if (tabId === "graph" && !lastAnalysis) {
     tabGraph.renderDemo();
   } else if (tabId === "graph" && lastAnalysis) {
     renderGraphFromAnalysis(lastAnalysis);
+  } else if (tabId === "scoring") {
+    renderPoolScoringGuide();
   }
 });
 
@@ -1445,4 +1512,5 @@ document.addEventListener("DOMContentLoaded", () => {
   } else {
     setSearchMode("protocol");
   }
+  renderPoolScoringGuide();
 });

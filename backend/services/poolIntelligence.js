@@ -8,7 +8,7 @@ import {
 import { getDefiLlamaProtocolApiDetail } from "./defillama.js";
 import { formatNeo4jErrorForUser } from "../db/neo4jGraph.js";
 import { buildHeuristicRiskAssessment } from "../llm/riskHeuristics.js";
-import { buildPoolRiskAssessment } from "../llm/poolScoring.js";
+import { buildPoolRiskAssessment, primaryYieldsRow } from "../llm/poolScoring.js";
 import { runHostedLlmJson } from "../llm/provider.js";
 import { gatherPoolWebResearch } from "./webResearch.js";
 import { discoverIntegratorsFromWebResearch } from "./integratorExtract.js";
@@ -105,10 +105,11 @@ function countPoolsWithUnderlying(addr, allPools) {
  * Other DefiLlama yield projects that list the same underlying token(s) — exposure integrators.
  */
 export function findProtocolsSharingUnderlying(yieldsRows, allPools) {
-  const issuerSlugs = new Set(
-    yieldsRows.map((r) => String(r?.project || "").trim().toLowerCase()).filter(Boolean)
-  );
-  const tokens = underlyingForIntegratorSearch(yieldsRows).filter((t) => {
+  const primary = primaryYieldsRow(yieldsRows);
+  const primaryProject = String(primary?.project || "").trim().toLowerCase();
+  const issuerSlugs = new Set(primaryProject ? [primaryProject] : []);
+  const rowsForTokens = primary ? [primary] : (yieldsRows || []).slice(0, 1);
+  const tokens = underlyingForIntegratorSearch(rowsForTokens).filter((t) => {
     const n = countPoolsWithUnderlying(t, allPools);
     return n > 0 && n <= 12;
   });
@@ -150,7 +151,7 @@ export function findProtocolsSharingUnderlying(yieldsRows, allPools) {
     });
   };
 
-  for (const row of yieldsRows) ingest(row, "pool_issuer");
+  if (primary) ingest(primary, "pool_issuer");
 
   for (const p of allPools) {
     const under = (Array.isArray(p?.underlyingTokens) ? p.underlyingTokens : []).map((t) =>
@@ -418,6 +419,7 @@ export async function enrichPoolDiscoverPayload(discover, { poolUrl, useLlm = tr
       integrators,
       underlyingTokens,
       issuerSlug: issuerSlugForExt,
+      externalData,
     },
     new Map()
   );
@@ -593,9 +595,11 @@ async function resolveContext(input) {
 }
 
 function tokensFromRows(rows, extraAddr) {
+  const primary = primaryYieldsRow(rows);
+  const scoped = primary ? [primary] : Array.isArray(rows) ? rows.slice(0, 1) : [];
   const out = [];
   const seen = new Set();
-  for (const row of rows) {
+  for (const row of scoped) {
     for (const t of Array.isArray(row?.underlyingTokens) ? row.underlyingTokens : []) {
       const a = String(t || "").toLowerCase();
       if (!/^0x[a-f0-9]{40}$/.test(a) || seen.has(a)) continue;
@@ -664,6 +668,7 @@ function buildPoolRisk(ctx, protocolDetails) {
   const issuerDetail = issuerSlug ? protocolDetails.get(issuerSlug) : null;
   const poolRubric = buildPoolRiskAssessment(ctx, {
     protocolListedAt: issuerDetail?.listedAt ?? issuerDetail?.listedAtTimestamp ?? null,
+    externalData: ctx.externalData || null,
   });
 
   const perProtocol = [];

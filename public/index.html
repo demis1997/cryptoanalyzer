@@ -26,6 +26,7 @@
           <button type="button" class="sidebar__item" data-tab="wallet"><span class="sidebar__icon">◉</span> Wallet Exposure</button>
           <button type="button" class="sidebar__item" data-tab="evidence"><span class="sidebar__icon">▣</span> Evidence &amp; Sources</button>
           <button type="button" class="sidebar__item" data-tab="export"><span class="sidebar__icon">↓</span> Report Export</button>
+          <button type="button" class="sidebar__item" data-tab="scoring"><span class="sidebar__icon">?</span> How scoring works</button>
         </nav>
         <div class="sidebar__footer">
           <a href="/db.html">Pool &amp; protocol database</a> · <a href="/agent.html">Research agent</a>
@@ -276,6 +277,15 @@
             <div id="evidence-grid" class="evidence-grid animate-in"></div>
             <ul id="evidence-list" class="list-clean" hidden></ul>
             <p class="card__empty" id="evidence-empty">Evidence cards populate after intelligence run completes.</p>
+          </section>
+
+          <!-- Pool scoring methodology -->
+          <section class="panel" data-panel="scoring" hidden>
+            <header class="panel__header animate-in">
+              <h2 class="panel__title">How pool scoring works</h2>
+              <p class="panel__desc">Methodology v1.0 — ten criteria (P.1–P.10), renormalized weights when N/A, confidence per data source.</p>
+            </header>
+            <div id="pool-scoring-guide" class="card animate-in" style="padding:16px;font-size:13px;line-height:1.55;"></div>
           </section>
 
           <!-- Export -->

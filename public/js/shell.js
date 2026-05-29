@@ -7,6 +7,7 @@ const TABS = [
   { id: "wallet", label: "Wallet Exposure", icon: "◉" },
   { id: "evidence", label: "Evidence & Sources", icon: "▣" },
   { id: "export", label: "Report Export", icon: "↓" },
+  { id: "scoring", label: "How scoring works", icon: "?" },
 ];
 
 let motionReady = null;
@@ -33,10 +34,12 @@ export function initShell() {
     const resultsVisible = document.getElementById("results-hero") && !document.getElementById("results-hero").hidden;
     const landing = document.getElementById("landing-state");
     if (!resultsVisible) {
-      if (landing) landing.hidden = tabId === "graph";
+      if (landing) landing.hidden = tabId === "graph" || tabId === "scoring";
       panels.forEach((panel) => {
         if (panel.dataset.panel === "landing") return;
-        const on = tabId === "graph" && panel.dataset.panel === "graph";
+        const on =
+          (tabId === "graph" && panel.dataset.panel === "graph") ||
+          (tabId === "scoring" && panel.dataset.panel === "scoring");
         panel.classList.toggle("panel--active", on);
         panel.hidden = !on;
       });
