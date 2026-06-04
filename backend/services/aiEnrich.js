@@ -256,7 +256,7 @@ function dedupeAuditors(auditors) {
   return out;
 }
 
-export async function extractAuditorsWithHostedLlm({ protocolName, origin, docs, defillamaApi = null } = {}) {
+export async function extractAuditorsWithHostedLlm({ protocolName, origin, docs, defillamaApi = null, trace = null } = {}) {
   const system = `You are extracting auditor firm names for a DeFi protocol from a provided research pack.
 You cannot browse the web. Only use the provided snippets / structured fields.
 Return JSON only.`;
@@ -279,7 +279,8 @@ Rules:
 Lines:
 ${(docs?.lines || []).map((l, i) => `${i + 1}. ${l}`).join("\n")}
 `.trim();
-  const r = await runHostedLlmJson({ step: "auditors", system, user });
+  trace?.step?.("LLM: extract auditors", { kind: "llm", detail: protocolName || origin || "" });
+  const r = await runHostedLlmJson({ step: "auditors", system, user, trace });
   const auditors = dedupeAuditors(r?.json?.auditors || []);
   return {
     auditors,
@@ -301,6 +302,7 @@ export async function inferContractGraphWithHostedLlm({
   subjectDefillamaSlug = null,
   defillamaApi = null,
   research = null,
+  trace = null,
 } = {}) {
   const subjectName = String(protocolName || "unknown").trim();
   const subjectId = subjectProtocolNodeId(subjectDefillamaSlug, subjectName);
@@ -373,7 +375,8 @@ Lines:
 ${(docs?.lines || []).slice(0, 80).map((l, i) => `${i + 1}. ${l}`).join("\n")}
 `.trim();
 
-  const r = await runHostedLlmJson({ step: "contractGraph", system, user, timeoutMs: hostedHeavyStepPollMs() });
+  trace?.step?.("LLM: ecosystem / contract graph", { kind: "llm", detail: protocolName || origin || "" });
+  const r = await runHostedLlmJson({ step: "contractGraph", system, user, timeoutMs: hostedHeavyStepPollMs(), trace });
   const rawNodes = r?.json?.nodes || [];
   let nodes = normalizeEcosystemNodes(rawNodes);
 
@@ -396,7 +399,7 @@ ${(docs?.lines || []).slice(0, 80).map((l, i) => `${i + 1}. ${l}`).join("\n")}
   };
 }
 
-export async function inferArchitectureWithHostedLlm({ protocolName, origin, docs, knownTokens, knownContracts } = {}) {
+export async function inferArchitectureWithHostedLlm({ protocolName, origin, docs, knownTokens, knownContracts, trace = null } = {}) {
   const system = `You summarize on-chain routing structure (routers, pools). Return JSON only. Do not repeat the full token/ecosystem graph—focus on vault/router topology with valid 0x addresses only.`;
   const user = `
 Return JSON only:
@@ -428,7 +431,8 @@ ${(docs?.addressContexts || []).slice(0, 18).map((x, i) => `${i + 1}. ${x.addres
 Lines:
 ${(docs?.lines || []).slice(0, 18).map((l, i) => `${i + 1}. ${l}`).join("\n")}
 `.trim();
-  const r = await runHostedLlmJson({ step: "architecture", system, user, timeoutMs: hostedHeavyStepPollMs() });
+  trace?.step?.("LLM: architecture topology", { kind: "llm", detail: protocolName || origin || "" });
+  const r = await runHostedLlmJson({ step: "architecture", system, user, timeoutMs: hostedHeavyStepPollMs(), trace });
 
   const addrNodes = [];
   const seen = new Set();

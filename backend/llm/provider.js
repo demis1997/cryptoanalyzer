@@ -81,6 +81,7 @@ export async function runHostedLlmJson(opts) {
   const disableFb = String(process.env.DISABLE_COMPOSER_FALLBACK || "0") === "1";
   const endpoint = String(process.env.CURSOR_API_ENDPOINT || "").trim();
   const step = opts && typeof opts === "object" ? String(opts.step || "") : "";
+  const trace = opts?.trace || null;
 
   const runComposer = async () => {
     if (!endpoint) {
@@ -99,6 +100,7 @@ export async function runHostedLlmJson(opts) {
       user: opts?.user,
       model: opts?.model,
     });
+    trace?.llmRequest?.(step, { system: opts?.system, user: opts?.user, provider: "cursor" });
     const r = await fallback.runJson(opts);
     logHostedLlm({
       phase: "response",
@@ -108,6 +110,7 @@ export async function runHostedLlmJson(opts) {
       rawText: r?.rawText,
       json: r?.json,
     });
+    trace?.llmResponse?.(step, { json: r?.json, rawText: r?.rawText, meta: r?.meta });
     return {
       ...r,
       meta: { ...(r.meta || {}), kind: "cursor", usedComposerFallback: true },
@@ -128,6 +131,7 @@ export async function runHostedLlmJson(opts) {
       user: opts?.user,
       model: opts?.model,
     });
+    trace?.llmRequest?.(step, { system: opts?.system, user: opts?.user, provider: provider?.kind });
     const r = await provider.runJson(opts);
     logHostedLlm({
       phase: "response",
@@ -137,12 +141,14 @@ export async function runHostedLlmJson(opts) {
       rawText: r?.rawText,
       json: r?.json,
     });
+    trace?.llmResponse?.(step, { json: r?.json, rawText: r?.rawText, meta: r?.meta });
     return {
       ...r,
       meta: { ...(r.meta || {}), kind: provider.kind, usedComposerFallback: false },
     };
   } catch (err) {
     logHostedLlm({ phase: "error", providerKind: provider?.kind, step, error: err });
+    trace?.llmResponse?.(step, { error: err?.message || err });
     const msg = String(err?.message || err || "");
     const storageOff = /storage mode is disabled/i.test(msg);
     if (primaryKind === "cursor_cloud_agents" && storageOff && !endpoint) {

@@ -1,6 +1,7 @@
 import fs from "fs";
 import fetch from "node-fetch";
 import { chromium } from "playwright";
+import { isPlaceholderAddress } from "./poolAddress.js";
 
 function firstExistingChromeExecutable() {
   const candidates = [];
@@ -67,7 +68,7 @@ export function extractAddressesFromText(text) {
   let m;
   while ((m = re.exec(String(text || "")))) {
     const a = m[0].toLowerCase();
-    if (!seen.has(a)) {
+    if (!seen.has(a) && !isPlaceholderAddress(a)) {
       seen.add(a);
       out.push(a);
     }

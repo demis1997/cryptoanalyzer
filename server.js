@@ -75,6 +75,13 @@ import {
   subjectProtocolNodeId,
 } from "./backend/services/aiEnrich.js";
 import { resetHostedLlmRoute } from "./backend/llm/provider.js";
+import { createIntelligenceTrace, traceFromProtocolAnalysis } from "./backend/services/intelligenceTrace.js";
+import {
+  intelligenceTracesInit,
+  saveIntelligenceTrace,
+  getIntelligenceTrace,
+  listIntelligenceTraces,
+} from "./backend/db/intelligenceTraces.js";
 
 let hacksCache = { fetchedAtMs: 0, rows: null };
 async function getDefiLlamaHacksCached() {
@@ -1236,6 +1243,44 @@ app.get("/api/pool/risk-schema", (req, res) => {
   }
 });
 
+app.post("/api/intelligence-trace/save", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const trace = body.trace || body.intelligenceTrace;
+    if (!trace || typeof trace !== "object") {
+      return res.status(400).json({ ok: false, error: "Provide trace object in body" });
+    }
+    await intelligenceTracesInit();
+    const saved = await saveIntelligenceTrace(trace);
+    return res.json({ ok: true, saved });
+  } catch (err) {
+    console.error("/api/intelligence-trace/save:", err);
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.get("/api/intelligence-trace/list", async (req, res) => {
+  try {
+    await intelligenceTracesInit();
+    const kind = req.query?.kind ? String(req.query.kind) : "";
+    const rows = await listIntelligenceTraces({ kind: kind || undefined, limit: req.query?.limit });
+    return res.json({ ok: true, traces: rows });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.get("/api/intelligence-trace/:id", async (req, res) => {
+  try {
+    await intelligenceTracesInit();
+    const trace = await getIntelligenceTrace(req.params.id);
+    if (!trace) return res.status(404).json({ ok: false, error: "Trace not found" });
+    return res.json({ ok: true, trace });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
 app.get("/api/pool/discover-url", async (req, res) => {
   try {
     const url = String(req.query.url || "").trim();
@@ -1505,6 +1550,13 @@ app.post("/api/llm-analyze", async (req, res) => {
   const origin = normalizeUrl(url);
 
   try {
+    const trace = createIntelligenceTrace({
+      kind: "protocol",
+      query: origin,
+      label: origin,
+    });
+    trace.step("Starting protocol intelligence", { detail: origin });
+
     // Local graph DB init (always local file). No credentials needed.
     await localGraphInit().catch(() => {});
     // Optional Neo4j graph init (best-effort).
@@ -1529,6 +1581,15 @@ app.post("/api/llm-analyze", async (req, res) => {
     const defillamaApiDetail = defillama?.slug
       ? await getDefiLlamaProtocolApiDetailFromModule(defillama.slug).catch(() => null)
       : null;
+    if (defillama?.slug) {
+      trace.step("DefiLlama match", {
+        kind: "source",
+        detail: `${defillama.name || defillama.slug}`,
+        sources: [{ label: "DefiLlama", url: `https://defillama.com/protocol/${defillama.slug}` }],
+      });
+    } else if (defillamaMatchError) {
+      trace.step("DefiLlama match failed", { kind: "error", detail: defillamaMatchError });
+    }
 
     // Graph-first: if protocol graph exists and no wallet requested, return it.
     const defillamaSlug = defillama?.slug || null;
@@ -1599,6 +1660,9 @@ app.post("/api/llm-analyze", async (req, res) => {
       } catch {
         // ignore
       }
+      trace.step("Served from graph cache", { kind: "success", detail: out.cache?.source || "cache" });
+      trace.finish();
+      out.intelligenceTrace = trace.toJSON();
       return res.json(out);
     }
 
@@ -1649,6 +1713,9 @@ app.post("/api/llm-analyze", async (req, res) => {
               // ignore
             }
           }
+          trace.step("Served from protocol DB cache", { kind: "success", detail: cacheMeta.protocolKey || "" });
+          trace.finish();
+          out.intelligenceTrace = traceFromProtocolAnalysis(out, { url: origin });
           return res.json(out);
         }
       } else {
@@ -1698,6 +1765,13 @@ app.post("/api/llm-analyze", async (req, res) => {
     // Some protocols (or local networks) can block/timeout HTML fetches.
     // Continue best-effort using structured sources (DefiLlama/Pendle/etc.) instead of failing the whole analysis.
     const html = page?.ok && page.html ? page.html : "";
+    trace.step(page?.ok ? "Crawled protocol website" : "Website crawl limited", {
+      kind: page?.ok ? "source" : "error",
+      detail: page?.rendered
+        ? "Playwright rendered page"
+        : page?.renderError || `HTTP status ${page?.status || 0}`,
+      sources: [{ label: origin, url: origin }],
+    });
 
     // Heuristic extraction directly from the full HTML (no LLM).
     const tvlFromHtml = extractTvlFromHtml(html);
@@ -2276,6 +2350,10 @@ app.post("/api/llm-analyze", async (req, res) => {
       const analyzeVisible = html ? htmlToVisibleText(html) : "";
       if (enableHostedEnrich) {
         resetHostedLlmRoute();
+        trace.step("Hosted LLM enrichment", {
+          kind: "llm",
+          detail: `Provider: ${process.env.LLM_PROVIDER || "cursor"}`,
+        });
         enriched.llmEnrich = {
           enabled: true,
           provider: process.env.LLM_PROVIDER || null,
@@ -2293,6 +2371,12 @@ app.post("/api/llm-analyze", async (req, res) => {
           }).catch(() => fetchedDocs);
         }
         enriched.llmEnrich.docsFetched = Boolean(fetchedDocs?.ok);
+        trace.step(fetchedDocs?.ok ? "Documentation pack ready" : "Documentation fetch failed", {
+          kind: fetchedDocs?.ok ? "source" : "error",
+          detail: fetchedDocs?.ok
+            ? `${(fetchedDocs.pages || []).length} page(s) · ${(fetchedDocs.lines || []).length} lines`
+            : "no_usable_docs_text",
+        });
         if (Array.isArray(fetchedDocs?.evidence) && fetchedDocs.evidence.some((e) => String(e).includes("snapshot"))) {
           enriched.llmEnrich.usedAnalyzeHtmlFallback = true;
         }
@@ -2342,6 +2426,7 @@ app.post("/api/llm-analyze", async (req, res) => {
                   origin,
                   docs: fetchedDocs,
                   defillamaApi: defillamaApiDetail,
+                  trace,
                 }),
                 auditorsTimeoutMs,
                 "auditors"
@@ -2366,6 +2451,7 @@ app.post("/api/llm-analyze", async (req, res) => {
               totalRaisedUsd: enriched?.protocol?.totalRaisedUsd ?? null,
               auditsCountHint: enriched?.protocol?.auditsVerified?.count ?? enriched?.protocol?.audits ?? null,
             },
+            trace,
           }).catch(catchLlm("contractGraph"));
 
           const archRes = await inferArchitectureWithHostedLlm({
@@ -2374,6 +2460,7 @@ app.post("/api/llm-analyze", async (req, res) => {
             docs: fetchedDocs,
             knownTokens: enriched.tokenLiquidity || [],
             knownContracts: enriched.contracts || [],
+            trace,
           }).catch(catchLlm("architecture"));
           if (llmStepErrors.length) enriched.llmEnrich.llmStepErrors = llmStepErrors;
 
@@ -2596,6 +2683,10 @@ app.post("/api/llm-analyze", async (req, res) => {
     } catch {
       // ignore
     }
+
+    trace.step("Protocol intelligence complete", { kind: "success" });
+    trace.finish();
+    enriched.intelligenceTrace = trace.entries?.length ? trace.toJSON() : traceFromProtocolAnalysis(enriched, { url: origin });
 
     res.json(enriched);
   } catch (err) {

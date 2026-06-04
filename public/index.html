@@ -283,7 +283,7 @@
           <section class="panel" data-panel="scoring" hidden>
             <header class="panel__header animate-in">
               <h2 class="panel__title">How pool scoring works</h2>
-              <p class="panel__desc">Methodology v1.0 — ten criteria (P.1–P.10), renormalized weights when N/A, confidence per data source.</p>
+              <p class="panel__desc">Methodology v2.0 — nine criteria (P.1–P.9), renormalized weights when N/A, confidence per data source.</p>
             </header>
             <div id="pool-scoring-guide" class="card animate-in" style="padding:16px;font-size:13px;line-height:1.55;"></div>
           </section>
@@ -310,6 +310,21 @@
           </footer>
         </main>
       </div>
+
+      <aside id="intel-chat-panel" class="intel-chat" aria-label="Intelligence activity log">
+        <header class="intel-chat__header">
+          <div>
+            <h2 class="intel-chat__title">Activity</h2>
+            <p class="intel-chat__subtitle">LLM steps &amp; sources</p>
+          </div>
+          <div class="intel-chat__actions">
+            <button type="button" id="intel-chat-clear" class="btn btn--ghost" style="padding:4px 8px;font-size:11px;">Clear</button>
+            <button type="button" id="intel-chat-save" class="btn btn--primary" style="padding:4px 10px;font-size:11px;" disabled title="Save thinking log to SQLite and download JSON">Save log</button>
+          </div>
+        </header>
+        <p id="intel-chat-status" class="intel-chat__status" hidden></p>
+        <div id="intel-chat-feed" class="intel-chat__feed" role="log" aria-live="polite"></div>
+      </aside>
     </div>
 
     <script type="module" src="app.js"></script>

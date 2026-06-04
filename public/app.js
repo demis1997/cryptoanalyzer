@@ -13,6 +13,7 @@ import {
 } from "./js/ui-components.js";
 import { GraphPanel } from "./js/risk-graph.js";
 import { initShell, setPlatformStatus, setAnalyzing, showToast, revealResults } from "./js/shell.js";
+import { createIntelChatPanel } from "./js/intel-chat.js";
 
 const form = document.getElementById("protocol-form");
 const graphSearchForm = document.getElementById("graph-search-form");
@@ -25,6 +26,17 @@ const poolUnderlyingEl = document.getElementById("pool-underlying-tokens");
 const poolRiskSummaryEl = document.getElementById("pool-risk-summary");
 const poolScoringGuideEl = document.getElementById("pool-scoring-guide");
 const poolIntelBtn = document.getElementById("pool-intel-btn");
+const intelChatFeed = document.getElementById("intel-chat-feed");
+const intelChatSaveBtn = document.getElementById("intel-chat-save");
+const intelChatClearBtn = document.getElementById("intel-chat-clear");
+const intelChatStatusEl = document.getElementById("intel-chat-status");
+
+const intelChat = createIntelChatPanel({
+  feedEl: intelChatFeed,
+  saveBtn: intelChatSaveBtn,
+  clearBtn: intelChatClearBtn,
+  statusEl: intelChatStatusEl,
+});
 const searchModeBtns = document.querySelectorAll("[data-search-mode]");
 const urlInput = document.getElementById("protocol-url");
 const walletInput = document.getElementById("wallet-address");
@@ -181,14 +193,38 @@ function renderGraphSearchResults(rows, meta) {
   `;
 }
 
+function isPlaceholderAddr(addr) {
+  const a = String(addr || "").toLowerCase();
+  if (a === "0x0000000000000000000000000000000000000000") return true;
+  if (a === "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee") return true;
+  const zeros = (a.slice(2).match(/0/g) || []).length;
+  return zeros >= 36;
+}
+
 function parsePoolInput(q) {
   const s = String(q || "").trim();
   const key = s.match(/^([a-z0-9_-]+):(0x[a-fA-F0-9]{40})$/i);
-  if (key) return { chain: key[1].toLowerCase(), address: key[2].toLowerCase() };
+  if (key && !isPlaceholderAddr(key[2])) return { chain: key[1].toLowerCase(), address: key[2].toLowerCase() };
   const bare = s.match(/^(0x[a-fA-F0-9]{40})$/i);
-  if (bare) return { chain: "ethereum", address: bare[1].toLowerCase() };
+  if (bare && !isPlaceholderAddr(bare[1])) return { chain: "ethereum", address: bare[1].toLowerCase() };
   const cref = s.match(/^contract:([a-z0-9_-]+):(0x[a-fA-F0-9]{40})$/i);
-  if (cref) return { chain: cref[1].toLowerCase(), address: cref[2].toLowerCase() };
+  if (cref && !isPlaceholderAddr(cref[2])) return { chain: cref[1].toLowerCase(), address: cref[2].toLowerCase() };
+  if (/^https?:\/\//i.test(s)) {
+    const chainM = s.match(/(ethereum|arbitrum|optimism|base|polygon|avalanche|bsc|hyperliquid_l1)[:\/](0x[a-fA-F0-9]{40})/i);
+    if (chainM && !isPlaceholderAddr(chainM[2])) {
+      return { chain: chainM[1].toLowerCase(), address: chainM[2].toLowerCase(), poolUrl: s };
+    }
+    const addrs = [...s.matchAll(/0x[a-fA-F0-9]{40}/gi)].map((m) => m[0].toLowerCase()).filter((a) => !isPlaceholderAddr(a));
+    if (addrs.length) {
+      const vault = addrs[addrs.length - 1];
+      const chainIn = s.match(/(ethereum|arbitrum|optimism|base|polygon|avalanche|bsc|hyperliquid_l1)/i);
+      return {
+        chain: chainIn ? chainIn[1].toLowerCase() : "ethereum",
+        address: vault,
+        poolUrl: s,
+      };
+    }
+  }
   return null;
 }
 
@@ -354,6 +390,9 @@ async function runPoolIntelligenceFromQuery() {
   const q = String(graphSearchQ?.value || "").trim();
   if (!q) return;
   setSearchMode("graph");
+  intelChat.startRun({ kind: "pool", query: q, label: q });
+  intelChat.pushLocal("DefiLlama discovery", { detail: "Matching pool URL, address, or name" });
+  intelChat.pushLocal("Web research", { detail: "Tavily search + Playwright crawl when configured", kind: "source" });
   setPlatformStatus("Running pool intelligence (DefiLlama discovery + risk + graph save)…");
   shellApi?.setTab("graph");
   setViewMode("landing");
@@ -369,8 +408,9 @@ async function runPoolIntelligenceFromQuery() {
     });
     const data = await r.json();
     if (!r.ok || data?.ok === false) throw new Error(data?.error || `Request failed (${r.status})`);
+    if (data.intelligenceTrace) intelChat.applyTrace(data.intelligenceTrace);
     const label = data.label || q;
-    lastPoolIntel = data;
+    lastPoolIntel = { ...data, intelligenceTrace: data.intelligenceTrace || intelChat.getTrace() };
     setExportEnabled(true);
     renderPoolProtocolsPanel(
       {
@@ -403,6 +443,7 @@ async function runPoolIntelligenceFromQuery() {
       "success"
     );
   } catch (e) {
+    intelChat.pushLocal("Pool intelligence failed", { kind: "error", detail: String(e?.message || e) });
     setPlatformStatus(String(e?.message || e), "error");
     showToast(String(e?.message || e), "error");
   } finally {
@@ -664,6 +705,12 @@ async function runGraphSearch() {
     }
 
     if (/^https?:\/\//i.test(q)) {
+      const urlPool = parsePoolInput(q);
+      if (urlPool?.address) {
+        graphSearchQ.value = q;
+        await openPoolByWebsiteUrl(q);
+        return;
+      }
       const rr = await apiGetJson(`/api/resolve?url=${encodeURIComponent(q)}`).catch(() => ({ hit: false }));
       if (rr?.kind === "pool_website" && rr.url) {
         await openPoolByWebsiteUrl(rr.url);
@@ -1381,6 +1428,9 @@ if (form && urlInput) {
     setViewMode("loading");
     if (loadingMetrics) loadingMetrics.innerHTML = SkeletonGrid(4);
     if (loadingLines) loadingLines.innerHTML = SkeletonLines(6);
+    intelChat.startRun({ kind: "protocol", query: url, label: url });
+    intelChat.pushLocal("Crawling protocol site", { kind: "source", detail: url });
+    intelChat.pushLocal("DefiLlama + graph cache", { kind: "source" });
     setPlatformStatus("Running protocol intelligence pipeline…");
 
     try {
@@ -1398,7 +1448,10 @@ if (form && urlInput) {
         throw new Error(err.error || `Request failed (${resp.status})`);
       }
       const data = await resp.json();
-      lastAnalysis = data;
+      if (data.intelligenceTrace) {
+        intelChat.applyTrace(data.intelligenceTrace);
+      }
+      lastAnalysis = { ...data, intelligenceTrace: data.intelligenceTrace || intelChat.getTrace() };
       lastRubric = null;
 
       setViewMode("results");
@@ -1429,6 +1482,7 @@ if (form && urlInput) {
       });
     } catch (err) {
       console.error(err);
+      intelChat.pushLocal("Protocol intelligence failed", { kind: "error", detail: String(err?.message || err) });
       setViewMode("landing");
       showToast(err.message || "Analysis failed. Check server logs.", "error");
       setPlatformStatus(String(err.message || "Analysis failed"), "error");

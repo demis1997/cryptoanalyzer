@@ -8,7 +8,7 @@ import {
 import { getDefiLlamaProtocolApiDetail } from "./defillama.js";
 import { formatNeo4jErrorForUser } from "../db/neo4jGraph.js";
 import { buildHeuristicRiskAssessment } from "../llm/riskHeuristics.js";
-import { buildPoolRiskAssessment, primaryYieldsRow } from "../llm/poolScoring.js";
+import { buildPoolRiskAssessment } from "../llm/poolScoring.js";
 import { runHostedLlmJson } from "../llm/provider.js";
 import { gatherPoolWebResearch } from "./webResearch.js";
 import { discoverIntegratorsFromWebResearch } from "./integratorExtract.js";
@@ -17,17 +17,33 @@ import {
   applyExternalDataToYieldsRows,
   buildPoolSourceNotes,
 } from "./poolDataSources.js";
+import { createIntelligenceTrace } from "./intelligenceTrace.js";
+import {
+  GENERIC_UNDERLYING,
+  extractPoolTargetFromUrl,
+  derivePoolLabel,
+  filterYieldsRowsByVault,
+  isPlaceholderAddress,
+  selectPrimaryYieldsRow,
+} from "./poolAddress.js";
 
-const GENERIC_UNDERLYING = new Set(
-  [
-    "0x0000000000000000000000000000000000000000",
-    "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-    "0xdac17f958d2ee523a2206206994597c13d831ec7",
-    "0x6b175474e89094c44da98b954eedeac495271d0f",
-  ].map((a) => a.toLowerCase())
-);
+function appendWebResearchTrace(trace, webResearch) {
+  if (!trace || !webResearch) return;
+  if (!webResearch.enabled && !webResearch.formatted) {
+    trace.step("Web research skipped", { kind: "info", detail: "POOL_WEB_SEARCH off or no pool URL" });
+    return;
+  }
+  const providers = (webResearch.providers || []).join(" + ") || "web";
+  const pages = webResearch.crawl?.pages?.length || 0;
+  trace.step("Web research", {
+    kind: "source",
+    detail: `${providers}${pages ? ` · ${pages} page(s) crawled` : ""}`,
+    sources: (webResearch.searches || []).slice(0, 8).map((s) => ({
+      label: s.query || s.provider || "search",
+      url: s.hits?.[0]?.url || null,
+    })),
+  });
+}
 
 function normalizeChain(raw) {
   const s = String(raw || "").trim().toLowerCase();
@@ -58,7 +74,15 @@ function parsePoolInput({ url, address, chain, project, symbolHint, query } = {}
     return { kind: "address", chain: normalizeChain(chain), address: bare[1].toLowerCase(), label: bare[1] };
   }
   if (/^https?:\/\//i.test(q)) {
-    return { kind: "url", url: q, label: q };
+    const target = extractPoolTargetFromUrl(q);
+    return {
+      kind: "url",
+      url: target.url,
+      vaultAddress: target.vaultAddress,
+      chain: target.chain,
+      nameHint: target.nameHint,
+      label: target.nameHint || target.url,
+    };
   }
   if (project) {
     return { kind: "market", project: String(project).toLowerCase(), symbolHint: symbolHint || "", label: `${project} ${symbolHint}`.trim() };
@@ -75,7 +99,7 @@ function underlyingForIntegratorSearch(yieldsRows) {
   for (const row of yieldsRows) {
     for (const t of Array.isArray(row?.underlyingTokens) ? row.underlyingTokens : []) {
       const a = String(t || "").toLowerCase();
-      if (!/^0x[a-f0-9]{40}$/.test(a)) continue;
+      if (!/^0x[a-f0-9]{40}$/.test(a) || isPlaceholderAddress(a)) continue;
       if (GENERIC_UNDERLYING.has(a)) {
         if (allowUsdc && a === "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48") out.add(a);
         if (allowUsdt && a === "0xdac17f958d2ee523a2206206994597c13d831ec7") out.add(a);
@@ -105,7 +129,7 @@ function countPoolsWithUnderlying(addr, allPools) {
  * Other DefiLlama yield projects that list the same underlying token(s) — exposure integrators.
  */
 export function findProtocolsSharingUnderlying(yieldsRows, allPools) {
-  const primary = primaryYieldsRow(yieldsRows);
+  const primary = selectPrimaryYieldsRow(yieldsRows);
   const primaryProject = String(primary?.project || "").trim().toLowerCase();
   const issuerSlugs = new Set(primaryProject ? [primaryProject] : []);
   const rowsForTokens = primary ? [primary] : (yieldsRows || []).slice(0, 1);
@@ -116,7 +140,7 @@ export function findProtocolsSharingUnderlying(yieldsRows, allPools) {
   const vaultCandidates = yieldsRows
     .flatMap((r) => (Array.isArray(r?.underlyingTokens) ? r.underlyingTokens : []))
     .map((t) => String(t).toLowerCase())
-    .filter((a) => /^0x[a-f0-9]{40}$/.test(a) && !GENERIC_UNDERLYING.has(a));
+    .filter((a) => /^0x[a-f0-9]{40}$/.test(a) && !isPlaceholderAddress(a) && !GENERIC_UNDERLYING.has(a));
   const vaultAddr = vaultCandidates.find((a) => {
     const n = countPoolsWithUnderlying(a, allPools);
     return n > 0 && n <= 12;
@@ -187,8 +211,13 @@ export async function discoverPoolIntegratorsWithLlm({
   issuerSlug,
   yieldsRows = [],
   webResearch: webResearchIn = null,
+  trace = null,
 } = {}) {
-  if (!llmEnabled()) return { integrators: [], webResearch: webResearchIn };
+  if (!llmEnabled()) {
+    trace?.step?.("LLM integrator discovery skipped", { detail: "POOL_INTELLIGENCE_LLM disabled" });
+    return { integrators: [], webResearch: webResearchIn };
+  }
+  trace?.step?.("LLM integrator discovery", { detail: "Synthesizing integrators from DefiLlama + web research", kind: "llm" });
   const summary = (yieldsRows || []).slice(0, 6).map((r) => ({
     project: r?.project,
     symbol: r?.symbol,
@@ -233,8 +262,12 @@ Return JSON:
 }
 `.trim();
   try {
-    const r = await runHostedLlmJson({ step: "poolIntegrators", system, user, timeoutMs: 120_000 });
+    const r = await runHostedLlmJson({ step: "poolIntegrators", system, user, timeoutMs: 120_000, trace });
     const rows = Array.isArray(r?.json?.protocols) ? r.json.protocols : [];
+    trace?.step?.("Integrators from LLM", {
+      kind: "success",
+      detail: `${rows.length} protocol(s) returned`,
+    });
     const issuer = String(issuerSlug || "").toLowerCase();
     const out = [];
     const seen = new Set();
@@ -258,6 +291,7 @@ Return JSON:
     return { integrators: out, webResearch };
   } catch (e) {
     console.warn("pool LLM integrators:", e?.message || e);
+    trace?.step?.("LLM integrator discovery failed", { kind: "error", detail: String(e?.message || e) });
     return { integrators: [], webResearch };
   }
 }
@@ -437,60 +471,86 @@ export async function enrichPoolDiscoverPayload(discover, { poolUrl, useLlm = tr
   };
 }
 
-async function resolveContext(input) {
+async function resolveContext(input, { trace = null } = {}) {
   const parsed = parsePoolInput(input);
   if (parsed.kind === "address") {
+    trace?.step?.("Resolving pool by address", { detail: `${parsed.chain}:${parsed.address}` });
     const byAddr = await discoverProtocolsForPoolAddress({
       chain: parsed.chain,
       address: parsed.address,
     });
     const allPools = await fetchYieldsPoolsCached();
-    const yieldsRows = allPools.filter((p) => {
-      const under = Array.isArray(p?.underlyingTokens) ? p.underlyingTokens : [];
-      return (
-        under.some((t) => String(t).toLowerCase() === parsed.address) ||
-        String(p?.poolMeta || "")
-          .toLowerCase()
-          .includes(parsed.address)
-      );
-    });
+    let yieldsRows = filterYieldsRowsByVault(allPools, parsed.address, parsed.chain);
+    if (!yieldsRows.length) {
+      yieldsRows = filterYieldsRowsByVault(allPools, parsed.address, null);
+    }
     const integrators = findProtocolsSharingUnderlying(
       yieldsRows.length ? yieldsRows : [{ project: "unknown", underlyingTokens: [parsed.address] }],
       allPools
     );
+    const label = derivePoolLabel({
+      yieldsRows,
+      vaultAddress: parsed.address,
+      chain: parsed.chain,
+      fallback: parsed.label,
+    });
     return {
-      label: parsed.label,
+      label,
       poolRef: `contract:${parsed.chain}:${parsed.address}`,
       chain: parsed.chain,
       address: parsed.address,
+      vaultAddress: parsed.address,
       yieldsRows: yieldsRows.length ? yieldsRows : [],
-      underlyingTokens: tokensFromRows(yieldsRows, parsed.address),
+      underlyingTokens: tokensFromRows(yieldsRows, parsed.address, {
+        vaultAddress: parsed.address,
+        chain: parsed.chain,
+      }),
       integrators,
       source: "address+yields",
     };
   }
 
   if (parsed.kind === "url") {
-    const web = await discoverProtocolsForPoolWebsite(parsed.url, { expandUnderlying: false });
-    const slug =
-      web.matchedSlug ||
-      (await defillamaSlugFromWebsite(parsed.url)) ||
-      String(web.marketLabel || "").split(" ")[0];
-    const allPools = await fetchYieldsPoolsCached();
-    const pathHint = (() => {
-      try {
-        const u = new URL(parsed.url);
-        return (u.pathname || "").split("/").filter(Boolean).pop()?.replace(/-pool|-vault/gi, " ") || "";
-      } catch {
-        return "";
-      }
-    })();
-    const yieldsRows = allPools.filter((p) => {
-      const proj = String(p?.project || "").toLowerCase();
-      if (slug && proj === slug) return true;
-      const hay = `${p?.symbol} ${p?.poolMeta} ${proj}`.toLowerCase();
-      return pathHint && hay.includes(pathHint.toLowerCase());
+    const vaultAddr = parsed.vaultAddress || null;
+    const chainHint = parsed.chain || null;
+    const nameHint = parsed.nameHint || null;
+    trace?.step?.("Resolving pool by URL", {
+      detail: vaultAddr ? `${chainHint || "ethereum"}:${vaultAddr}` : parsed.url,
+      kind: "source",
     });
+    if (vaultAddr) {
+      trace?.step?.("Vault address from URL", { detail: vaultAddr, kind: "source" });
+    }
+    const web = await discoverProtocolsForPoolWebsite(parsed.url, {
+      expandUnderlying: false,
+      vaultAddress: vaultAddr,
+      chain: chainHint,
+      nameHint,
+    });
+    const slug = web.matchedSlug || (await defillamaSlugFromWebsite(parsed.url)) || null;
+    const allPools = await fetchYieldsPoolsCached();
+
+    let yieldsRows = Array.isArray(web.yieldsPools) ? web.yieldsPools.map((r) => ({ ...r })) : [];
+    if (vaultAddr) {
+      const byVault = filterYieldsRowsByVault(allPools, vaultAddr, chainHint);
+      if (byVault.length) yieldsRows = byVault;
+      else if (!yieldsRows.length) {
+        yieldsRows = filterYieldsRowsByVault(allPools, vaultAddr, null);
+      }
+    } else if (!yieldsRows.length && slug) {
+      yieldsRows = allPools.filter((p) => String(p?.project || "").toLowerCase() === slug);
+      if (nameHint) {
+        const narrowed = yieldsRows.filter((r) => {
+          const hay = `${r?.symbol} ${r?.poolMeta}`.toLowerCase();
+          return nameHint
+            .toLowerCase()
+            .split(/\s+/)
+            .some((w) => w.length > 2 && hay.includes(w));
+        });
+        if (narrowed.length) yieldsRows = narrowed;
+      }
+    }
+
     let integrators = findProtocolsSharingUnderlying(
       yieldsRows.length ? yieldsRows : web.yieldsPools || [],
       allPools
@@ -510,6 +570,7 @@ async function resolveContext(input) {
       poolUrl: parsed.url,
       issuerSlug: slug,
     }).catch(() => null);
+    appendWebResearchTrace(trace, webResearch);
     if (webResearch?.formatted) {
       const mentions = await discoverIntegratorsFromWebResearch(webResearch, {
         issuerSlug: slug,
@@ -533,23 +594,49 @@ async function resolveContext(input) {
         issuerSlug: slug,
         yieldsRows: yieldsRows.length ? yieldsRows : web.yieldsPools || [],
         webResearch,
+        trace,
       });
       webResearch = llm.webResearch || webResearch;
       integrators = mergeLlmIntegrators(integrators, llm);
     }
-    return {
-      label: web.marketLabel || parsed.url,
-      poolRef: slug ? `yieldpool:${slug}:${pathHint || "pool"}` : `market:${web.marketLabel}`,
-      url: parsed.url,
-      issuerSlug: slug,
+    const label = derivePoolLabel({
       yieldsRows,
-      underlyingTokens: tokensFromRows(yieldsRows, null),
+      vaultAddress: vaultAddr,
+      chain: chainHint,
+      nameHint,
+      fallback: web.marketLabel || parsed.url,
+    });
+    const primary = selectPrimaryYieldsRow(yieldsRows, {
+      vaultAddress: vaultAddr,
+      chain: chainHint,
+      nameHint,
+    });
+    const issuerSlug = primary?.project || slug || null;
+    trace?.step?.("DefiLlama yields matched", {
+      detail: `${yieldsRows.length} row(s) · scored as ${label}${vaultAddr ? ` · ${vaultAddr.slice(0, 10)}…` : ""}`,
+      sources: [{ label: "DefiLlama yields", url: issuerSlug ? `https://defillama.com/protocol/${issuerSlug}` : "https://defillama.com/yields" }],
+    });
+    return {
+      label,
+      poolRef: vaultAddr
+        ? `contract:${chainHint || normalizeChain(yieldsRows[0]?.chain)}:${vaultAddr}`
+        : issuerSlug
+          ? `yieldpool:${issuerSlug}:${nameHint || "pool"}`
+          : `market:${label}`,
+      url: parsed.url,
+      vaultAddress: vaultAddr,
+      chain: chainHint || (vaultAddr ? normalizeChain(yieldsRows[0]?.chain) : null),
+      nameHint,
+      issuerSlug,
+      yieldsRows,
+      underlyingTokens: tokensFromRows(yieldsRows, vaultAddr),
       integrators,
       webResearch,
-      source: web.source || "url+yields+web",
+      source: vaultAddr ? "url+vault+yields+web" : web.source || "url+yields+web",
     };
   }
 
+  trace?.step?.("Resolving pool by name / market", { detail: parsed.label || parsed.query });
   const market = await discoverProtocolsForYieldsMarket({
     project: parsed.project || parsed.query,
     symbolHint: parsed.symbolHint || "",
@@ -594,15 +681,15 @@ async function resolveContext(input) {
   };
 }
 
-function tokensFromRows(rows, extraAddr) {
-  const primary = primaryYieldsRow(rows);
+function tokensFromRows(rows, extraAddr, rowOpts = {}) {
+  const primary = selectPrimaryYieldsRow(rows, rowOpts);
   const scoped = primary ? [primary] : Array.isArray(rows) ? rows.slice(0, 1) : [];
   const out = [];
   const seen = new Set();
   for (const row of scoped) {
     for (const t of Array.isArray(row?.underlyingTokens) ? row.underlyingTokens : []) {
       const a = String(t || "").toLowerCase();
-      if (!/^0x[a-f0-9]{40}$/.test(a) || seen.has(a)) continue;
+      if (!/^0x[a-f0-9]{40}$/.test(a) || seen.has(a) || isPlaceholderAddress(a)) continue;
       seen.add(a);
       out.push({
         address: a,
@@ -612,8 +699,14 @@ function tokensFromRows(rows, extraAddr) {
       });
     }
   }
-  if (extraAddr && /^0x[a-f0-9]{40}$/.test(extraAddr) && !seen.has(extraAddr)) {
-    out.push({ address: extraAddr, chain: "ethereum", symbol: null, label: extraAddr.slice(0, 10) });
+  const extra = String(extraAddr || "").toLowerCase();
+  if (extra && /^0x[a-f0-9]{40}$/.test(extra) && !isPlaceholderAddress(extra) && !seen.has(extra)) {
+    out.push({
+      address: extra,
+      chain: normalizeChain(rowOpts.chain || scoped[0]?.chain),
+      symbol: scoped[0]?.symbol || null,
+      label: scoped[0]?.symbol || extra.slice(0, 10),
+    });
   }
   return out;
 }
@@ -736,14 +829,25 @@ async function fetchProtocolDetails(integrators) {
   return map;
 }
 
-async function enrichContextForScoring(ctx) {
-  const externalData = await gatherPoolExternalData(ctx, { webResearch: ctx.webResearch }).catch((e) => ({
+async function enrichContextForScoring(ctx, { trace = null } = {}) {
+  trace?.step?.("Fetching external data sources", {
+    detail: "CoinGecko, CoinMarketCap, DefiLlama chart, inspector searches",
+    kind: "source",
+  });
+  const externalData = await gatherPoolExternalData(ctx, { webResearch: ctx.webResearch, trace }).catch((e) => ({
     enabled: false,
     error: String(e?.message || e),
     sources: [],
     scoringHints: {},
   }));
   const yieldsRows = applyExternalDataToYieldsRows(ctx.yieldsRows, externalData);
+  for (const s of externalData?.sources || []) {
+    trace?.step?.(s.label || s.id || "Source", {
+      kind: "source",
+      detail: s.detail || "",
+      sources: [{ label: s.label || s.provider, url: s.url || null }],
+    });
+  }
   return {
     ...ctx,
     yieldsRows,
@@ -754,11 +858,26 @@ async function enrichContextForScoring(ctx) {
 
 export async function runPoolIntelligence(
   input,
-  { persistNeo4j, persistLocal, upsertConnectionsGraphNeo4j, upsertProtocolGraphNeo4j, localGraphInit, upsertProtocolGraphLocal } = {}
+  { persistNeo4j, persistLocal, upsertConnectionsGraphNeo4j, upsertProtocolGraphNeo4j, localGraphInit, upsertProtocolGraphLocal, trace: traceIn = null } = {}
 ) {
-  const ctx = await enrichContextForScoring(await resolveContext(input));
+  const query = String(input?.query || input?.url || input?.address || "").trim();
+  const trace =
+    traceIn ||
+    createIntelligenceTrace({
+      kind: "pool",
+      query,
+      label: query.slice(0, 80) || "Pool",
+    });
+  trace.step("Starting pool intelligence", { detail: query || "(address/market)" });
+  const ctx = await enrichContextForScoring(await resolveContext(input, { trace }), { trace });
+  trace.step("Computing pool risk score", { detail: "P.1–P.9 methodology v2.0", kind: "llm" });
   const protocolDetails = await fetchProtocolDetails(ctx.integrators);
   const risk = buildPoolRisk(ctx, protocolDetails);
+  const poolScore = risk?.pool?.poolScore;
+  trace.step("Pool risk score ready", {
+    kind: "success",
+    detail: poolScore != null ? `${poolScore}/100 · ${risk.pool.poolType || "pool"}` : "score unavailable",
+  });
   const connections = buildConnectionsGraph(ctx);
 
   const persisted = { neo4j: false, local: false, errors: [] };
@@ -817,6 +936,7 @@ export async function runPoolIntelligence(
     edges: connections.edges.map((e) => ({ from: e.from, to: e.to, relation: e.relation })),
   };
 
+  trace.finish();
   return {
     ok: true,
     label: ctx.label,
@@ -834,5 +954,6 @@ export async function runPoolIntelligence(
     webResearch: ctx.webResearch || null,
     externalData: ctx.externalData || null,
     sourceNotes: ctx.sourceNotes || [],
+    intelligenceTrace: trace.toJSON(),
   };
 }

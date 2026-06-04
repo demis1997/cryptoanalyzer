@@ -4,6 +4,7 @@
  */
 import fetch from "node-fetch";
 import { searchWeb } from "./webResearch.js";
+import { selectPrimaryYieldsRow } from "./poolAddress.js";
 
 const CG_PLATFORM = {
   ethereum: "ethereum",
@@ -228,17 +229,19 @@ function normalizeChainKey(chain) {
   return "ethereum";
 }
 
-function primaryRow(rows) {
-  const list = Array.isArray(rows) ? rows : [];
-  if (!list.length) return null;
-  return [...list].sort((a, b) => (Number(b?.tvlUsd) || 0) - (Number(a?.tvlUsd) || 0))[0];
+function primaryRow(rows, opts = {}) {
+  return selectPrimaryYieldsRow(rows, opts);
 }
 
 /**
  * Gather all external sources for a pool context.
  */
 export async function gatherPoolExternalData(ctx, { webResearch = null } = {}) {
-  const row = primaryRow(ctx?.yieldsRows);
+  const row = primaryRow(ctx?.yieldsRows, {
+    vaultAddress: ctx?.vaultAddress,
+    chain: ctx?.chain,
+    nameHint: ctx?.nameHint,
+  });
   const sources = [];
   const notes = [];
   const scoringHints = {};

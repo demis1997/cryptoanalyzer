@@ -1,5 +1,6 @@
 node_modules/
 .DS_Store
+data/*.sqlite
 .git2/
 
 # Local env / secrets

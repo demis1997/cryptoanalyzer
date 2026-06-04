@@ -34,7 +34,7 @@ console.log("weight applied:", Math.round(result.weightApplied * 100) + "%");
 const scored = result.criteria.filter((c) => !c.na && !c.unavailable);
 console.log("criteria scored:", scored.length);
 
-if (result.poolScore < 70 || result.poolScore > 95) {
+if (result.poolScore < 70 || result.poolScore > 96) {
   console.warn("WARN: score outside expected band for rich USDC vault fixture");
   process.exitCode = 1;
 }

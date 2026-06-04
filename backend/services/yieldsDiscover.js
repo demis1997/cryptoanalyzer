@@ -1,4 +1,12 @@
 import fetch from "node-fetch";
+import {
+  extractPoolTargetFromUrl,
+  filterYieldsRowsByVault,
+  derivePoolLabel,
+  isPlaceholderAddress,
+  selectPrimaryYieldsRow,
+  GENERIC_UNDERLYING,
+} from "./poolAddress.js";
 
 let cache = null;
 let cacheAt = 0;
@@ -34,7 +42,9 @@ export async function fetchYieldsPoolsCached() {
  */
 export async function discoverProtocolsForPoolAddress({ chain = "ethereum", address } = {}) {
   const addr = String(address || "").trim().toLowerCase();
-  if (!/^0x[a-f0-9]{40}$/.test(addr)) return { protocols: [], yieldsPools: [] };
+  if (!/^0x[a-f0-9]{40}$/.test(addr) || isPlaceholderAddress(addr)) {
+    return { protocols: [], yieldsPools: [] };
+  }
 
   const pools = await fetchYieldsPoolsCached();
   const chainHint = normalizeChainName(chain);
@@ -86,18 +96,6 @@ const PROJECT_ALIASES = {
   morpho: ["morpho-blue", "morpho-aave", "morpho-compound"],
   avantis: ["avantis"],
 };
-
-/** Tokens that match half the yields DB — skip unless expandUnderlying. */
-const GENERIC_UNDERLYING = new Set(
-  [
-    "0x0000000000000000000000000000000000000000",
-    "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-    "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", // WETH
-    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // USDC
-    "0xdac17f958d2ee523a2206206994597c13d831ec7", // USDT
-    "0x6b175474e89094c44da98b954eedeac495271d0f", // DAI
-  ].map((a) => a.toLowerCase())
-);
 
 let protocolsListCache = null;
 let protocolsListCacheAt = 0;
@@ -262,20 +260,63 @@ export async function discoverProtocolsForYieldsMarket({ project, symbolHint = "
 /**
  * Pool marketing site with no DB row — match DefiLlama protocol by domain, then yields pools live.
  */
-export async function discoverProtocolsForPoolWebsite(rawUrl, { expandUnderlying = false } = {}) {
+export async function discoverProtocolsForPoolWebsite(
+  rawUrl,
+  { expandUnderlying = false, vaultAddress = null, chain = null, nameHint = null } = {}
+) {
   let u = null;
   try {
     u = new URL(String(rawUrl || "").trim());
   } catch {
     return { ok: false, error: "Bad URL", protocols: [], yieldsPools: [] };
   }
-  const pathHint = (u.pathname || "")
-    .split("/")
-    .filter(Boolean)
-    .pop()
-    ?.replace(/-pool$/i, "")
-    .replace(/-vault$/i, "")
-    .replace(/-/g, " ");
+
+  const fromUrl = extractPoolTargetFromUrl(rawUrl);
+  const vault = (vaultAddress || fromUrl.vaultAddress || "").toLowerCase();
+  const chainHint = chain || fromUrl.chain;
+  const pathHint = nameHint || fromUrl.nameHint || "";
+
+  const pools = await fetchYieldsPoolsCached();
+  if (vault && /^0x[a-f0-9]{40}$/.test(vault)) {
+    let matches = filterYieldsRowsByVault(pools, vault, chainHint);
+    if (!matches.length) matches = filterYieldsRowsByVault(pools, vault, null);
+    const primary = selectPrimaryYieldsRow(matches, { vaultAddress: vault, chain: chainHint, nameHint: pathHint });
+    const slug = primary?.project || (await defillamaSlugFromWebsite(rawUrl));
+    const marketLabel = derivePoolLabel({
+      yieldsRows: matches,
+      vaultAddress: vault,
+      chain: chainHint,
+      nameHint: pathHint,
+      fallback: pathHint || vault.slice(0, 10),
+    });
+    const protocolMap = new Map();
+    if (slug) {
+      protocolMap.set(`defillama:${slug}`, {
+        id: `defillama:${slug}`,
+        name: slug,
+        url: `https://defillama.com/protocol/${slug}`,
+        link: "yields_vault",
+        tier: "issuer",
+        yieldsPools: matches.slice(0, 12).map((r) => ({
+          symbol: r?.symbol,
+          tvlUsd: r?.tvlUsd,
+          apy: r?.apy,
+          chain: r?.chain,
+        })),
+      });
+    }
+    return {
+      ok: true,
+      source: "yields_vault_address",
+      matchedSlug: slug || null,
+      vaultAddress: vault,
+      protocols: [...protocolMap.values()],
+      primary: [...protocolMap.values()],
+      related: [],
+      yieldsPools: matches.slice(0, 40).map(mapYieldsPoolRow),
+      marketLabel,
+    };
+  }
 
   const slug = await defillamaSlugFromWebsite(rawUrl);
   if (slug) {
@@ -284,6 +325,17 @@ export async function discoverProtocolsForPoolWebsite(rawUrl, { expandUnderlying
       symbolHint: pathHint || "",
       expandUnderlying,
     });
+    if (pathHint && r.yieldsPools?.length > 1) {
+      const narrowed = r.yieldsPools.filter((row) => poolRowMatchesHint(row, pathHint, projectCandidates(slug)));
+      if (narrowed.length) {
+        r.yieldsPools = narrowed;
+        r.marketLabel = derivePoolLabel({
+          yieldsRows: narrowed,
+          nameHint: pathHint,
+          fallback: r.marketLabel,
+        });
+      }
+    }
     return { ok: true, source: "defillama_protocols+yields", matchedSlug: slug, ...r };
   }
 
@@ -292,7 +344,6 @@ export async function discoverProtocolsForPoolWebsite(rawUrl, { expandUnderlying
     .map((s) => String(s || "").trim().toLowerCase())
     .filter((s) => s && s.length > 2);
 
-  const pools = await fetchYieldsPoolsCached();
   const matches = pools.filter((p) => {
     const hay = `${p?.project || ""} ${p?.symbol || ""} ${p?.poolMeta || ""}`.toLowerCase();
     return keywords.some((k) => hay.includes(k));
