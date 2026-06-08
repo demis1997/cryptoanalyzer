@@ -21,17 +21,19 @@ export async function gatherScoringWebResearch({
   const sym = String(symbol || "").trim();
   const ch = String(chain || "").trim();
 
+  const slugRoot = slug.split("-")[0] || slug;
   const queries = [
-    sym && slug ? `${slug} ${sym} ${ch} oracle Chainlink Pyth TWAP liquidation` : null,
-    sym && slug ? `${slug} ${sym} LLTV LTV collateral liquidation threshold` : null,
-    label ? `"${label}" vault curator risk manager` : null,
-    slug ? `${slug} ${sym || label} utilization rate supply cap` : null,
-    label ? `${label} DeFi pool APY yield source emissions` : null,
-    slug ? `site:docs.${slug.split("-")[0]}.org OR site:github.com/${slug.split("-")[0]} oracle LLTV` : null,
-    poolUrl ? `${poolUrl} oracle parameters risk` : null,
+    sym && slug ? `${slug} ${sym} ${ch} pool oracle Chainlink Pyth TWAP liquidation price feed` : null,
+    sym && slug ? `${slug} ${sym} LLTV LTV loan-to-value collateral liquidation threshold parameters` : null,
+    label ? `"${label}" vault curator risk manager who manages` : null,
+    slug ? `${slug} ${sym || label} utilization rate supply cap borrow` : null,
+    sym ? `defillama ${slug || label} ${sym} yields pool APY` : null,
+    label ? `${label} DeFi yield source organic emissions rewards sustainability` : null,
+    slug ? `${slugRoot} documentation oracle risk parameters vault` : null,
+    poolUrl ? `${poolUrl} risk parameters oracle LLTV` : null,
   ].filter(Boolean);
 
-  const maxQ = Number(process.env.POOL_SCORING_SEARCH_QUERIES || 4) || 4;
+  const maxQ = Number(process.env.POOL_SCORING_SEARCH_QUERIES || 5) || 5;
   const searches = [];
   for (const q of [...new Set(queries)].slice(0, maxQ)) {
     searches.push(await searchWeb(q, { maxResults: 5 }));

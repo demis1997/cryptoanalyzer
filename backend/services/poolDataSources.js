@@ -370,14 +370,19 @@ export async function gatherPoolExternalData(ctx, { webResearch = null } = {}) {
     }
   }
 
+  const yieldsUrl = row?.pool
+    ? `https://defillama.com/yields/pool/${encodeURIComponent(row.pool)}`
+    : row?.project
+      ? `https://defillama.com/protocol/${encodeURIComponent(row.project)}`
+      : "https://defillama.com/yields";
   sources.unshift({
     id: "defillama_yields",
     label: "DefiLlama yields",
     provider: "DefiLlama",
-    url: row?.project ? `https://defillama.com/protocol/${encodeURIComponent(row.project)}` : "https://defillama.com/yields",
+    url: yieldsUrl,
     ok: Boolean(row),
     detail: row
-      ? `${row.project || "?"} · ${row.symbol || "?"} · TVL $${row.tvlUsd ? Math.round(row.tvlUsd).toLocaleString() : "—"}`
+      ? `${row.project || "?"} · ${row.symbol || "?"} · ${row.chain || "?"} · TVL $${row.tvlUsd ? Math.round(row.tvlUsd).toLocaleString() : "—"}${row.pool ? ` · pool ${String(row.pool).slice(0, 8)}…` : ""}`
       : "No yields row matched",
   });
 

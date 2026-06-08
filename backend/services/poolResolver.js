@@ -5,6 +5,7 @@ import {
 } from "./poolAddress.js";
 import { readErc20Metadata, readErc4626Underlying } from "./onChainToken.js";
 import { fetchMorphoVaultByAddress, matchYieldsRowForMorphoVault } from "./morphoVault.js";
+import { applyVaultScoringMetaToRow } from "./scoringAudit.js";
 import { defillamaSlugFromWebsite } from "./yieldsDiscover.js";
 import { findBestYieldsPool } from "./yieldsPoolMatch.js";
 import fetch from "node-fetch";
@@ -100,7 +101,19 @@ export async function resolveVaultToYields({
     });
     const matched = matchYieldsRowForMorphoVault(morpho, allPools, { nameHint });
     if (matched) {
-      const row = fullYieldsPoolRow(matched);
+      let row = fullYieldsPoolRow(matched);
+      row = applyVaultScoringMetaToRow(row, morpho.scoring || morpho);
+      trace?.step?.("Morpho scoring fields", {
+        kind: "source",
+        detail: [
+          row.tvlUsd != null ? `TVL $${Math.round(row.tvlUsd).toLocaleString()}` : null,
+          row.lltv != null ? `LLTV ${Number(row.lltv).toFixed(1)}%` : null,
+          row.utilization != null ? `util ${(row.utilization * 100).toFixed(1)}%` : null,
+          row.oracleType ? `oracle ${row.oracleType}` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ") || "curator/symbol only",
+      });
       return {
         yieldsRows: [
           {

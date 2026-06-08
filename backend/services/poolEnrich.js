@@ -48,8 +48,21 @@ export async function enrichPoolMetadataWithLlm({
         chain: yieldsRow.chain,
         tvlUsd: yieldsRow.tvlUsd,
         pool: yieldsRow.pool,
+        apyBase: yieldsRow.apyBase,
+        curator: yieldsRow.curator,
+        oracleType: yieldsRow.oracleType,
+        lltv: yieldsRow.lltv,
+        utilization: yieldsRow.utilization,
       }
     : {};
+
+  const missing = [];
+  if (!yieldsRow?.oracleType) missing.push("oracleType");
+  if (yieldsRow?.lltv == null) missing.push("lltvPct");
+  if (yieldsRow?.utilization == null) missing.push("utilizationPct");
+  if (!yieldsRow?.curator && /vault|curat|metamorpho|euler/i.test(`${poolLabel} ${issuerSlug}`)) {
+    missing.push("curator");
+  }
 
   trace?.step?.("LLM pool metadata (oracle / curator)", {
     kind: "llm",
@@ -82,6 +95,9 @@ Issuer (DefiLlama): ${issuerSlug || "unknown"}
 
 DefiLlama yields row:
 ${JSON.stringify(rowSummary, null, 2)}
+
+FIELDS STILL MISSING (prioritize finding these in research):
+${missing.length ? missing.join(", ") : "none — confirm or refine values above"}
 
 WEB RESEARCH:
 ${blob.slice(0, 14000) || "(empty — set TAVILY_API_KEY or enable crawl)"}

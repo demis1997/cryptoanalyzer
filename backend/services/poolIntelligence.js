@@ -8,20 +8,15 @@ import {
 import { getDefiLlamaProtocolApiDetail } from "./defillama.js";
 import { formatNeo4jErrorForUser } from "../db/neo4jGraph.js";
 import { buildHeuristicRiskAssessment } from "../llm/riskHeuristics.js";
-import { buildPoolRiskAssessment } from "../llm/poolScoring.js";
+import { buildPoolRiskAssessment, inferPoolType } from "../llm/poolScoring.js";
 import { runHostedLlmJson } from "../llm/provider.js";
 import { gatherPoolWebResearch } from "./webResearch.js";
 import { discoverIntegratorsFromWebResearch } from "./integratorExtract.js";
-import {
-  gatherPoolExternalData,
-  applyExternalDataToYieldsRows,
-  buildPoolSourceNotes,
-} from "./poolDataSources.js";
+import { buildPoolSourceNotes } from "./poolDataSources.js";
 import { createIntelligenceTrace } from "./intelligenceTrace.js";
 import { fullYieldsPoolRow, hydrateYieldsRows } from "./yieldsPoolRow.js";
-import { resolveVaultToYields } from "./poolResolver.js";
-import { enrichPoolMetadataWithLlm, applyMetadataHintsToRow } from "./poolEnrich.js";
-import { gatherScoringWebResearch, mergeResearchBlobs } from "./scoringResearch.js";
+import { enrichYieldsForScoring, resolveYieldsRowsUniversal } from "./poolScoringEnrich.js";
+import { buildScoringDataAudit, auditTraceDetail } from "./scoringAudit.js";
 import {
   GENERIC_UNDERLYING,
   extractPoolTargetFromUrl,
@@ -39,34 +34,31 @@ function rowOptsFromCtx(ctx) {
   };
 }
 
-async function resolveYieldsRowsUniversal(ctx, allPools, trace) {
-  const rows = hydrateYieldsRows(ctx.yieldsRows, allPools);
-  const vault = ctx.vaultAddress;
-  if (!vault || !/^0x[a-f0-9]{40}$/.test(String(vault).toLowerCase())) return rows;
+function appendCriterionTrace(trace, risk, ctx) {
+  if (!trace || !risk?.pool?.criteria?.length) return;
+  const rowOpts = rowOptsFromCtx(ctx || {});
+  const row = selectPrimaryYieldsRow(ctx?.yieldsRows, rowOpts);
+  const poolType = risk.pool.poolType || inferPoolType({
+    yieldsRows: ctx?.yieldsRows,
+    label: ctx?.label,
+    issuerSlug: ctx?.issuerSlug,
+    integrators: ctx?.integrators,
+  });
+  const audit = buildScoringDataAudit(row, ctx || {}, poolType);
 
-  const resolved = await resolveVaultToYields({
-    vaultAddress: vault,
-    chain: ctx.chain,
-    issuerSlug: ctx.issuerSlug,
-    nameHint: ctx.nameHint,
-    poolUrl: ctx.url,
-    allPools,
-    trace,
+  trace.step("Scoring data audit", {
+    kind: "info",
+    detail: Object.entries(audit)
+      .map(([k, v]) => `${k}: ${v.status}${v.missing?.length ? ` (missing ${v.missing.join(",")})` : ""}`)
+      .join(" · "),
   });
 
-  if (resolved.vaultMeta) ctx.vaultMeta = { ...ctx.vaultMeta, ...resolved.vaultMeta };
-  if (resolved.yieldsRows?.length) return resolved.yieldsRows;
-  return rows;
-}
-
-function appendCriterionTrace(trace, risk) {
-  if (!trace || !risk?.pool?.criteria?.length) return;
   for (const c of risk.pool.criteria) {
-    const scorePart =
-      c.score != null ? `score ${Math.round(c.score * 100)}%` : c.unavailable ? "data gap" : c.na ? "N/A" : "—";
+    const auditEntry = audit[c.key];
+    const kind = c.unavailable ? "error" : c.na ? "info" : auditEntry?.status === "gap" ? "error" : "llm";
     trace.step(`${c.id} ${c.name}`, {
-      kind: c.unavailable || c.na ? "info" : "llm",
-      detail: [scorePart, c.input, c.confidenceReason || c.evidence].filter(Boolean).join(" · "),
+      kind,
+      detail: auditTraceDetail(c.id, c, auditEntry),
       sources: c.sources || [],
     });
   }
@@ -465,37 +457,32 @@ export async function enrichPoolDiscoverPayload(discover, { poolUrl, useLlm = tr
     webResearch = llm.webResearch || webResearch;
     integrators = mergeLlmIntegrators(integrators, llm);
   }
-  const underlyingTokens = tokensFromRows(yieldsRows, null);
   const issuer = integrators.filter((p) => p.tier === "issuer");
   const usingProtocols = filterUsingIntegrators(integrators);
   const issuerSlugForExt =
     discover?.matchedSlug ||
     issuer[0]?.id?.replace(/^defillama:/i, "") ||
     null;
-  const externalData = await gatherPoolExternalData(
-    {
-      label: discover?.marketLabel,
-      issuerSlug: issuerSlugForExt,
-      yieldsRows,
-      underlyingTokens,
-    },
-    { webResearch }
-  );
-  const rowOpts = {
+  const scoringCtx = {
+    label: discover?.marketLabel,
+    url: poolUrl,
     vaultAddress: discover?.vaultAddress,
     chain: discover?.chain,
     nameHint: discover?.marketLabel,
+    issuerSlug: issuerSlugForExt,
+    yieldsRows,
+    underlyingTokens: tokensFromRows(yieldsRows, discover?.vaultAddress),
+    integrators,
   };
-  const enrichedRows = applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts);
+  const enriched = await enrichYieldsForScoring(scoringCtx, { webResearchIn: webResearch });
+  const enrichedRows = enriched.yieldsRows;
   const risk = buildPoolRisk(
     {
-      label: discover?.marketLabel,
-      url: poolUrl,
+      ...scoringCtx,
       yieldsRows: enrichedRows,
-      integrators,
-      underlyingTokens,
-      issuerSlug: issuerSlugForExt,
-      externalData,
+      underlyingTokens: enriched.underlyingTokens,
+      externalData: enriched.externalData,
+      webResearch: enriched.webResearch,
     },
     new Map()
   );
@@ -505,11 +492,11 @@ export async function enrichPoolDiscoverPayload(discover, { poolUrl, useLlm = tr
     integrators,
     issuer,
     usingProtocols,
-    underlyingTokens,
+    underlyingTokens: enriched.underlyingTokens,
     risk,
-    webResearch,
-    externalData,
-    sourceNotes: buildPoolSourceNotes(externalData),
+    webResearch: enriched.webResearch,
+    externalData: enriched.externalData,
+    sourceNotes: buildPoolSourceNotes(enriched.externalData),
   };
 }
 
@@ -894,94 +881,12 @@ async function fetchProtocolDetails(integrators) {
 }
 
 async function enrichContextForScoring(ctx, { trace = null } = {}) {
-  const allPools = await fetchYieldsPoolsCached();
-  const rowOpts = rowOptsFromCtx(ctx);
-  let yieldsRows = hydrateYieldsRows(ctx.yieldsRows, allPools);
-  yieldsRows = await resolveYieldsRowsUniversal({ ...ctx, yieldsRows }, allPools, trace);
-
-  const primaryForResearch = selectPrimaryYieldsRow(yieldsRows, rowOpts);
-  const scoringResearch = await gatherScoringWebResearch({
-    poolLabel: ctx.label,
-    poolUrl: ctx.url,
-    issuerSlug: ctx.issuerSlug,
-    symbol: primaryForResearch?.symbol,
-    chain: primaryForResearch?.chain || ctx.chain,
-  }).catch(() => null);
-
-  const mergedWebResearch = {
-    ...(ctx.webResearch || {}),
-    formatted: mergeResearchBlobs(ctx.webResearch, scoringResearch),
-    scoringResearch,
-  };
-  if (scoringResearch?.formatted) {
-    trace?.step?.("Scoring-focused web research", {
-      kind: "source",
-      detail: `${scoringResearch.searches?.length || 0} query(s) · oracle / LLTV / curator / utilization`,
-      sources: (scoringResearch.searches || []).slice(0, 4).map((s) => ({
-        label: s.query?.slice(0, 48) || "search",
-        url: s.hits?.[0]?.url || null,
-      })),
-    });
-  }
-
   trace?.step?.("Fetching external data sources", {
-    detail: "CoinGecko, CoinMarketCap, DefiLlama chart, inspector searches",
+    detail: "DefiLlama chart, CoinGecko, CMC, inspector + scoring web research",
     kind: "source",
   });
-  const externalData = await gatherPoolExternalData(
-    { ...ctx, yieldsRows },
-    { webResearch: mergedWebResearch, trace }
-  ).catch((e) => ({
-    enabled: false,
-    error: String(e?.message || e),
-    sources: [],
-    scoringHints: {},
-  }));
-  yieldsRows = applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts);
-
-  const primary = selectPrimaryYieldsRow(yieldsRows, rowOpts);
-  const poolMeta = await enrichPoolMetadataWithLlm({
-    poolLabel: ctx.label,
-    poolUrl: ctx.url,
-    issuerSlug: ctx.issuerSlug,
-    yieldsRow: primary,
-    webResearch: mergedWebResearch,
-    trace,
-  });
-  if (primary) {
-    const idx = yieldsRows.findIndex((r) => r?.pool && r.pool === primary.pool);
-    const safeIdx = idx >= 0 ? idx : yieldsRows.indexOf(primary);
-    const at = safeIdx >= 0 ? safeIdx : 0;
-    yieldsRows[at] = applyMetadataHintsToRow(yieldsRows[at], poolMeta);
-    if (ctx.vaultMeta?.curator && !yieldsRows[at].curator) {
-      yieldsRows[at].curator = ctx.vaultMeta.curator;
-      yieldsRows[at].curatorEvidence =
-        ctx.vaultMeta.curatorEvidence ||
-        `Protocol API curator ${ctx.vaultMeta.curatorAddress || ctx.vaultMeta.curator}`;
-    }
-  }
-
-  const underlyingTokens =
-    externalData?.resolvedUnderlyingTokens?.length
-      ? externalData.resolvedUnderlyingTokens
-      : ctx.underlyingTokens;
-
-  const scoredRow = selectPrimaryYieldsRow(yieldsRows, rowOpts);
-  trace?.step?.("Scoring fields ready", {
-    kind: "info",
-    detail: [
-      scoredRow?.symbol ? `${scoredRow.symbol} · ${scoredRow.chain || ""}` : null,
-      scoredRow?.tvlUsd != null ? `TVL $${Math.round(scoredRow.tvlUsd).toLocaleString()}` : "TVL missing",
-      scoredRow?.count != null ? `${scoredRow.count} APY samples` : null,
-      scoredRow?.apyBase != null ? `apyBase ${Number(scoredRow.apyBase).toFixed(2)}%` : null,
-      scoredRow?.curator ? `curator: ${scoredRow.curator}` : null,
-      scoredRow?.oracleType ? `oracle: ${scoredRow.oracleType}` : "oracle: not resolved",
-    ]
-      .filter(Boolean)
-      .join(" · "),
-  });
-
-  for (const s of externalData?.sources || []) {
+  const enriched = await enrichYieldsForScoring(ctx, { trace, webResearchIn: ctx.webResearch });
+  for (const s of enriched.externalData?.sources || []) {
     trace?.step?.(s.label || s.id || "Source", {
       kind: "source",
       detail: s.detail || "",
@@ -990,12 +895,12 @@ async function enrichContextForScoring(ctx, { trace = null } = {}) {
   }
   return {
     ...ctx,
-    yieldsRows,
-    underlyingTokens,
-    webResearch: mergedWebResearch,
-    externalData,
-    poolMetadata: poolMeta,
-    sourceNotes: buildPoolSourceNotes(externalData),
+    yieldsRows: enriched.yieldsRows,
+    underlyingTokens: enriched.underlyingTokens,
+    webResearch: enriched.webResearch,
+    externalData: enriched.externalData,
+    poolMetadata: enriched.poolMetadata,
+    sourceNotes: buildPoolSourceNotes(enriched.externalData),
   };
 }
 
@@ -1016,7 +921,7 @@ export async function runPoolIntelligence(
   trace.step("Computing pool risk score", { detail: "P.1–P.9 methodology v2.0", kind: "llm" });
   const protocolDetails = await fetchProtocolDetails(ctx.integrators);
   const risk = buildPoolRisk(ctx, protocolDetails);
-  appendCriterionTrace(trace, risk);
+  appendCriterionTrace(trace, risk, ctx);
   const poolScore = risk?.pool?.poolScore;
   trace.step("Pool risk score ready", {
     kind: "success",

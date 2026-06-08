@@ -1,5 +1,6 @@
 import fetch from "node-fetch";
 import { normalizePoolChain } from "./poolAddress.js";
+import { parseMorphoLltv } from "./scoringAudit.js";
 
 const CURATOR_ADDRESSES = {
   "0x827e86072b06674a077f592a531dce4590adecdb": "Steakhouse Financial",
@@ -45,7 +46,19 @@ export async function fetchMorphoVaultByAddress(address, chain) {
   query VaultV1($address: String!, $chainId: Int!) {
     vaultByAddress(address: $address, chainId: $chainId) {
       address symbol name listed
-      state { curator fee }
+      state {
+        curator fee totalAssetsUsd apy netApy
+        allocation {
+          supplyAssetsUsd supplyCapUsd
+          market {
+            lltv
+            oracle { address }
+            loanAsset { symbol }
+            collateralAsset { symbol }
+            state { utilization }
+          }
+        }
+      }
       asset { symbol address }
       chain { id network }
     }
@@ -74,6 +87,7 @@ export async function fetchMorphoVaultByAddress(address, chain) {
       v = data?.vaultV2ByAddress;
     }
     if (!v?.address) return null;
+    const scoring = extractMorphoScoringFields(v);
     const curatorAddr = String(v?.state?.curator || "").toLowerCase();
     const curatorName =
       CURATOR_ADDRESSES[curatorAddr] ||
@@ -96,10 +110,73 @@ export async function fetchMorphoVaultByAddress(address, chain) {
       chain: normalizePoolChain(v?.chain?.network || chain),
       chainId: v?.chain?.id ?? chainId,
       source,
+      scoring,
+      ...scoring,
     };
   } catch {
     return null;
   }
+}
+
+function extractMorphoScoringFields(v) {
+  const st = v?.state || {};
+  const allocs = Array.isArray(st.allocation) ? st.allocation : [];
+  const active = allocs.filter((a) => Number(a?.supplyAssetsUsd) > 0 && a?.market);
+  let utilNum = 0;
+  let utilDen = 0;
+  let lltvSum = 0;
+  let lltvN = 0;
+  let capFillSum = 0;
+  let capFillN = 0;
+  const oracleAddrs = [];
+
+  for (const a of active) {
+    const w = Number(a.supplyAssetsUsd) || 0;
+    const u = Number(a?.market?.state?.utilization);
+    if (w > 0 && isFinite(u)) {
+      utilNum += u * w;
+      utilDen += w;
+    }
+    const lltv = parseMorphoLltv(a?.market?.lltv);
+    if (lltv != null) {
+      lltvSum += lltv * (w || 1);
+      lltvN += w || 1;
+    }
+    const cap = Number(a?.supplyCapUsd);
+    if (cap > 0 && w > 0) {
+      capFillSum += Math.min(1, w / cap);
+      capFillN += 1;
+    }
+    const oa = a?.market?.oracle?.address;
+    if (oa) oracleAddrs.push(String(oa).toLowerCase());
+  }
+
+  const apyRaw = Number(st.netApy ?? st.apy);
+  const out = {};
+  if (isFinite(Number(st.totalAssetsUsd))) {
+    out.totalAssetsUsd = Number(st.totalAssetsUsd);
+    out.tvlEvidence = "Morpho API state.totalAssetsUsd";
+  }
+  if (isFinite(apyRaw)) {
+    out.apyPct = apyRaw <= 1 ? apyRaw * 100 : apyRaw;
+    out.apyEvidence = "Morpho API vault netApy";
+  }
+  if (utilDen > 0) {
+    out.utilization = utilNum / utilDen;
+    out.utilizationEvidence = `Morpho API weighted market utilization (${active.length} market(s))`;
+  }
+  if (lltvN > 0) {
+    out.lltvPct = lltvSum / lltvN;
+    out.lltvEvidence = `Morpho API weighted LLTV across ${active.length} allocation(s)`;
+  }
+  if (capFillN > 0) {
+    out.capUtilization = capFillSum / capFillN;
+  }
+  if (oracleAddrs.length) {
+    out.oracleType = "Chainlink";
+    out.oracleEvidence = `Morpho market oracle(s): ${oracleAddrs.slice(0, 3).join(", ")}`;
+  }
+  return out;
 }
 
 /** Match DefiLlama yields row using Morpho vault symbol + chain (+ optional name hint). */

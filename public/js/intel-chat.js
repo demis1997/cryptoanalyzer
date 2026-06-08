@@ -30,7 +30,11 @@ function renderSources(sources) {
 }
 
 function renderEntry(e) {
-  const kind = KIND_CLASS[e.kind] || KIND_CLASS.info;
+  const title = String(e.title || e.phase || "Step");
+  const isCriterion = /^P\.\d+/i.test(title);
+  const isGap = e.kind === "error" || /data gap|missing:/i.test(String(e.detail || ""));
+  const kind =
+    isGap && isCriterion ? "intel-chat__msg--error" : KIND_CLASS[e.kind] || KIND_CLASS.info;
   const detail = e.detail ? `<div class="intel-chat__detail">${escapeHtml(e.detail)}</div>` : "";
   const llm =
     e.llm?.step && e.phase?.startsWith("llm")
@@ -39,7 +43,7 @@ function renderEntry(e) {
   return `<article class="intel-chat__msg ${kind}">
     <div class="intel-chat__head">
       <span class="intel-chat__time">${escapeHtml(formatTime(e.ts))}</span>
-      <strong class="intel-chat__title">${escapeHtml(e.title || e.phase || "Step")}</strong>
+      <strong class="intel-chat__title">${escapeHtml(title)}</strong>
     </div>
     ${detail}
     ${llm}

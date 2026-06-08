@@ -14,6 +14,18 @@ const PROJECT_ALIASES = {
   yearn: ["yearn-finance", "yearn"],
   convex: ["convex-finance"],
   sky: ["sky-lending", "maker"],
+  spark: ["spark", "sparklend"],
+  liquity: ["liquity", "liquity-v2"],
+  frax: ["frax", "frax-ether"],
+  radiant: ["radiant", "radiant-v2"],
+  silo: ["silo-finance", "silo"],
+  venus: ["venus"],
+  benqi: ["benqi"],
+  lido: ["lido"],
+  rocket: ["rocket-pool"],
+  symbiotic: ["symbiotic"],
+  kelp: ["kelp-dao", "kelp"],
+  eigen: ["eigenlayer", "eigenpie"],
 };
 
 export function projectCandidates(project) {
