@@ -19,8 +19,9 @@ import {
 } from "./poolDataSources.js";
 import { createIntelligenceTrace } from "./intelligenceTrace.js";
 import { fullYieldsPoolRow, hydrateYieldsRows } from "./yieldsPoolRow.js";
-import { fetchMorphoVaultByAddress, matchYieldsRowForMorphoVault } from "./morphoVault.js";
+import { resolveVaultToYields } from "./poolResolver.js";
 import { enrichPoolMetadataWithLlm, applyMetadataHintsToRow } from "./poolEnrich.js";
+import { gatherScoringWebResearch, mergeResearchBlobs } from "./scoringResearch.js";
 import {
   GENERIC_UNDERLYING,
   extractPoolTargetFromUrl,
@@ -38,58 +39,23 @@ function rowOptsFromCtx(ctx) {
   };
 }
 
-async function resolveYieldsRowsWithMorpho(ctx, allPools, trace) {
-  let rows = hydrateYieldsRows(ctx.yieldsRows, allPools);
+async function resolveYieldsRowsUniversal(ctx, allPools, trace) {
+  const rows = hydrateYieldsRows(ctx.yieldsRows, allPools);
   const vault = ctx.vaultAddress;
   if (!vault || !/^0x[a-f0-9]{40}$/.test(String(vault).toLowerCase())) return rows;
 
-  const morpho = await fetchMorphoVaultByAddress(vault, ctx.chain);
-  if (!morpho) return rows;
-
-  trace?.step?.("Morpho vault API", {
-    kind: "source",
-    detail: `${morpho.symbol || morpho.name || vault.slice(0, 10)} · curator: ${morpho.curator || "—"}`,
-    sources: [
-      {
-        label: "Morpho GraphQL",
-        url: `https://app.morpho.org/${morpho.chain}/vault/${morpho.address}`,
-      },
-    ],
+  const resolved = await resolveVaultToYields({
+    vaultAddress: vault,
+    chain: ctx.chain,
+    issuerSlug: ctx.issuerSlug,
+    nameHint: ctx.nameHint,
+    poolUrl: ctx.url,
+    allPools,
+    trace,
   });
 
-  ctx.morphoVault = morpho;
-  const matched = matchYieldsRowForMorphoVault(morpho, allPools, { nameHint: ctx.nameHint });
-  if (matched) {
-    rows = [fullYieldsPoolRow(matched)];
-    trace?.step?.("DefiLlama row via Morpho symbol", {
-      kind: "source",
-      detail: `${matched.symbol} · ${matched.chain} · TVL $${Math.round(matched.tvlUsd || 0).toLocaleString()} · count ${matched.count ?? "—"}`,
-      sources: [
-        {
-          label: "DefiLlama yields",
-          url: `https://defillama.com/protocol/${encodeURIComponent(matched.project || "yields")}`,
-        },
-      ],
-    });
-  } else {
-    trace?.step?.("DefiLlama yields gap", {
-      kind: "info",
-      detail: `Morpho vault ${morpho.symbol} on ${morpho.chain} — no matching yields row; TVL/APY may be unavailable.`,
-    });
-  }
-
-  if (rows.length) {
-    rows[0] = {
-      ...rows[0],
-      vaultAddress: morpho.address,
-      ...(morpho.curator
-        ? {
-            curator: morpho.curator,
-            curatorEvidence: `Morpho API curator ${morpho.curatorAddress || morpho.curator}`,
-          }
-        : {}),
-    };
-  }
+  if (resolved.vaultMeta) ctx.vaultMeta = { ...ctx.vaultMeta, ...resolved.vaultMeta };
+  if (resolved.yieldsRows?.length) return resolved.yieldsRows;
   return rows;
 }
 
@@ -567,7 +533,7 @@ async function resolveContext(input, { trace = null } = {}) {
       vaultAddress: parsed.address,
       chain: parsed.chain,
     };
-    yieldsRows = await resolveYieldsRowsWithMorpho(addrCtx, allPools, trace);
+    yieldsRows = await resolveYieldsRowsUniversal(addrCtx, allPools, trace);
     const integrators = findProtocolsSharingUnderlying(
       yieldsRows.length ? yieldsRows : [{ project: "unknown", underlyingTokens: [parsed.address] }],
       allPools
@@ -585,7 +551,7 @@ async function resolveContext(input, { trace = null } = {}) {
       address: parsed.address,
       vaultAddress: parsed.address,
       yieldsRows: yieldsRows.length ? yieldsRows : [],
-      morphoVault: addrCtx.morphoVault || null,
+      vaultMeta: addrCtx.vaultMeta || null,
       underlyingTokens: tokensFromRows(yieldsRows, parsed.address, {
         vaultAddress: parsed.address,
         chain: parsed.chain,
@@ -638,13 +604,15 @@ async function resolveContext(input, { trace = null } = {}) {
       }
     }
 
-    const morphoCtx = {
+    const resolveCtx = {
       yieldsRows,
       vaultAddress: vaultAddr,
       chain: chainHint,
       nameHint,
+      issuerSlug: slug,
+      url: parsed.url,
     };
-    yieldsRows = await resolveYieldsRowsWithMorpho(morphoCtx, allPools, trace);
+    yieldsRows = await resolveYieldsRowsUniversal(resolveCtx, allPools, trace);
 
     let integrators = findProtocolsSharingUnderlying(
       yieldsRows.length ? yieldsRows : web.yieldsPools || [],
@@ -724,7 +692,7 @@ async function resolveContext(input, { trace = null } = {}) {
       nameHint,
       issuerSlug,
       yieldsRows,
-      morphoVault: morphoCtx.morphoVault || null,
+      vaultMeta: resolveCtx.vaultMeta || null,
       underlyingTokens: tokensFromRows(yieldsRows, vaultAddr),
       integrators,
       webResearch,
@@ -929,9 +897,31 @@ async function enrichContextForScoring(ctx, { trace = null } = {}) {
   const allPools = await fetchYieldsPoolsCached();
   const rowOpts = rowOptsFromCtx(ctx);
   let yieldsRows = hydrateYieldsRows(ctx.yieldsRows, allPools);
-  const primaryBefore = selectPrimaryYieldsRow(yieldsRows, rowOpts);
-  if (ctx.vaultAddress && !primaryBefore?.tvlUsd) {
-    yieldsRows = await resolveYieldsRowsWithMorpho({ ...ctx, yieldsRows }, allPools, trace);
+  yieldsRows = await resolveYieldsRowsUniversal({ ...ctx, yieldsRows }, allPools, trace);
+
+  const primaryForResearch = selectPrimaryYieldsRow(yieldsRows, rowOpts);
+  const scoringResearch = await gatherScoringWebResearch({
+    poolLabel: ctx.label,
+    poolUrl: ctx.url,
+    issuerSlug: ctx.issuerSlug,
+    symbol: primaryForResearch?.symbol,
+    chain: primaryForResearch?.chain || ctx.chain,
+  }).catch(() => null);
+
+  const mergedWebResearch = {
+    ...(ctx.webResearch || {}),
+    formatted: mergeResearchBlobs(ctx.webResearch, scoringResearch),
+    scoringResearch,
+  };
+  if (scoringResearch?.formatted) {
+    trace?.step?.("Scoring-focused web research", {
+      kind: "source",
+      detail: `${scoringResearch.searches?.length || 0} query(s) · oracle / LLTV / curator / utilization`,
+      sources: (scoringResearch.searches || []).slice(0, 4).map((s) => ({
+        label: s.query?.slice(0, 48) || "search",
+        url: s.hits?.[0]?.url || null,
+      })),
+    });
   }
 
   trace?.step?.("Fetching external data sources", {
@@ -940,7 +930,7 @@ async function enrichContextForScoring(ctx, { trace = null } = {}) {
   });
   const externalData = await gatherPoolExternalData(
     { ...ctx, yieldsRows },
-    { webResearch: ctx.webResearch, trace }
+    { webResearch: mergedWebResearch, trace }
   ).catch((e) => ({
     enabled: false,
     error: String(e?.message || e),
@@ -955,7 +945,7 @@ async function enrichContextForScoring(ctx, { trace = null } = {}) {
     poolUrl: ctx.url,
     issuerSlug: ctx.issuerSlug,
     yieldsRow: primary,
-    webResearch: ctx.webResearch,
+    webResearch: mergedWebResearch,
     trace,
   });
   if (primary) {
@@ -963,11 +953,18 @@ async function enrichContextForScoring(ctx, { trace = null } = {}) {
     const safeIdx = idx >= 0 ? idx : yieldsRows.indexOf(primary);
     const at = safeIdx >= 0 ? safeIdx : 0;
     yieldsRows[at] = applyMetadataHintsToRow(yieldsRows[at], poolMeta);
-    if (ctx.morphoVault?.curator && !yieldsRows[at].curator) {
-      yieldsRows[at].curator = ctx.morphoVault.curator;
-      yieldsRows[at].curatorEvidence = `Morpho API curator ${ctx.morphoVault.curatorAddress || ""}`.trim();
+    if (ctx.vaultMeta?.curator && !yieldsRows[at].curator) {
+      yieldsRows[at].curator = ctx.vaultMeta.curator;
+      yieldsRows[at].curatorEvidence =
+        ctx.vaultMeta.curatorEvidence ||
+        `Protocol API curator ${ctx.vaultMeta.curatorAddress || ctx.vaultMeta.curator}`;
     }
   }
+
+  const underlyingTokens =
+    externalData?.resolvedUnderlyingTokens?.length
+      ? externalData.resolvedUnderlyingTokens
+      : ctx.underlyingTokens;
 
   const scoredRow = selectPrimaryYieldsRow(yieldsRows, rowOpts);
   trace?.step?.("Scoring fields ready", {
@@ -994,6 +991,8 @@ async function enrichContextForScoring(ctx, { trace = null } = {}) {
   return {
     ...ctx,
     yieldsRows,
+    underlyingTokens,
+    webResearch: mergedWebResearch,
     externalData,
     poolMetadata: poolMeta,
     sourceNotes: buildPoolSourceNotes(externalData),

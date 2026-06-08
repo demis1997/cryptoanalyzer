@@ -129,13 +129,12 @@ export async function gatherPoolWebResearch({ poolLabel, poolUrl, issuerSlug } =
   const label = String(poolLabel || "").trim();
   const slug = String(issuerSlug || "").trim();
   const queries = [
-    label ? `"${label}" DeFi vault integrators protocols` : null,
-    slug ? `${slug} vault yield pool DeFi integrations` : null,
-    slug ? `${slug} Morpho integration USDC vault borrow` : null,
-    slug ? `${slug} Pendle avUSDC PT YT composability` : null,
-    slug ? `${slug} Maple Ethena Aerodrome integration partners` : null,
-    label ? `avUSDC ERC-4626 composability protocols Base` : null,
-    label ? `${label} who deposits liquidity curators` : null,
+    label ? `"${label}" DeFi vault integrators protocols partners` : null,
+    slug ? `${slug} vault yield pool DeFi integrations composability` : null,
+    slug && label ? `${slug} ${label} integration deposit collateral` : null,
+    label ? `${label} ERC-4626 vault share token integrations` : null,
+    slug ? `${slug} protocol partners integrations DeFiLlama` : null,
+    label ? `${label} who deposits liquidity curators risk` : null,
   ].filter(Boolean);
 
   const searches = [];

@@ -8,6 +8,10 @@ import {
   GENERIC_UNDERLYING,
 } from "./poolAddress.js";
 import { fullYieldsPoolRow } from "./yieldsPoolRow.js";
+import { findBestYieldsPool } from "./yieldsPoolMatch.js";
+import { projectCandidates } from "./defillamaProjects.js";
+
+export { projectCandidates };
 
 let cache = null;
 let cacheAt = 0;
@@ -83,20 +87,9 @@ export async function discoverProtocolsForPoolAddress({ chain = "ethereum", addr
 
   return {
     protocols: [...byProject.values()],
-    yieldsPools: matches.slice(0, 30).map((r) => ({
-      project: r?.project || null,
-      symbol: r?.symbol || null,
-      chain: r?.chain || null,
-      tvlUsd: r?.tvlUsd ?? null,
-      apy: r?.apy ?? null,
-    })),
+    yieldsPools: matches.slice(0, 30).map((r) => fullYieldsPoolRow(r)),
   };
 }
-
-const PROJECT_ALIASES = {
-  morpho: ["morpho-blue", "morpho-aave", "morpho-compound"],
-  avantis: ["avantis"],
-};
 
 let protocolsListCache = null;
 let protocolsListCacheAt = 0;
@@ -126,12 +119,6 @@ export async function defillamaSlugFromWebsite(rawUrl) {
     return u.includes(host);
   });
   return hit?.slug ? String(hit.slug).toLowerCase() : null;
-}
-
-function projectCandidates(project) {
-  const p = String(project || "").trim().toLowerCase();
-  const aliases = PROJECT_ALIASES[p] || [p];
-  return [...new Set([p, ...aliases].filter(Boolean))];
 }
 
 function hintIsOnlyProjectName(hint, projects) {
@@ -172,6 +159,17 @@ export async function discoverProtocolsForYieldsMarket({ project, symbolHint = "
   });
   if (!matches.length) {
     matches = pools.filter((p) => projects.includes(String(p?.project || "").trim().toLowerCase()));
+  }
+  if (hint && matches.length > 1) {
+    const best = findBestYieldsPool(pools, {
+      issuerSlug: project,
+      nameHint: hint,
+      symbol: hint.replace(/\s+/g, ""),
+    });
+    if (best) {
+      const full = pools.find((p) => p.pool && best.pool && p.pool === best.pool) || best;
+      matches = [full];
+    }
   }
 
   const protocolMap = new Map();

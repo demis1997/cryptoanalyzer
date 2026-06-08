@@ -87,8 +87,10 @@ export function isCriterionNA(criterionKey, poolType) {
 function scoreAssetQuality(row, underlyingTokens) {
   const sym = String(row?.symbol || "").trim();
   const s = sym.toLowerCase();
-  const under = (underlyingTokens || []).map((t) => String(t?.symbol || t?.label || "").toLowerCase());
-  const tokens = [s, ...under].filter(Boolean);
+  const under = (underlyingTokens || [])
+    .map((t) => String(t?.symbol || t?.label || "").toLowerCase())
+    .filter((t) => t && !/^0x[a-f0-9]{40}$/.test(t));
+  const tokens = [s, ...under].filter((t) => t && !/^0x[a-f0-9]{40}$/.test(t));
 
   let min = 1;
   for (const tok of tokens) {
@@ -598,7 +600,9 @@ function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
     case "poolAge": {
       if (row?.poolCreatedAt || row?.createdAt) {
         confidence = "high";
-        confidenceReason = "Pool age from deployment or listed timestamp.";
+        confidenceReason = row?.poolCreatedAt
+          ? "Pool age from DefiLlama APY history first sample or deployment timestamp."
+          : "Pool age from deployment or listed timestamp.";
       } else if (opts.protocolListedAt) {
         confidence = "medium";
         confidenceReason = "Pool age proxied from protocol listedAt on DefiLlama.";

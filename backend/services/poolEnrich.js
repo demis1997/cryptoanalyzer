@@ -32,7 +32,11 @@ export async function enrichPoolMetadataWithLlm({
     out.sources.push({ label: "Vault label", detail: fromLabel.evidence });
   }
 
-  const blob = [webResearch?.formatted || "", webResearch?.crawl?.formatted || ""].join("\n");
+  const blob = [
+    webResearch?.formatted || "",
+    webResearch?.crawl?.formatted || "",
+    webResearch?.scoringResearch?.formatted || "",
+  ].join("\n");
   Object.assign(out.hints, parseScoringHintsFromText(blob));
 
   if (!llmEnabled()) return out;
@@ -52,8 +56,9 @@ export async function enrichPoolMetadataWithLlm({
     detail: poolLabel || poolUrl || issuerSlug || "",
   });
 
-  const system = `You extract factual pool/vault metadata for DeFi risk scoring from the provided web research and DefiLlama row.
-You cannot browse the web. Only use the WEB RESEARCH and DEFILLAMA sections.
+  const system = `You extract factual pool/vault metadata for DeFi risk scoring from web research and DefiLlama data.
+Works for ANY protocol (Aave, Morpho, Pendle, Euler, Curve, Compound, etc.) — not Morpho-specific.
+You cannot browse the web. Only use WEB RESEARCH and DEFILLAMA sections.
 Return JSON only — no markdown:
 {
   "curator": string | null,

@@ -5,6 +5,7 @@
 import fetch from "node-fetch";
 import { searchWeb } from "./webResearch.js";
 import { selectPrimaryYieldsRow } from "./poolAddress.js";
+import { readErc20Metadata } from "./onChainToken.js";
 
 const CG_PLATFORM = {
   ethereum: "ethereum",
@@ -56,7 +57,18 @@ export async function fetchDefiLlamaYieldsChart(poolId) {
     const json = await resp.json().catch(() => ({}));
     const data = Array.isArray(json?.data) ? json.data : [];
     const apyCv30d = apyCvFromChart(data);
-    return { ok: true, url, points: data.length, apyCv30d, latest: data[data.length - 1] || null };
+    const first = data[0];
+    const firstTs = first?.timestamp ? Number(first.timestamp) : null;
+    const firstMs =
+      firstTs != null && isFinite(firstTs) ? (firstTs > 1e12 ? firstTs : firstTs * 1000) : null;
+    return {
+      ok: true,
+      url,
+      points: data.length,
+      apyCv30d,
+      firstTimestampMs: firstMs,
+      latest: data[data.length - 1] || null,
+    };
   } catch (e) {
     return { ok: false, url, error: String(e?.message || e) };
   }
@@ -258,11 +270,24 @@ export async function gatherPoolExternalData(ctx, { webResearch = null } = {}) {
       detail: chart?.apyCv30d != null ? `30d APY CV ≈ ${chart.apyCv30d.toFixed(3)} (${chart.points} points)` : chart?.error || "no data",
     });
     if (chart?.apyCv30d != null) scoringHints.apyCv30d = chart.apyCv30d;
+    if (chart?.firstTimestampMs) scoringHints.poolCreatedAt = chart.firstTimestampMs;
   }
 
   const tokens = Array.isArray(ctx?.underlyingTokens) ? ctx.underlyingTokens : [];
+  const resolvedTokens = [];
+  for (const tok of tokens.slice(0, 4)) {
+    const addr = String(tok?.address || "").toLowerCase();
+    if (/^0x[a-f0-9]{40}$/.test(addr) && (!tok?.symbol || /^0x/i.test(String(tok.symbol)))) {
+      const meta = await readErc20Metadata(addr, tok.chain || row?.chain || ctx?.chain);
+      if (meta?.symbol) {
+        resolvedTokens.push({ ...tok, symbol: meta.symbol, label: meta.name || meta.symbol });
+        continue;
+      }
+    }
+    resolvedTokens.push(tok);
+  }
   const cgResults = [];
-  for (const tok of tokens.slice(0, 3)) {
+  for (const tok of resolvedTokens.slice(0, 3)) {
     const cg = await fetchCoinGeckoByContract(tok.chain, tok.address);
     if (cg) cgResults.push({ token: tok.symbol || tok.address, ...cg });
   }
@@ -288,7 +313,8 @@ export async function gatherPoolExternalData(ctx, { webResearch = null } = {}) {
 
   const symForCmc = [
     row?.symbol,
-    ...tokens.map((t) => t.symbol),
+    row?.vaultTokenSymbol,
+    ...resolvedTokens.map((t) => t.symbol),
   ]
     .map((s) => String(s || "").replace(/[^a-zA-Z0-9]/g, "").toUpperCase())
     .filter((s) => s.length >= 2 && s.length <= 10);
@@ -360,6 +386,7 @@ export async function gatherPoolExternalData(ctx, { webResearch = null } = {}) {
     sources,
     notes,
     scoringHints,
+    resolvedUnderlyingTokens: resolvedTokens,
     coinGecko: cgResults,
     coinMarketCap: cmc,
     defillamaChart: chart || null,
@@ -380,6 +407,10 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
   if (hints.utilization != null) primary.utilization = hints.utilization;
   if (hints.lltv != null) primary.lltv = hints.lltv;
   if (hints.capUtilization != null) primary.capUtilization = hints.capUtilization;
+  if (hints.poolCreatedAt != null) primary.poolCreatedAt = hints.poolCreatedAt;
+  if (externalData?.defillamaChart?.firstTimestampMs) {
+    primary.poolCreatedAt = primary.poolCreatedAt || externalData.defillamaChart.firstTimestampMs;
+  }
   if (hints.oracleType === "chainlink") primary.oracleType = "Chainlink";
   else if (hints.oracleType === "chainlink_derived") primary.oracleType = "Chainlink derived";
   else if (hints.oracleType === "pyth") primary.oracleType = "Pyth";
