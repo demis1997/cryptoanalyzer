@@ -47,7 +47,7 @@ function renderEntry(e) {
   </article>`;
 }
 
-export function createIntelChatPanel({ feedEl, saveBtn, clearBtn, statusEl } = {}) {
+export function createIntelChatPanel({ feedEl, saveBtn, downloadBtn, clearBtn, statusEl } = {}) {
   let currentTrace = null;
 
   function setStatus(text, tone = "") {
@@ -62,11 +62,13 @@ export function createIntelChatPanel({ feedEl, saveBtn, clearBtn, statusEl } = {
     if (!currentTrace?.entries?.length) {
       feedEl.innerHTML = `<p class="intel-chat__empty">Run pool or protocol intelligence to see live reasoning, LLM steps, and data sources here.</p>`;
       if (saveBtn) saveBtn.disabled = true;
+      if (downloadBtn) downloadBtn.disabled = true;
       return;
     }
     feedEl.innerHTML = currentTrace.entries.map(renderEntry).join("");
     feedEl.scrollTop = feedEl.scrollHeight;
     if (saveBtn) saveBtn.disabled = false;
+    if (downloadBtn) downloadBtn.disabled = false;
   }
 
   function startRun({ kind, query, label } = {}) {
@@ -146,30 +148,64 @@ export function createIntelChatPanel({ feedEl, saveBtn, clearBtn, statusEl } = {
     return data.saved;
   }
 
+  function exportFilename(suffix = "export") {
+    const slug = (currentTrace?.label || currentTrace?.query || "trace")
+      .replace(/[^a-z0-9_-]+/gi, "_")
+      .slice(0, 40);
+    return `${slug}-thinking-${suffix}.json`;
+  }
+
   function downloadJson(filename) {
-    if (!currentTrace) throw new Error("Nothing to export");
-    const blob = new Blob([JSON.stringify(currentTrace, null, 2)], { type: "application/json" });
+    if (!currentTrace?.entries?.length) throw new Error("Nothing to export — run intelligence first.");
+    const payload = {
+      ...currentTrace,
+      endedAt: currentTrace.endedAt || new Date().toISOString(),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = filename;
+    a.download = filename || exportFilename("local");
+    a.style.display = "none";
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 500);
   }
 
   if (clearBtn) clearBtn.addEventListener("click", clear);
+  if (downloadBtn) {
+    downloadBtn.addEventListener("click", () => {
+      try {
+        downloadBtn.disabled = true;
+        downloadJson(exportFilename("download"));
+        setStatus("Downloaded JSON", "success");
+      } catch (e) {
+        setStatus(String(e.message || e), "error");
+      } finally {
+        if (currentTrace?.entries?.length) downloadBtn.disabled = false;
+      }
+    });
+  }
   if (saveBtn) {
     saveBtn.addEventListener("click", async () => {
       try {
         saveBtn.disabled = true;
-        const saved = await saveToServer();
-        const slug = (currentTrace?.label || "trace").replace(/[^a-z0-9_-]+/gi, "_").slice(0, 40);
-        downloadJson(`${slug}-thinking-${saved?.id || "export"}.json`);
-        setStatus(`Saved · ${saved?.id || ""}`, "success");
+        if (downloadBtn) downloadBtn.disabled = true;
+        downloadJson(exportFilename("download"));
+        try {
+          const saved = await saveToServer();
+          setStatus(`Downloaded · saved ${saved?.id || ""}`, "success");
+        } catch (e) {
+          setStatus(`Downloaded · server save failed: ${e.message || e}`, "error");
+        }
       } catch (e) {
         setStatus(String(e.message || e), "error");
       } finally {
-        if (currentTrace?.entries?.length) saveBtn.disabled = false;
+        if (currentTrace?.entries?.length) {
+          saveBtn.disabled = false;
+          if (downloadBtn) downloadBtn.disabled = false;
+        }
       }
     });
   }

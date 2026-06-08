@@ -7,6 +7,7 @@ import {
   selectPrimaryYieldsRow,
   GENERIC_UNDERLYING,
 } from "./poolAddress.js";
+import { fullYieldsPoolRow } from "./yieldsPoolRow.js";
 
 let cache = null;
 let cacheAt = 0;
@@ -154,18 +155,7 @@ function poolRowMatchesHint(row, hint, projects) {
 }
 
 function mapYieldsPoolRow(r) {
-  return {
-    project: r?.project,
-    symbol: r?.symbol,
-    chain: r?.chain,
-    tvlUsd: r?.tvlUsd ?? null,
-    apy: r?.apy ?? null,
-    poolMeta: r?.poolMeta || null,
-    pool: r?.pool || null,
-    underlyingTokens: r?.underlyingTokens || [],
-    exposure: r?.exposure || null,
-    ilRisk: r?.ilRisk || null,
-  };
+  return fullYieldsPoolRow(r);
 }
 
 /**

@@ -28,12 +28,14 @@ const poolScoringGuideEl = document.getElementById("pool-scoring-guide");
 const poolIntelBtn = document.getElementById("pool-intel-btn");
 const intelChatFeed = document.getElementById("intel-chat-feed");
 const intelChatSaveBtn = document.getElementById("intel-chat-save");
+const intelChatDownloadBtn = document.getElementById("intel-chat-download");
 const intelChatClearBtn = document.getElementById("intel-chat-clear");
 const intelChatStatusEl = document.getElementById("intel-chat-status");
 
 const intelChat = createIntelChatPanel({
   feedEl: intelChatFeed,
   saveBtn: intelChatSaveBtn,
+  downloadBtn: intelChatDownloadBtn,
   clearBtn: intelChatClearBtn,
   statusEl: intelChatStatusEl,
 });
@@ -408,7 +410,7 @@ async function runPoolIntelligenceFromQuery() {
     });
     const data = await r.json();
     if (!r.ok || data?.ok === false) throw new Error(data?.error || `Request failed (${r.status})`);
-    if (data.intelligenceTrace) intelChat.applyTrace(data.intelligenceTrace);
+    if (data.intelligenceTrace) intelChat.mergeTrace(data.intelligenceTrace);
     const label = data.label || q;
     lastPoolIntel = { ...data, intelligenceTrace: data.intelligenceTrace || intelChat.getTrace() };
     setExportEnabled(true);
@@ -1449,7 +1451,7 @@ if (form && urlInput) {
       }
       const data = await resp.json();
       if (data.intelligenceTrace) {
-        intelChat.applyTrace(data.intelligenceTrace);
+        intelChat.mergeTrace(data.intelligenceTrace);
       }
       lastAnalysis = { ...data, intelligenceTrace: data.intelligenceTrace || intelChat.getTrace() };
       lastRubric = null;

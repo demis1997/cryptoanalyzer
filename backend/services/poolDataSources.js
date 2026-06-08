@@ -368,15 +368,14 @@ export async function gatherPoolExternalData(ctx, { webResearch = null } = {}) {
 }
 
 /** Merge external hints into yields rows used by poolScoring. */
-export function applyExternalDataToYieldsRows(yieldsRows, externalData) {
+export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts = {}) {
   const hints = externalData?.scoringHints || {};
   if (!Array.isArray(yieldsRows) || !yieldsRows.length) return yieldsRows || [];
   const rows = yieldsRows.map((r) => ({ ...r }));
-  const idx = rows.reduce((best, r, i) => {
-    const t = Number(r?.tvlUsd) || 0;
-    return t > (Number(rows[best]?.tvlUsd) || 0) ? i : best;
-  }, 0);
-  const primary = { ...rows[idx] };
+  const primaryRow = selectPrimaryYieldsRow(rows, rowOpts);
+  const idx = primaryRow ? rows.findIndex((r) => r === primaryRow || r?.pool === primaryRow?.pool) : 0;
+  const safeIdx = idx >= 0 ? idx : 0;
+  const primary = { ...rows[safeIdx] };
   if (hints.apyCv30d != null) primary.apyCv30d = hints.apyCv30d;
   if (hints.utilization != null) primary.utilization = hints.utilization;
   if (hints.lltv != null) primary.lltv = hints.lltv;
@@ -388,7 +387,10 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData) {
   else if (hints.oracleType === "twap_short") primary.oracleType = "TWAP";
   if (hints.top100Token) primary.assetRankHint = "top100";
   if (externalData?.defillamaChart?.apyCv30d != null) primary.apyCv30d = externalData.defillamaChart.apyCv30d;
-  rows[idx] = primary;
+  else if (primary.apyCv30d == null && isFinite(Number(primary.sigma))) {
+    primary.apyCv30d = Number(primary.sigma);
+  }
+  rows[safeIdx] = primary;
   return rows;
 }
 

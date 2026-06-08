@@ -162,14 +162,18 @@ function scoreOracle(poolType, row) {
   if (/twap/i.test(oracleHint)) {
     return { score: 0.7, input: "TWAP", evidence: "P.3 oracle table." };
   }
-  if (poolType === "structured_vault" || poolType === "lending") {
+  if (poolType === "structured_vault" || poolType === "lending" || poolType === "curated_vault") {
     return {
-      score: 0.75,
-      input: "not specified",
-      evidence: "Perp/vault likely uses external feeds — verify in docs (default 0.75).",
+      unavailable: true,
+      input: "oracle not identified",
+      evidence: "Oracle not found in DefiLlama, Morpho API, or web research — check protocol docs (P.3).",
     };
   }
-  return { score: 0.65, input: "unknown", evidence: "Oracle type not in yields data." };
+  return {
+    unavailable: true,
+    input: "oracle unknown",
+    evidence: "Oracle type not in available sources (P.3).",
+  };
 }
 
 function scoreParameterSafety(poolType, row) {
@@ -321,11 +325,13 @@ function scorePoolAge(row, protocolListedAt) {
     if (count > 300) ageMs = 400 * 86400000;
     else if (count > 100) ageMs = 200 * 86400000;
     else if (count > 30) ageMs = 90 * 86400000;
+    else if (count > 0) ageMs = 30 * 86400000;
   }
   if (ageMs == null) {
     return { unavailable: true, input: "unknown", evidence: "Pool deployment date not available." };
   }
   const months = ageMs / (30 * 86400000);
+  const count = Number(row?.count);
   let sc = 0.1;
   if (months >= 24) sc = 1.0;
   else if (months >= 12) sc = 0.85;
@@ -335,7 +341,9 @@ function scorePoolAge(row, protocolListedAt) {
   return {
     score: sc,
     input: `~${Math.round(months)} months`,
-    evidence: "Pool age from timestamps or DefiLlama sample count proxy (P.6 v2.0).",
+    evidence: count > 0
+      ? `Pool age proxied from DefiLlama APY history (${count} samples ≈ ${Math.round(months)} mo, P.6).`
+      : "Pool age from deployment timestamp or protocol listedAt (P.6).",
   };
 }
 
@@ -411,18 +419,39 @@ const CURATOR_SCORES = [
   },
 ];
 
-function scoreCurator(poolType, integrators, issuerSlug, label = "") {
+function scoreCurator(poolType, integrators, issuerSlug, label = "", row = null) {
   if (isCriterionNA("curatorQuality", poolType)) {
     return { na: true, evidence: "Non-curated pool type (P.9 N/A)." };
   }
-  const hay = `${label} ${(integrators || []).map((p) => `${p.name} ${p.id}`).join(" ")}`;
+  const curatorField = String(row?.curator || "").trim();
+  const hay = `${label} ${curatorField} ${row?.curatorEvidence || ""} ${(integrators || []).map((p) => `${p.name} ${p.id}`).join(" ")}`;
+  if (curatorField) {
+    for (const c of CURATOR_SCORES) {
+      if (c.re.test(curatorField) || c.re.test(hay)) {
+        return {
+          score: c.score,
+          input: curatorField,
+          evidence: row?.curatorEvidence || "Curator from Morpho API or web research (P.9).",
+        };
+      }
+    }
+    return {
+      score: 0.6,
+      input: curatorField,
+      evidence: row?.curatorEvidence || "Named curator from API; not in rubric tier table (P.9).",
+    };
+  }
   for (const c of CURATOR_SCORES) {
     if (c.re.test(hay)) {
       return { score: c.score, input: c.label, evidence: "Curator detected from vault label/integrators (P.9)." };
     }
   }
   if (/morpho|euler|metamorpho|evault/i.test(hay) && (poolType === "curated_vault" || poolType === "lending")) {
-    return { score: 0.6, input: "curated architecture", evidence: "Curator not named in data (P.9)." };
+    return {
+      unavailable: true,
+      input: "curator not named",
+      evidence: "Curated vault but curator not resolved — Morpho API or docs needed (P.9).",
+    };
   }
   return { na: true, evidence: "No named curator in available data (P.9 N/A)." };
 }
@@ -538,17 +567,22 @@ function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
     }
     case "oracleQuality": {
       const hint = String(row?.oracleType || row?.oracle || "").toLowerCase();
+      const ev = row?.oracleEvidence || "";
       if (/chainlink|pyth|twap/i.test(hint)) {
         confidence = "high";
-        confidenceReason = "Oracle type specified in enriched pool data or crawl text.";
+        confidenceReason = ev || "Oracle type from web research or crawl text.";
+      } else if (result.unavailable) {
+        confidence = "low";
+        confidenceReason = "Oracle not identified in DefiLlama, Morpho, or web research — criterion excluded.";
       } else if (hint && hint !== "unknown" && hint !== "not specified") {
         confidence = "medium";
-        confidenceReason = "Oracle hint from web research/crawl parsing — verify on-chain feed addresses.";
+        confidenceReason = ev || "Oracle hint from parsed text — verify on-chain feed addresses.";
       } else {
         confidence = "low";
-        confidenceReason = "Oracle not in yields API; default score for vault/lending — check protocol docs.";
+        confidenceReason = "Oracle not confirmed — check protocol docs and Morpho market page.";
       }
       pickFromNotes("inspector");
+      if (ctx.url) sources.push({ label: "Pool URL", url: ctx.url });
       break;
     }
     case "parameterSafety": {
@@ -606,12 +640,19 @@ function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
     }
     case "curatorQuality": {
       pickFromNotes("inspector");
-      if (/steakhouse|gauntlet|re7|mev capital/i.test(String(ctx.label || ""))) {
+      if (row?.curator && row?.curatorEvidence) {
         confidence = "high";
-        confidenceReason = "Named curator matched from vault label or integrator list.";
+        confidenceReason = `${row.curatorEvidence}`;
+        sources.push({ label: "Morpho API / LLM", url: ctx.url || null });
+      } else if (/steakhouse|gauntlet|re7|mev capital/i.test(String(ctx.label || "") + row?.curator)) {
+        confidence = "high";
+        confidenceReason = "Named curator matched from vault label or Morpho API.";
+      } else if (result.unavailable) {
+        confidence = "low";
+        confidenceReason = "Curated vault without resolved curator — score excluded from total.";
       } else if (result.score != null) {
         confidence = "medium";
-        confidenceReason = "Curated architecture detected but curator name not confirmed.";
+        confidenceReason = "Curator inferred from label/heuristics; confirm on vault page.";
       }
       break;
     }
@@ -664,7 +705,7 @@ export function buildPoolRiskAssessment(ctx, opts = {}) {
     poolAge: () => scorePoolAge(row, protocolListedAt),
     poolTvl: () => scorePoolTvl(row),
     yieldQuality: () => scoreYieldQuality(row),
-    curatorQuality: () => scoreCurator(poolType, ctx.integrators, ctx.issuerSlug, ctx.label),
+    curatorQuality: () => scoreCurator(poolType, ctx.integrators, ctx.issuerSlug, ctx.label, row),
   };
 
   const criteria = [];

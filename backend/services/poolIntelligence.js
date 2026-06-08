@@ -18,6 +18,9 @@ import {
   buildPoolSourceNotes,
 } from "./poolDataSources.js";
 import { createIntelligenceTrace } from "./intelligenceTrace.js";
+import { fullYieldsPoolRow, hydrateYieldsRows } from "./yieldsPoolRow.js";
+import { fetchMorphoVaultByAddress, matchYieldsRowForMorphoVault } from "./morphoVault.js";
+import { enrichPoolMetadataWithLlm, applyMetadataHintsToRow } from "./poolEnrich.js";
 import {
   GENERIC_UNDERLYING,
   extractPoolTargetFromUrl,
@@ -26,6 +29,82 @@ import {
   isPlaceholderAddress,
   selectPrimaryYieldsRow,
 } from "./poolAddress.js";
+
+function rowOptsFromCtx(ctx) {
+  return {
+    vaultAddress: ctx?.vaultAddress,
+    chain: ctx?.chain,
+    nameHint: ctx?.nameHint,
+  };
+}
+
+async function resolveYieldsRowsWithMorpho(ctx, allPools, trace) {
+  let rows = hydrateYieldsRows(ctx.yieldsRows, allPools);
+  const vault = ctx.vaultAddress;
+  if (!vault || !/^0x[a-f0-9]{40}$/.test(String(vault).toLowerCase())) return rows;
+
+  const morpho = await fetchMorphoVaultByAddress(vault, ctx.chain);
+  if (!morpho) return rows;
+
+  trace?.step?.("Morpho vault API", {
+    kind: "source",
+    detail: `${morpho.symbol || morpho.name || vault.slice(0, 10)} · curator: ${morpho.curator || "—"}`,
+    sources: [
+      {
+        label: "Morpho GraphQL",
+        url: `https://app.morpho.org/${morpho.chain}/vault/${morpho.address}`,
+      },
+    ],
+  });
+
+  ctx.morphoVault = morpho;
+  const matched = matchYieldsRowForMorphoVault(morpho, allPools, { nameHint: ctx.nameHint });
+  if (matched) {
+    rows = [fullYieldsPoolRow(matched)];
+    trace?.step?.("DefiLlama row via Morpho symbol", {
+      kind: "source",
+      detail: `${matched.symbol} · ${matched.chain} · TVL $${Math.round(matched.tvlUsd || 0).toLocaleString()} · count ${matched.count ?? "—"}`,
+      sources: [
+        {
+          label: "DefiLlama yields",
+          url: `https://defillama.com/protocol/${encodeURIComponent(matched.project || "yields")}`,
+        },
+      ],
+    });
+  } else {
+    trace?.step?.("DefiLlama yields gap", {
+      kind: "info",
+      detail: `Morpho vault ${morpho.symbol} on ${morpho.chain} — no matching yields row; TVL/APY may be unavailable.`,
+    });
+  }
+
+  if (rows.length) {
+    rows[0] = {
+      ...rows[0],
+      vaultAddress: morpho.address,
+      ...(morpho.curator
+        ? {
+            curator: morpho.curator,
+            curatorEvidence: `Morpho API curator ${morpho.curatorAddress || morpho.curator}`,
+          }
+        : {}),
+    };
+  }
+  return rows;
+}
+
+function appendCriterionTrace(trace, risk) {
+  if (!trace || !risk?.pool?.criteria?.length) return;
+  for (const c of risk.pool.criteria) {
+    const scorePart =
+      c.score != null ? `score ${Math.round(c.score * 100)}%` : c.unavailable ? "data gap" : c.na ? "N/A" : "—";
+    trace.step(`${c.id} ${c.name}`, {
+      kind: c.unavailable || c.na ? "info" : "llm",
+      detail: [scorePart, c.input, c.confidenceReason || c.evidence].filter(Boolean).join(" · "),
+      sources: c.sources || [],
+    });
+  }
+}
 
 function appendWebResearchTrace(trace, webResearch) {
   if (!trace || !webResearch) return;
@@ -372,20 +451,12 @@ async function augmentIntegratorsFromCrawlAddresses(integrators, addresses, chai
 /** Enrich discover-url / yields-market payloads with integrators, underlying, and quick risk. */
 export async function enrichPoolDiscoverPayload(discover, { poolUrl, useLlm = true } = {}) {
   const allPools = await fetchYieldsPoolsCached();
-  let yieldsRows = Array.isArray(discover?.yieldsPools) ? discover.yieldsPools : [];
+  let yieldsRows = hydrateYieldsRows(discover?.yieldsPools, allPools);
   if (!yieldsRows.length && discover?.matchedSlug) {
     yieldsRows = allPools
       .filter((p) => String(p?.project || "").toLowerCase() === String(discover.matchedSlug).toLowerCase())
       .slice(0, 40)
-      .map((r) => ({
-        project: r?.project,
-        symbol: r?.symbol,
-        chain: r?.chain,
-        tvlUsd: r?.tvlUsd,
-        apy: r?.apy,
-        poolMeta: r?.poolMeta,
-        underlyingTokens: r?.underlyingTokens || [],
-      }));
+      .map((r) => fullYieldsPoolRow(r));
   }
   let integrators = findProtocolsSharingUnderlying(yieldsRows, allPools);
   const issuerSlug =
@@ -444,7 +515,12 @@ export async function enrichPoolDiscoverPayload(discover, { poolUrl, useLlm = tr
     },
     { webResearch }
   );
-  const enrichedRows = applyExternalDataToYieldsRows(yieldsRows, externalData);
+  const rowOpts = {
+    vaultAddress: discover?.vaultAddress,
+    chain: discover?.chain,
+    nameHint: discover?.marketLabel,
+  };
+  const enrichedRows = applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts);
   const risk = buildPoolRisk(
     {
       label: discover?.marketLabel,
@@ -480,10 +556,18 @@ async function resolveContext(input, { trace = null } = {}) {
       address: parsed.address,
     });
     const allPools = await fetchYieldsPoolsCached();
-    let yieldsRows = filterYieldsRowsByVault(allPools, parsed.address, parsed.chain);
+    let yieldsRows = filterYieldsRowsByVault(allPools, parsed.address, parsed.chain).map((r) =>
+      fullYieldsPoolRow(r)
+    );
     if (!yieldsRows.length) {
-      yieldsRows = filterYieldsRowsByVault(allPools, parsed.address, null);
+      yieldsRows = filterYieldsRowsByVault(allPools, parsed.address, null).map((r) => fullYieldsPoolRow(r));
     }
+    const addrCtx = {
+      yieldsRows,
+      vaultAddress: parsed.address,
+      chain: parsed.chain,
+    };
+    yieldsRows = await resolveYieldsRowsWithMorpho(addrCtx, allPools, trace);
     const integrators = findProtocolsSharingUnderlying(
       yieldsRows.length ? yieldsRows : [{ project: "unknown", underlyingTokens: [parsed.address] }],
       allPools
@@ -501,6 +585,7 @@ async function resolveContext(input, { trace = null } = {}) {
       address: parsed.address,
       vaultAddress: parsed.address,
       yieldsRows: yieldsRows.length ? yieldsRows : [],
+      morphoVault: addrCtx.morphoVault || null,
       underlyingTokens: tokensFromRows(yieldsRows, parsed.address, {
         vaultAddress: parsed.address,
         chain: parsed.chain,
@@ -530,15 +615,17 @@ async function resolveContext(input, { trace = null } = {}) {
     const slug = web.matchedSlug || (await defillamaSlugFromWebsite(parsed.url)) || null;
     const allPools = await fetchYieldsPoolsCached();
 
-    let yieldsRows = Array.isArray(web.yieldsPools) ? web.yieldsPools.map((r) => ({ ...r })) : [];
+    let yieldsRows = hydrateYieldsRows(web.yieldsPools, allPools);
     if (vaultAddr) {
-      const byVault = filterYieldsRowsByVault(allPools, vaultAddr, chainHint);
+      const byVault = filterYieldsRowsByVault(allPools, vaultAddr, chainHint).map((r) => fullYieldsPoolRow(r));
       if (byVault.length) yieldsRows = byVault;
       else if (!yieldsRows.length) {
-        yieldsRows = filterYieldsRowsByVault(allPools, vaultAddr, null);
+        yieldsRows = filterYieldsRowsByVault(allPools, vaultAddr, null).map((r) => fullYieldsPoolRow(r));
       }
     } else if (!yieldsRows.length && slug) {
-      yieldsRows = allPools.filter((p) => String(p?.project || "").toLowerCase() === slug);
+      yieldsRows = allPools
+        .filter((p) => String(p?.project || "").toLowerCase() === slug)
+        .map((r) => fullYieldsPoolRow(r));
       if (nameHint) {
         const narrowed = yieldsRows.filter((r) => {
           const hay = `${r?.symbol} ${r?.poolMeta}`.toLowerCase();
@@ -550,6 +637,14 @@ async function resolveContext(input, { trace = null } = {}) {
         if (narrowed.length) yieldsRows = narrowed;
       }
     }
+
+    const morphoCtx = {
+      yieldsRows,
+      vaultAddress: vaultAddr,
+      chain: chainHint,
+      nameHint,
+    };
+    yieldsRows = await resolveYieldsRowsWithMorpho(morphoCtx, allPools, trace);
 
     let integrators = findProtocolsSharingUnderlying(
       yieldsRows.length ? yieldsRows : web.yieldsPools || [],
@@ -629,6 +724,7 @@ async function resolveContext(input, { trace = null } = {}) {
       nameHint,
       issuerSlug,
       yieldsRows,
+      morphoVault: morphoCtx.morphoVault || null,
       underlyingTokens: tokensFromRows(yieldsRows, vaultAddr),
       integrators,
       webResearch,
@@ -830,17 +926,64 @@ async function fetchProtocolDetails(integrators) {
 }
 
 async function enrichContextForScoring(ctx, { trace = null } = {}) {
+  const allPools = await fetchYieldsPoolsCached();
+  const rowOpts = rowOptsFromCtx(ctx);
+  let yieldsRows = hydrateYieldsRows(ctx.yieldsRows, allPools);
+  const primaryBefore = selectPrimaryYieldsRow(yieldsRows, rowOpts);
+  if (ctx.vaultAddress && !primaryBefore?.tvlUsd) {
+    yieldsRows = await resolveYieldsRowsWithMorpho({ ...ctx, yieldsRows }, allPools, trace);
+  }
+
   trace?.step?.("Fetching external data sources", {
     detail: "CoinGecko, CoinMarketCap, DefiLlama chart, inspector searches",
     kind: "source",
   });
-  const externalData = await gatherPoolExternalData(ctx, { webResearch: ctx.webResearch, trace }).catch((e) => ({
+  const externalData = await gatherPoolExternalData(
+    { ...ctx, yieldsRows },
+    { webResearch: ctx.webResearch, trace }
+  ).catch((e) => ({
     enabled: false,
     error: String(e?.message || e),
     sources: [],
     scoringHints: {},
   }));
-  const yieldsRows = applyExternalDataToYieldsRows(ctx.yieldsRows, externalData);
+  yieldsRows = applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts);
+
+  const primary = selectPrimaryYieldsRow(yieldsRows, rowOpts);
+  const poolMeta = await enrichPoolMetadataWithLlm({
+    poolLabel: ctx.label,
+    poolUrl: ctx.url,
+    issuerSlug: ctx.issuerSlug,
+    yieldsRow: primary,
+    webResearch: ctx.webResearch,
+    trace,
+  });
+  if (primary) {
+    const idx = yieldsRows.findIndex((r) => r?.pool && r.pool === primary.pool);
+    const safeIdx = idx >= 0 ? idx : yieldsRows.indexOf(primary);
+    const at = safeIdx >= 0 ? safeIdx : 0;
+    yieldsRows[at] = applyMetadataHintsToRow(yieldsRows[at], poolMeta);
+    if (ctx.morphoVault?.curator && !yieldsRows[at].curator) {
+      yieldsRows[at].curator = ctx.morphoVault.curator;
+      yieldsRows[at].curatorEvidence = `Morpho API curator ${ctx.morphoVault.curatorAddress || ""}`.trim();
+    }
+  }
+
+  const scoredRow = selectPrimaryYieldsRow(yieldsRows, rowOpts);
+  trace?.step?.("Scoring fields ready", {
+    kind: "info",
+    detail: [
+      scoredRow?.symbol ? `${scoredRow.symbol} · ${scoredRow.chain || ""}` : null,
+      scoredRow?.tvlUsd != null ? `TVL $${Math.round(scoredRow.tvlUsd).toLocaleString()}` : "TVL missing",
+      scoredRow?.count != null ? `${scoredRow.count} APY samples` : null,
+      scoredRow?.apyBase != null ? `apyBase ${Number(scoredRow.apyBase).toFixed(2)}%` : null,
+      scoredRow?.curator ? `curator: ${scoredRow.curator}` : null,
+      scoredRow?.oracleType ? `oracle: ${scoredRow.oracleType}` : "oracle: not resolved",
+    ]
+      .filter(Boolean)
+      .join(" · "),
+  });
+
   for (const s of externalData?.sources || []) {
     trace?.step?.(s.label || s.id || "Source", {
       kind: "source",
@@ -852,6 +995,7 @@ async function enrichContextForScoring(ctx, { trace = null } = {}) {
     ...ctx,
     yieldsRows,
     externalData,
+    poolMetadata: poolMeta,
     sourceNotes: buildPoolSourceNotes(externalData),
   };
 }
@@ -873,6 +1017,7 @@ export async function runPoolIntelligence(
   trace.step("Computing pool risk score", { detail: "P.1–P.9 methodology v2.0", kind: "llm" });
   const protocolDetails = await fetchProtocolDetails(ctx.integrators);
   const risk = buildPoolRisk(ctx, protocolDetails);
+  appendCriterionTrace(trace, risk);
   const poolScore = risk?.pool?.poolScore;
   trace.step("Pool risk score ready", {
     kind: "success",
