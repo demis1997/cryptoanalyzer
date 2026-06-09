@@ -18,6 +18,8 @@ const result = buildPoolRiskAssessment(
         apyBase: 7,
         apyReward: 3,
         utilization: 0.72,
+        lltv: 86,
+        tvlSource: "protocol_api",
         poolMeta: "MetaMorpho",
       },
     ],

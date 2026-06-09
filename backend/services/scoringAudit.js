@@ -21,9 +21,11 @@ export function applyVaultScoringMetaToRow(row, meta) {
   if (!row || !meta || typeof meta !== "object") return row;
   const next = { ...row };
 
-  if (meta.totalAssetsUsd != null && isFinite(Number(meta.totalAssetsUsd))) {
+  if (meta.totalAssetsUsd != null && isFinite(Number(meta.totalAssetsUsd)) && row.tvlSource !== "pool_page") {
     next.tvlUsd = Number(meta.totalAssetsUsd);
+    next.tvlSource = "protocol_api";
     next.tvlEvidence = meta.tvlEvidence || "Protocol API totalAssetsUsd";
+    next.tvlUncertain = false;
   }
   if (meta.apyPct != null && isFinite(Number(meta.apyPct))) {
     next.apyBase = Number(meta.apyPct);
@@ -55,12 +57,12 @@ export function applyVaultScoringMetaToRow(row, meta) {
 
 const CRITERION_FIELDS = {
   assetQuality: ["symbol", "underlyingTokens", "assetRankHint"],
-  liquidityExit: ["utilization", "utilizationRate"],
+  liquidityExit: ["utilization", "utilizationRate", "pendleDaysToMaturity", "daysToMaturity"],
   oracleQuality: ["oracleType", "oracle"],
   parameterSafety: ["lltv", "ltv", "capUtilization", "supplyCapFill"],
   depositorConcentration: ["depositorShares", "top1DepositorPct", "depositorSharePercents"],
   poolAge: ["poolCreatedAt", "createdAt", "count"],
-  poolTvl: ["tvlUsd"],
+  poolTvl: ["tvlUsd", "tvlSource", "tvlEvidence"],
   yieldQuality: ["apyBase", "apyReward", "apy", "apyCv30d", "sigma"],
   curatorQuality: ["curator"],
 };
@@ -127,7 +129,7 @@ export function auditTraceDetail(criterionId, criterion, auditEntry) {
           ? "N/A"
           : "—";
   const auditLine = formatCriterionAuditLine(criterionId, criterion.key, auditEntry);
-  return [scorePart, criterion.input, auditLine, criterion.confidenceReason || criterion.evidence]
+  return [scorePart, criterion.input, criterion.calcBreakdown, auditLine, criterion.confidenceReason || criterion.evidence]
     .filter(Boolean)
     .join(" · ");
 }

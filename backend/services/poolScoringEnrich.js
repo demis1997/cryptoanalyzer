@@ -68,7 +68,7 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
   if (scoringResearch?.formatted && trace) {
     trace.step("Scoring-focused web research", {
       kind: "source",
-      detail: `${scoringResearch.searches?.length || 0} query(s) · oracle / LLTV / curator / utilization`,
+      detail: `${scoringResearch.searches?.length || 0} query(s) · pool TVL / oracle / LLTV / utilization / Pendle maturity`,
       sources: (scoringResearch.searches || []).slice(0, 5).map((s) => ({
         label: s.query?.slice(0, 52) || "search",
         url: s.hits?.[0]?.url || null,
@@ -120,7 +120,11 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
       detail: [
         scoredRow?.symbol ? `${scoredRow.symbol} · ${scoredRow.project} · ${scoredRow.chain || ""}` : null,
         scoredRow?.pool ? `pool id ${String(scoredRow.pool).slice(0, 8)}…` : null,
-        scoredRow?.tvlUsd != null ? `TVL $${Math.round(scoredRow.tvlUsd).toLocaleString()}` : "TVL missing",
+        scoredRow?.tvlUsd != null
+          ? `TVL $${Math.round(scoredRow.tvlUsd).toLocaleString()} (${scoredRow.tvlSource || "?"})`
+          : scoredRow?.tvlUncertain
+            ? "TVL rejected (symbol-only DefiLlama)"
+            : "TVL missing — need pool page",
         scoredRow?.count != null ? `${scoredRow.count} APY samples` : null,
         scoredRow?.apyBase != null ? `apyBase ${Number(scoredRow.apyBase).toFixed(2)}%` : null,
         scoredRow?.utilization != null

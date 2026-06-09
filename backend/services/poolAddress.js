@@ -143,7 +143,7 @@ function scoreYieldsRowForVault(row, addr) {
   return score;
 }
 
-function rowMatchesNameHint(row, nameHint) {
+export function rowMatchesNameHint(row, nameHint) {
   const h = String(nameHint || "")
     .trim()
     .toLowerCase()

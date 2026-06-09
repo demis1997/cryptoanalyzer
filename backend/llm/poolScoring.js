@@ -123,28 +123,83 @@ function scoreLiquidityExit(poolType, row) {
     if (typeof util === "number" && isFinite(util)) {
       const u = util > 1 ? util : util * 100;
       let sc = 0.1;
-      if (u < 70) sc = 1.0;
-      else if (u < 80) sc = 0.85;
-      else if (u < 90) sc = 0.6;
-      else if (u < 95) sc = 0.3;
-      return { score: sc, input: `utilization ${u.toFixed(1)}%`, evidence: "Lending utilization (P.2)." };
+      let band = "≥95%";
+      if (u < 70) {
+        sc = 1.0;
+        band = "<70%";
+      } else if (u < 80) {
+        sc = 0.85;
+        band = "70–80%";
+      } else if (u < 90) {
+        sc = 0.6;
+        band = "80–90%";
+      } else if (u < 95) {
+        sc = 0.3;
+        band = "90–95%";
+      }
+      return {
+        score: sc,
+        input: `utilization ${u.toFixed(1)}%`,
+        evidence: row?.utilizationEvidence || `Lending utilization band ${band} → ${sc} (P.2).`,
+        calcBreakdown: `util=${u.toFixed(1)}% → band ${band} → score ${sc}`,
+      };
     }
     return {
-      score: 0.85,
-      input: "vault/lending (utilization unknown)",
-      evidence: "No utilization data — conservative default for supply-side vault.",
+      unavailable: true,
+      input: "utilization not found",
+      evidence:
+        "Utilization not in protocol API or pool page — criterion excluded (parse pool dashboard: utilization rate, supply/borrow utilization %).",
     };
   }
   if (t === "staking") {
-    return { score: 0.85, input: "staking/LST", evidence: "Assumed ≤1d exit unless queue known (P.2)." };
+    return {
+      unavailable: true,
+      input: "withdrawal queue unknown",
+      evidence: "Staking/LRT exit queue not parsed from pool page — criterion excluded (P.2).",
+    };
   }
   if (t === "amm_lp") {
-    return { score: 0.9, input: "AMM/LP", evidence: "Exit anytime with slippage risk (P.2)." };
+    return { score: 0.9, input: "AMM/LP", evidence: "Exit anytime with slippage risk (P.2).", calcBreakdown: "AMM/LP default 0.90" };
   }
   if (t === "pendle_pt") {
-    return { score: 0.8, input: "Pendle PT", evidence: "Fixed maturity; secondary market assumed (P.2)." };
+    const days = row?.pendleDaysToMaturity ?? row?.daysToMaturity;
+    if (typeof days === "number" && isFinite(days)) {
+      let baseSc = 0.9;
+      let band = ">90d";
+      if (days <= 0) {
+        baseSc = 1.0;
+        band = "matured";
+      } else if (days <= 30) {
+        baseSc = 0.7;
+        band = "≤30d";
+      } else if (days <= 90) {
+        baseSc = 0.8;
+        band = "31–90d";
+      }
+      const hasSecondary = row?.pendleSecondaryMarket;
+      const secondaryAdj = hasSecondary === false ? 0.3 : 0;
+      const sc = Math.max(0, baseSc - secondaryAdj);
+      const calcParts = [`daysToMaturity=${days} → band ${band} → base ${baseSc}`];
+      if (secondaryAdj) calcParts.push(`no secondary market −0.30 → ${sc}`);
+      return {
+        score: sc,
+        input: `${days}d to maturity${hasSecondary === false ? ", no secondary market" : hasSecondary ? ", secondary market" : ""}`,
+        evidence: row?.maturityEvidence || `Pendle PT maturity table (P.2).`,
+        calcBreakdown: calcParts.join("; "),
+      };
+    }
+    return {
+      unavailable: true,
+      input: "maturity not found",
+      evidence:
+        "Days to maturity not parsed from Pendle pool page — criterion excluded (look for: days to maturity, expiry date, time to maturity).",
+    };
   }
-  return { score: 0.85, input: "structured vault", evidence: "Standard vault withdrawal (P.2)." };
+  return {
+    unavailable: true,
+    input: "exit terms unknown",
+    evidence: "Structured vault cooldown/exit not found on pool page — criterion excluded (P.2).",
+  };
 }
 
 function scoreOracle(poolType, row) {
@@ -200,16 +255,24 @@ function scoreParameterSafety(poolType, row) {
       else if (c < 95) capMult = 0.65;
       else capMult = 0.4;
     }
+    const final = clamp01(lltvSc * capMult);
+    const capNote =
+      typeof capFill === "number"
+        ? `cap fill ${(capFill > 1 ? capFill : capFill * 100).toFixed(1)}% → mult ${capMult}`
+        : "no cap data → mult 1.0";
     return {
-      score: clamp01(lltvSc * capMult),
-      input: `LLTV ${pct.toFixed(1)}%${typeof capFill === "number" ? `, cap ${capFill}%` : ""}`,
-      evidence: "P.4 LLTV × cap multiplier.",
+      score: final,
+      input: `LLTV ${pct.toFixed(1)}%${typeof capFill === "number" ? `, cap ${(capFill > 1 ? capFill : capFill * 100).toFixed(1)}%` : ""}`,
+      evidence: row?.lltvEvidence || `P.4 LLTV band → ${lltvSc}; ${capNote}; final ${final.toFixed(3)}`,
+      calcBreakdown: `LLTV ${pct.toFixed(1)}% → ${lltvSc} × capMult ${capMult} = ${final.toFixed(3)}`,
     };
   }
-  if (poolType === "curated_vault") {
-    return { score: 0.75, input: "curated vault", evidence: "Curator-managed caps — parameters not in API." };
-  }
-  return { score: 0.8, input: "defaults", evidence: "LLTV/caps unknown — neutral-lenient default." };
+  return {
+    unavailable: true,
+    input: "LLTV/caps not found",
+    evidence:
+      "LLTV or collateral parameters not in protocol API or pool page — criterion excluded (parse: LLTV, LTV, loan-to-value, liquidation threshold).",
+  };
 }
 
 function computeHhi(shareFractions) {
@@ -350,16 +413,46 @@ function scorePoolAge(row, protocolListedAt) {
 }
 
 function scorePoolTvl(row) {
+  if (row?.tvlUncertain) {
+    return {
+      unavailable: true,
+      input: "symbol-only DefiLlama match",
+      evidence:
+        row?.tvlEvidence ||
+        "DefiLlama TVL is token/protocol aggregate, not this pool — parse pool page TVL or resolve vault address (P.7).",
+    };
+  }
   const tvl = Number(row?.tvlUsd);
   if (!isFinite(tvl) || tvl <= 0) {
-    return { unavailable: true, input: "unknown", evidence: "TVL missing from yields row (P.7)." };
+    return {
+      unavailable: true,
+      input: "pool TVL not found",
+      evidence:
+        "Pool-specific TVL not parsed from pool page or protocol API — criterion excluded (P.7). Do not use token-level DefiLlama TVL.",
+    };
   }
   let sc = 0.2;
-  if (tvl > 100_000_000) sc = 1.0;
-  else if (tvl >= 10_000_000) sc = 0.8;
-  else if (tvl >= 1_000_000) sc = 0.6;
-  else if (tvl >= 500_000) sc = 0.4;
-  return { score: sc, input: `$${Math.round(tvl).toLocaleString()}`, evidence: "Pool TVL (P.7)." };
+  let band = "<$500K";
+  if (tvl > 100_000_000) {
+    sc = 1.0;
+    band = ">$100M";
+  } else if (tvl >= 10_000_000) {
+    sc = 0.8;
+    band = "$10M–$100M";
+  } else if (tvl >= 1_000_000) {
+    sc = 0.6;
+    band = "$1M–$10M";
+  } else if (tvl >= 500_000) {
+    sc = 0.4;
+    band = "$500K–$1M";
+  }
+  const source = row?.tvlSource || "unknown";
+  return {
+    score: sc,
+    input: `$${Math.round(tvl).toLocaleString()}`,
+    evidence: row?.tvlEvidence || `Pool TVL band ${band} → ${sc} (source: ${source}, P.7).`,
+    calcBreakdown: `tvl=$${Math.round(tvl).toLocaleString()} (${source}) → band ${band} → score ${sc}`,
+  };
 }
 
 function scoreYieldQuality(row) {
@@ -383,22 +476,54 @@ function scoreYieldQuality(row) {
 
   const cv = row?.apyCv30d ?? row?.apyStabilityCv;
   let mult = 0.9;
+  let stabilityLabel = "default 0.90 (no CV)";
   if (typeof cv === "number") {
-    if (cv < 0.1) mult = 1.0;
-    else if (cv < 0.25) mult = 0.9;
-    else if (cv < 0.5) mult = 0.75;
-    else mult = 0.6;
+    if (cv < 0.1) {
+      mult = 1.0;
+      stabilityLabel = `CV ${cv.toFixed(3)} < 0.10 → mult 1.00`;
+    } else if (cv < 0.25) {
+      mult = 0.9;
+      stabilityLabel = `CV ${cv.toFixed(3)} < 0.25 → mult 0.90`;
+    } else if (cv < 0.5) {
+      mult = 0.75;
+      stabilityLabel = `CV ${cv.toFixed(3)} < 0.50 → mult 0.75`;
+    } else {
+      mult = 0.6;
+      stabilityLabel = `CV ${cv.toFixed(3)} ≥ 0.50 → mult 0.60`;
+    }
   } else {
     const sigma = Number(row?.sigma);
-    if (isFinite(sigma) && sigma < 0.5) mult = 0.95;
-    else if (isFinite(sigma) && sigma < 1.2) mult = 0.85;
-    else mult = 0.75;
+    if (isFinite(sigma) && sigma < 0.5) {
+      mult = 0.95;
+      stabilityLabel = `sigma ${sigma.toFixed(3)} < 0.50 → mult 0.95`;
+    } else if (isFinite(sigma) && sigma < 1.2) {
+      mult = 0.85;
+      stabilityLabel = `sigma ${sigma.toFixed(3)} < 1.20 → mult 0.85`;
+    } else {
+      mult = 0.75;
+      stabilityLabel = isFinite(sigma) ? `sigma ${sigma.toFixed(3)} → mult 0.75` : "no CV/sigma → mult 0.75";
+    }
   }
 
+  const final = clamp01(sourceSc * mult);
+  let sourceBand = "emissions-heavy";
+  if (baseShare >= 0.8) sourceBand = "≥80% organic";
+  else if (baseShare >= 0.6) sourceBand = "60–80% organic";
+  else if (baseShare >= 0.4) sourceBand = "40–60% organic";
+  else if (baseShare >= 0.2) sourceBand = "20–40% organic";
+  else if (baseShare > 0) sourceBand = "<20% organic";
+
   return {
-    score: clamp01(sourceSc * mult),
+    score: final,
     input: `${Math.round(baseShare * 100)}% organic APY${isFinite(apy) ? `, ${apy.toFixed(2)}% total` : ""}`,
-    evidence: "Yield source × stability proxy (P.8).",
+    evidence: `P.8: sourceScore ${sourceSc} × stabilityMult ${mult} = ${final.toFixed(3)}`,
+    calcBreakdown: [
+      `apyBase=${isFinite(apyBase) ? apyBase.toFixed(2) : "—"}%`,
+      `apyReward=${isFinite(apyReward) ? apyReward.toFixed(2) : "—"}%`,
+      `baseShare=${Math.round(baseShare * 100)}% (${sourceBand} → sourceScore ${sourceSc})`,
+      stabilityLabel,
+      `final = ${sourceSc} × ${mult} = ${final.toFixed(3)}`,
+    ].join(" · "),
   };
 }
 
@@ -735,6 +860,7 @@ export function buildPoolRiskAssessment(ctx, opts = {}) {
       score: result.na || result.unavailable ? null : clamp01(result.score),
       input: result.input || null,
       evidence: result.evidence || null,
+      calcBreakdown: result.calcBreakdown || null,
       confidence: meta.confidence,
       confidenceReason: meta.confidenceReason,
       sources: meta.sources,

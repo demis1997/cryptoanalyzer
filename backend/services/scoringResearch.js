@@ -22,15 +22,20 @@ export async function gatherScoringWebResearch({
   const ch = String(chain || "").trim();
 
   const slugRoot = slug.split("-")[0] || slug;
+  const isPendle = /pendle|pt-/i.test(`${label} ${sym} ${slug}`);
   const queries = [
+    sym && slug ? `${slug} ${sym} ${ch} pool TVL total liquidity market size deposits this pool` : null,
+    poolUrl ? `${poolUrl} TVL total liquidity total value locked assets` : null,
     sym && slug ? `${slug} ${sym} ${ch} pool oracle Chainlink Pyth TWAP liquidation price feed` : null,
     sym && slug ? `${slug} ${sym} LLTV LTV loan-to-value collateral liquidation threshold parameters` : null,
     label ? `"${label}" vault curator risk manager who manages` : null,
-    slug ? `${slug} ${sym || label} utilization rate supply cap borrow` : null,
+    slug ? `${slug} ${sym || label} utilization rate supply utilization borrow cap filled` : null,
+    isPendle ? `${label || sym} Pendle days to maturity expiry PT secondary market liquidity` : null,
+    isPendle ? `pendle ${sym} market liquidity TVL time to maturity redeem` : null,
     sym ? `defillama ${slug || label} ${sym} yields pool APY` : null,
     label ? `${label} DeFi yield source organic emissions rewards sustainability` : null,
     slug ? `${slugRoot} documentation oracle risk parameters vault` : null,
-    poolUrl ? `${poolUrl} risk parameters oracle LLTV` : null,
+    poolUrl ? `${poolUrl} risk parameters oracle LLTV utilization` : null,
   ].filter(Boolean);
 
   const maxQ = Number(process.env.POOL_SCORING_SEARCH_QUERIES || 5) || 5;

@@ -60,6 +60,10 @@ export async function enrichPoolMetadataWithLlm({
   if (!yieldsRow?.oracleType) missing.push("oracleType");
   if (yieldsRow?.lltv == null) missing.push("lltvPct");
   if (yieldsRow?.utilization == null) missing.push("utilizationPct");
+  if (!yieldsRow?.tvlUsd || yieldsRow?.tvlUncertain) missing.push("poolTvlUsd");
+  if (/pendle|pt-/i.test(`${poolLabel} ${yieldsRow?.symbol || ""}`) && yieldsRow?.pendleDaysToMaturity == null) {
+    missing.push("daysToMaturity");
+  }
   if (!yieldsRow?.curator && /vault|curat|metamorpho|euler/i.test(`${poolLabel} ${issuerSlug}`)) {
     missing.push("curator");
   }
@@ -80,11 +84,20 @@ Return JSON only — no markdown:
   "oracleEvidence": string,
   "lltvPct": number | null,
   "utilizationPct": number | null,
+  "poolTvlUsd": number | null,
+  "poolTvlEvidence": string,
+  "daysToMaturity": number | null,
+  "pendleSecondaryMarket": boolean | null,
+  "maturityEvidence": string,
   "confidence": "high" | "medium" | "low"
 }
 Rules:
 - curator: named vault curator (Steakhouse, Gauntlet, Re7, MEV Capital, etc.) — null if permissionless market with no curator.
 - oracleType: only if explicitly mentioned in research (Chainlink, Pyth, TWAP window, etc.).
+- poolTvlUsd: THIS POOL's TVL/liquidity/total assets on the pool detail page — NOT protocol-wide or token market cap. Look for: "TVL", "Total liquidity", "Total value locked", "Market size", "Total deposits", "Assets under management", "$XM in pool".
+- utilizationPct: supply/borrow utilization % from pool dashboard (not protocol aggregate).
+- daysToMaturity: Pendle PT / fixed-term — days until maturity, expiry date, "time to maturity".
+- pendleSecondaryMarket: true if PT trades on DEX/secondary market; false if explicitly no secondary liquidity.
 - Do NOT invent addresses or firm names not supported by the text.
 - Morpho MetaMorpho vaults usually have a named curator on morpho.org or docs.`;
 
@@ -120,6 +133,20 @@ Return JSON only.`.trim();
     if (typeof j.lltvPct === "number" && isFinite(j.lltvPct)) out.hints.lltv = j.lltvPct;
     if (typeof j.utilizationPct === "number" && isFinite(j.utilizationPct)) {
       out.hints.utilization = j.utilizationPct / 100;
+      out.hints.utilizationEvidence = "LLM from web research";
+    }
+    if (typeof j.poolTvlUsd === "number" && isFinite(j.poolTvlUsd) && j.poolTvlUsd > 0) {
+      out.hints.poolTvlUsd = j.poolTvlUsd;
+      out.hints.tvlSource = "pool_page";
+      out.hints.tvlEvidence = j.poolTvlEvidence || "LLM from pool page text";
+    }
+    if (typeof j.daysToMaturity === "number" && isFinite(j.daysToMaturity)) {
+      out.hints.pendleDaysToMaturity = Math.round(j.daysToMaturity);
+      out.hints.daysToMaturity = out.hints.pendleDaysToMaturity;
+      out.hints.maturityEvidence = j.maturityEvidence || "LLM from pool page";
+    }
+    if (typeof j.pendleSecondaryMarket === "boolean") {
+      out.hints.pendleSecondaryMarket = j.pendleSecondaryMarket;
     }
     out.llmConfidence = j.confidence || "medium";
     trace?.step?.("Pool metadata from LLM", {
@@ -166,8 +193,30 @@ export function applyMetadataHintsToRow(row, meta) {
     next.oracleType = "Custom single-source";
     next.oracleEvidence = hints.oracleEvidence || null;
   }
-  if (hints.lltv != null) next.lltv = hints.lltv;
-  if (hints.utilization != null) next.utilization = hints.utilization;
+  if (hints.lltv != null) {
+    next.lltv = hints.lltv;
+    if (hints.lltvEvidence) next.lltvEvidence = hints.lltvEvidence;
+  }
+  if (hints.utilization != null) {
+    next.utilization = hints.utilization;
+    if (hints.utilizationEvidence) next.utilizationEvidence = hints.utilizationEvidence;
+  }
   if (hints.capUtilization != null) next.capUtilization = hints.capUtilization;
+  if (hints.poolTvlUsd != null && isFinite(Number(hints.poolTvlUsd))) {
+    next.defillamaTvlUsd = next.tvlUsd;
+    next.tvlUsd = Number(hints.poolTvlUsd);
+    next.tvlSource = hints.tvlSource || "pool_page";
+    next.tvlEvidence = hints.tvlEvidence || null;
+    next.tvlUncertain = false;
+  }
+  if (hints.pendleDaysToMaturity != null) {
+    next.pendleDaysToMaturity = hints.pendleDaysToMaturity;
+    next.daysToMaturity = hints.daysToMaturity;
+    if (hints.maturityEvidence) next.maturityEvidence = hints.maturityEvidence;
+  }
+  if (hints.pendleSecondaryMarket != null) {
+    next.pendleSecondaryMarket = hints.pendleSecondaryMarket;
+    next.pendleSecondaryEvidence = hints.pendleSecondaryEvidence;
+  }
   return next;
 }

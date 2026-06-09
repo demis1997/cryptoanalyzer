@@ -4,7 +4,8 @@
  */
 import fetch from "node-fetch";
 import { searchWeb } from "./webResearch.js";
-import { selectPrimaryYieldsRow } from "./poolAddress.js";
+import { selectPrimaryYieldsRow, yieldsRowMatchesVault, rowMatchesNameHint } from "./poolAddress.js";
+import { parsePoolPageMetrics, mergePageMetricsIntoHints } from "./poolPageParse.js";
 import { readErc20Metadata } from "./onChainToken.js";
 
 const CG_PLATFORM = {
@@ -205,23 +206,10 @@ export async function gatherInspectorSearches({ issuerSlug, poolLabel, symbol } 
   return { enabled: true, searches, snippets, inspectors: searches.map((s) => s.inspector) };
 }
 
-/** Pull oracle / LLTV / utilization hints from crawled + inspector text for scoring. */
+/** Pull oracle / LLTV / utilization / pool TVL / Pendle maturity from crawled + inspector text. */
 export function parseScoringHintsFromText(text) {
   const t = String(text || "");
-  const hints = {};
-  if (/chainlink/i.test(t)) {
-    hints.oracleType = /derived|composite|wsteth\/eth/i.test(t) ? "chainlink_derived" : "chainlink";
-  } else if (/pyth/i.test(t)) hints.oracleType = "pyth";
-  else if (/twap/i.test(t)) hints.oracleType = /30\s*min|1800/i.test(t) ? "twap_long" : "twap_short";
-
-  const lltv = t.match(/\b(?:LLTV|LTV|loan[- ]to[- ]value|liquidation\s+threshold)[:\s]*(\d{2,3}(?:\.\d+)?)\s*%/i);
-  if (lltv) hints.lltv = Number(lltv[1]);
-
-  const util = t.match(/\butilization[:\s]*(\d{2,3}(?:\.\d+)?)\s*%/i);
-  if (util) hints.utilization = Number(util[1]) / 100;
-
-  const cap = t.match(/\b(?:supply|borrow)\s+cap[:\s]*(\d{2,3}(?:\.\d+)?)\s*%\s*(?:filled|util)/i);
-  if (cap) hints.capUtilization = Number(cap[1]) / 100;
+  const hints = parsePoolPageMetrics(t);
 
   const defiScore = t.match(/defi\s*safety\s*score[:\s]*(\d{1,3})\s*\/\s*100/i);
   if (defiScore) hints.defiSafetyScore = Number(defiScore[1]);
@@ -230,6 +218,20 @@ export function parseScoringHintsFromText(text) {
   if (expRisk) hints.exponentialRating = expRisk[2];
 
   return hints;
+}
+
+function inferTvlMatchQuality(row, rowOpts = {}) {
+  const vault = rowOpts.vaultAddress ? String(rowOpts.vaultAddress).toLowerCase() : null;
+  if (vault && /^0x[a-f0-9]{40}$/.test(vault) && yieldsRowMatchesVault(row, vault, rowOpts.chain)) {
+    return "vault";
+  }
+  if (row?.tvlSource === "pool_page" || row?.tvlSource === "protocol_api") return "verified";
+  const poolId = String(row?.pool || "").toLowerCase();
+  const meta = String(row?.poolMeta || "").toLowerCase();
+  if (vault && (poolId.includes(vault) || meta.includes(vault))) return "pool_id";
+  if (rowOpts.nameHint && rowMatchesNameHint(row, rowOpts.nameHint) && row?.pool) return "name_hint";
+  if (row?.pool) return "defillama_pool";
+  return "symbol";
 }
 
 function normalizeChainKey(chain) {
@@ -362,11 +364,16 @@ export async function gatherPoolExternalData(ctx, { webResearch = null } = {}) {
     }
     const blob = [
       webResearch?.formatted || "",
+      webResearch?.crawl?.formatted || "",
+      webResearch?.scoringResearch?.formatted || "",
       ...(inspectors.searches || []).flatMap((s) => (s.hits || []).map((h) => `${h.title} ${h.snippet}`)),
     ].join("\n");
-    Object.assign(scoringHints, parseScoringHintsFromText(blob));
+    Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, parseScoringHintsFromText(blob)));
     if (webResearch?.crawl?.formatted) {
-      Object.assign(scoringHints, parseScoringHintsFromText(webResearch.crawl.formatted));
+      Object.assign(
+        scoringHints,
+        mergePageMetricsIntoHints(scoringHints, parseScoringHintsFromText(webResearch.crawl.formatted))
+      );
     }
   }
 
@@ -408,11 +415,46 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
   const idx = primaryRow ? rows.findIndex((r) => r === primaryRow || r?.pool === primaryRow?.pool) : 0;
   const safeIdx = idx >= 0 ? idx : 0;
   const primary = { ...rows[safeIdx] };
+  const tvlMatchQuality = inferTvlMatchQuality(primary, rowOpts);
+  primary.tvlMatchQuality = tvlMatchQuality;
+
+  if (hints.poolTvlUsd != null && isFinite(Number(hints.poolTvlUsd))) {
+    primary.defillamaTvlUsd = primary.tvlUsd;
+    primary.tvlUsd = Number(hints.poolTvlUsd);
+    primary.tvlSource = hints.tvlSource || "pool_page";
+    primary.tvlEvidence = hints.tvlEvidence || "Parsed from pool web page";
+    primary.tvlUncertain = false;
+  } else if (tvlMatchQuality === "symbol") {
+    primary.defillamaTvlUsd = primary.tvlUsd;
+    primary.tvlUsd = null;
+    primary.tvlUncertain = true;
+    primary.tvlEvidence =
+      "DefiLlama yields row matched by symbol only — not this pool's TVL; parse pool page or vault address";
+  } else if (primary.tvlUsd != null) {
+    primary.tvlSource = primary.tvlSource || (tvlMatchQuality === "vault" ? "defillama_vault" : "defillama_pool");
+    primary.tvlUncertain = false;
+  }
+
   if (hints.apyCv30d != null) primary.apyCv30d = hints.apyCv30d;
-  if (hints.utilization != null) primary.utilization = hints.utilization;
-  if (hints.lltv != null) primary.lltv = hints.lltv;
+  if (hints.utilization != null) {
+    primary.utilization = hints.utilization;
+    if (hints.utilizationEvidence) primary.utilizationEvidence = hints.utilizationEvidence;
+  }
+  if (hints.lltv != null) {
+    primary.lltv = hints.lltv;
+    if (hints.lltvEvidence) primary.lltvEvidence = hints.lltvEvidence;
+  }
   if (hints.capUtilization != null) primary.capUtilization = hints.capUtilization;
   if (hints.poolCreatedAt != null) primary.poolCreatedAt = hints.poolCreatedAt;
+  if (hints.pendleDaysToMaturity != null) {
+    primary.pendleDaysToMaturity = hints.pendleDaysToMaturity;
+    primary.daysToMaturity = hints.daysToMaturity;
+    if (hints.maturityEvidence) primary.maturityEvidence = hints.maturityEvidence;
+  }
+  if (hints.pendleSecondaryMarket != null) {
+    primary.pendleSecondaryMarket = hints.pendleSecondaryMarket;
+    primary.pendleSecondaryEvidence = hints.pendleSecondaryEvidence;
+  }
   if (externalData?.defillamaChart?.firstTimestampMs) {
     primary.poolCreatedAt = primary.poolCreatedAt || externalData.defillamaChart.firstTimestampMs;
   }
