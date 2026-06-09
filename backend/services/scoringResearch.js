@@ -24,8 +24,9 @@ export async function gatherScoringWebResearch({
   const slugRoot = slug.split("-")[0] || slug;
   const isPendle = /pendle|pt-/i.test(`${label} ${sym} ${slug}`);
   const queries = [
+    sym && slug ? `site:dune.com ${slug} ${sym} pool TVL liquidity` : null,
     sym && slug ? `${slug} ${sym} ${ch} pool TVL total liquidity market size deposits this pool` : null,
-    poolUrl ? `${poolUrl} TVL total liquidity total value locked assets` : null,
+    poolUrl ? `${poolUrl} TVL total liquidity total value locked assets utilization` : null,
     sym && slug ? `${slug} ${sym} ${ch} pool oracle Chainlink Pyth TWAP liquidation price feed` : null,
     sym && slug ? `${slug} ${sym} LLTV LTV loan-to-value collateral liquidation threshold parameters` : null,
     label ? `"${label}" vault curator risk manager who manages` : null,

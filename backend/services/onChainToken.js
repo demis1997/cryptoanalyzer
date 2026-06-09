@@ -1,6 +1,7 @@
-import { createPublicClient, http, parseAbi } from "viem";
+import { createPublicClient, http, parseAbi, formatUnits } from "viem";
 import { arbitrum, base, mainnet, optimism, polygon } from "viem/chains";
 import { normalizePoolChain } from "./poolAddress.js";
+import { moralisTokenPriceUsd } from "./moralisClient.js";
 
 const ERC20_ABI = parseAbi([
   "function symbol() view returns (string)",
@@ -8,7 +9,10 @@ const ERC20_ABI = parseAbi([
   "function decimals() view returns (uint8)",
 ]);
 
-const ERC4626_ABI = parseAbi(["function asset() view returns (address)"]);
+const ERC4626_ABI = parseAbi([
+  "function asset() view returns (address)",
+  "function totalAssets() view returns (uint256)",
+]);
 
 const CHAINS = {
   ethereum: mainnet,
@@ -64,6 +68,56 @@ export async function readErc20Metadata(address, chain = "ethereum") {
       name: cleanSymbol(name) || null,
       decimals: typeof decimals === "number" ? decimals : null,
       source: "on_chain_erc20",
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function tokenUsdPrice(assetAddress, chain) {
+  const moralis = await moralisTokenPriceUsd(assetAddress, chain);
+  if (moralis?.usdPrice) return moralis.usdPrice;
+  return null;
+}
+
+/**
+ * ERC-4626 vault TVL: totalAssets() × underlying USD price (viem + Moralis).
+ */
+export async function readErc4626VaultTvlUsd(vaultAddress, chain = "ethereum") {
+  const addr = String(vaultAddress || "").trim().toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(addr)) return null;
+  try {
+    const client = clientForChain(chain);
+    const [totalAssets, underlying] = await Promise.all([
+      client.readContract({ address: addr, abi: ERC4626_ABI, functionName: "totalAssets" }).catch(() => null),
+      readErc4626Underlying(addr, chain),
+    ]);
+    if (totalAssets == null || !underlying?.assetAddress) return null;
+    const decimals = underlying.assetMeta?.decimals ?? 18;
+    const amount = Number(formatUnits(totalAssets, decimals));
+    if (!isFinite(amount) || amount <= 0) return null;
+    const price = await tokenUsdPrice(underlying.assetAddress, chain);
+    if (!price) {
+      return {
+        tvlUsd: null,
+        totalAssetsRaw: String(totalAssets),
+        underlyingAmount: amount,
+        underlyingAddress: underlying.assetAddress,
+        underlyingSymbol: underlying.assetMeta?.symbol,
+        source: "on_chain_erc4626",
+        evidence: "totalAssets on-chain; USD price unavailable (set MORALIS_API_KEY)",
+      };
+    }
+    const tvlUsd = amount * price;
+    return {
+      tvlUsd,
+      totalAssetsRaw: String(totalAssets),
+      underlyingAmount: amount,
+      underlyingAddress: underlying.assetAddress,
+      underlyingSymbol: underlying.assetMeta?.symbol,
+      usdPrice: price,
+      source: "on_chain",
+      evidence: `ERC-4626 totalAssets ${amount.toLocaleString()} ${underlying.assetMeta?.symbol || "underlying"} × $${price.toFixed(4)}`,
     };
   } catch {
     return null;

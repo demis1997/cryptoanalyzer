@@ -23,6 +23,7 @@ export async function enrichPoolMetadataWithLlm({
   issuerSlug,
   yieldsRow,
   webResearch,
+  poolIdentity = null,
   trace = null,
 } = {}) {
   const out = { hints: {}, sources: [] };
@@ -36,6 +37,7 @@ export async function enrichPoolMetadataWithLlm({
     webResearch?.formatted || "",
     webResearch?.crawl?.formatted || "",
     webResearch?.scoringResearch?.formatted || "",
+    webResearch?.duneResearch?.formatted || "",
   ].join("\n");
   Object.assign(out.hints, parseScoringHintsFromText(blob));
 
@@ -73,9 +75,11 @@ export async function enrichPoolMetadataWithLlm({
     detail: poolLabel || poolUrl || issuerSlug || "",
   });
 
-  const system = `You extract factual pool/vault metadata for DeFi risk scoring from web research and DefiLlama data.
+  const tvlCandidates = poolIdentity?.tvlCandidates || [];
+  const system = `You extract factual pool/vault metadata for DeFi risk scoring by comparing MULTIPLE sources.
 Works for ANY protocol (Aave, Morpho, Pendle, Euler, Curve, Compound, etc.) — not Morpho-specific.
-You cannot browse the web. Only use WEB RESEARCH and DEFILLAMA sections.
+You cannot browse the web. Use WEB RESEARCH, DUNE, ON-CHAIN, and DEFILLAMA sections only.
+Prefer pool-specific protocol UI / Dune dashboard / on-chain over aggregate DefiLlama token TVL.
 Return JSON only — no markdown:
 {
   "curator": string | null,
@@ -106,8 +110,14 @@ Pool label: ${poolLabel || "unknown"}
 Pool URL: ${poolUrl || "n/a"}
 Issuer (DefiLlama): ${issuerSlug || "unknown"}
 
-DefiLlama yields row:
+DefiLlama yields row (reference only — may be wrong pool or token-level TVL):
 ${JSON.stringify(rowSummary, null, 2)}
+
+TVL CANDIDATES FROM OTHER SOURCES (pick pool-specific value; ignore token/protocol aggregates):
+${tvlCandidates.length ? JSON.stringify(tvlCandidates, null, 2) : "none yet"}
+
+POOL IDENTITY (on-chain / resolver):
+${poolIdentity ? JSON.stringify(poolIdentity, null, 2) : "unknown"}
 
 FIELDS STILL MISSING (prioritize finding these in research):
 ${missing.length ? missing.join(", ") : "none — confirm or refine values above"}

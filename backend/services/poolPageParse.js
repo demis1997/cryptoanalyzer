@@ -23,18 +23,23 @@ function moneyFromMatch(m) {
 const TVL_PATTERNS = [
   /\b(?:pool|market|vault)\s+tvl[:\s]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
   /\btvl[:\s]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
-  /\btotal\s+(?:value\s+locked|liquidity|assets|deposits?|supply)[:\s]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
+  /\btotal\s+(?:value\s+locked|liquidity|assets|deposits?|supply|size)[:\s]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
   /\b(?:total\s+)?assets\s+under\s+management[:\s]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
-  /\b(?:deposited|supplied|liquidity)\s*(?:in\s+pool)?[:\s]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
-  /\bmarket\s+(?:size|liquidity)[:\s]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
-  /\$\s*([\d,.]+)\s*([kmbt])?\s+(?:tvl|total\s+liquidity|in\s+(?:the\s+)?pool)\b/i,
+  /\b(?:deposited|supplied|liquidity|capital)\s*(?:in\s+pool)?[:\s]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
+  /\bmarket\s+(?:size|liquidity|cap)[:\s]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
+  /\b(?:net\s+)?assets[:\s]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
+  /\b(?:pool|vault)\s+balance[:\s]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
+  /\$\s*([\d,.]+)\s*([kmbt])?\s+(?:tvl|total\s+liquidity|in\s+(?:the\s+)?pool|deposited)\b/i,
+  /\b([\d,.]+)\s*([kmbt])?\s+usd\s+(?:tvl|liquidity|deposited|in\s+pool)\b/i,
 ];
 
 const UTIL_PATTERNS = [
   /\butilization(?:\s+rate)?[:\s]*(\d{2,3}(?:\.\d+)?)\s*%/i,
-  /\b(?:supply|borrow)\s+utilization[:\s]*(\d{2,3}(?:\.\d+)?)\s*%/i,
+  /\b(?:supply|borrow|lending)\s+utilization[:\s]*(\d{2,3}(?:\.\d+)?)\s*%/i,
   /\b(\d{2,3}(?:\.\d+)?)\s*%\s+utilized\b/i,
   /\bcurrent\s+utilization[:\s]*(\d{2,3}(?:\.\d+)?)\s*%/i,
+  /\b(?:pool|market)\s+utilization[:\s]*(\d{2,3}(?:\.\d+)?)\s*%/i,
+  /\bcapacity\s+used[:\s]*(\d{2,3}(?:\.\d+)?)\s*%/i,
 ];
 
 const LLTV_PATTERNS = [
@@ -51,6 +56,9 @@ const MATURITY_PATTERNS = [
   /\bexpires?\s+(?:in\s+)?(\d{1,4})\s*days?\b/i,
   /\bdays?\s+until\s+(?:maturity|expiry)[:\s]*(\d{1,4})\b/i,
   /\btime\s+to\s+maturity[:\s]*(\d{1,4})\s*days?\b/i,
+  /\b(?:pt|principal\s+token)\s+maturity[:\s]*(\d{1,4})\s*days?\b/i,
+  /\bredemption\s+date[:\s]*(\d{1,4})\s*days?\b/i,
+  /\b(?:fixed|term)\s+(?:end|expiry)[:\s]*(\d{1,4})\s*days?\b/i,
 ];
 
 function firstMatchAmount(text, patterns) {

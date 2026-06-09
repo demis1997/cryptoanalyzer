@@ -12,6 +12,7 @@ import { resolveVaultToYields } from "./poolResolver.js";
 import { enrichPoolMetadataWithLlm, applyMetadataHintsToRow } from "./poolEnrich.js";
 import { gatherScoringWebResearch, mergeResearchBlobs } from "./scoringResearch.js";
 import { applyVaultScoringMetaToRow } from "./scoringAudit.js";
+import { resolvePoolMetrics } from "./poolMetricsResolver.js";
 
 function rowOptsFromCtx(ctx) {
   return {
@@ -76,8 +77,20 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
     });
   }
 
-  const externalData = await gatherPoolExternalData(
+  const metricsResolution = await resolvePoolMetrics(
     { ...ctx, yieldsRows },
+    { webResearch: mergedWebResearch, yieldsRow: primaryForResearch, trace }
+  ).catch(() => ({ scoringHints: {}, poolIdentity: null, sources: [] }));
+
+  if (metricsResolution?.poolIdentity) {
+    ctx.poolIdentity = metricsResolution.poolIdentity;
+    if (metricsResolution.poolIdentity.address && !ctx.vaultAddress) {
+      ctx.vaultAddress = metricsResolution.poolIdentity.address;
+    }
+  }
+
+  const externalData = await gatherPoolExternalData(
+    { ...ctx, yieldsRows, metricsResolution },
     { webResearch: mergedWebResearch, trace }
   ).catch((e) => ({
     enabled: false,
@@ -85,6 +98,16 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
     sources: [],
     scoringHints: {},
   }));
+
+  if (metricsResolution?.scoringHints) {
+    externalData.scoringHints = {
+      ...(externalData.scoringHints || {}),
+      ...metricsResolution.scoringHints,
+    };
+    if (metricsResolution.sources?.length) {
+      externalData.sources = [...(externalData.sources || []), ...metricsResolution.sources];
+    }
+  }
 
   yieldsRows = applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts);
 
@@ -95,6 +118,7 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
     issuerSlug: ctx.issuerSlug,
     yieldsRow: primary,
     webResearch: mergedWebResearch,
+    poolIdentity: metricsResolution?.poolIdentity || ctx.poolIdentity,
     trace,
   });
 
@@ -154,5 +178,7 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
     externalData,
     poolMetadata: poolMeta,
     primaryRow: scoredRow,
+    poolIdentity: ctx.poolIdentity || metricsResolution?.poolIdentity || null,
+    metricsResolution,
   };
 }

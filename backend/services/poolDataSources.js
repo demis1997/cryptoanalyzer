@@ -258,7 +258,7 @@ export async function gatherPoolExternalData(ctx, { webResearch = null } = {}) {
   });
   const sources = [];
   const notes = [];
-  const scoringHints = {};
+  const scoringHints = { ...(ctx?.metricsResolution?.scoringHints || {}) };
   let chart = null;
 
   if (row?.pool && enabled("POOL_DEFILLAMA_CHART", true)) {
@@ -424,15 +424,19 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
     primary.tvlSource = hints.tvlSource || "pool_page";
     primary.tvlEvidence = hints.tvlEvidence || "Parsed from pool web page";
     primary.tvlUncertain = false;
-  } else if (tvlMatchQuality === "symbol") {
-    primary.defillamaTvlUsd = primary.tvlUsd;
-    primary.tvlUsd = null;
-    primary.tvlUncertain = true;
-    primary.tvlEvidence =
-      "DefiLlama yields row matched by symbol only — not this pool's TVL; parse pool page or vault address";
-  } else if (primary.tvlUsd != null) {
-    primary.tvlSource = primary.tvlSource || (tvlMatchQuality === "vault" ? "defillama_vault" : "defillama_pool");
-    primary.tvlUncertain = false;
+  } else if (!hints.poolTvlUsd) {
+    const allowDl = /^(1|true|yes|on)$/i.test(String(process.env.POOL_DEFILLAMA_TVL || "0").trim());
+    if (tvlMatchQuality === "symbol" || !allowDl) {
+      primary.defillamaTvlUsd = primary.tvlUsd;
+      primary.tvlUsd = null;
+      primary.tvlUncertain = true;
+      primary.tvlEvidence = allowDl
+        ? "DefiLlama yields row matched by symbol only — not this pool's TVL; parse pool page or vault address"
+        : "DefiLlama TVL disabled for scoring (POOL_DEFILLAMA_TVL=0) — use pool page, on-chain, or Dune";
+    } else if (primary.tvlUsd != null) {
+      primary.tvlSource = primary.tvlSource || (tvlMatchQuality === "vault" ? "defillama_vault" : "defillama_pool");
+      primary.tvlUncertain = false;
+    }
   }
 
   if (hints.apyCv30d != null) primary.apyCv30d = hints.apyCv30d;
@@ -455,6 +459,9 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
     primary.pendleSecondaryMarket = hints.pendleSecondaryMarket;
     primary.pendleSecondaryEvidence = hints.pendleSecondaryEvidence;
   }
+  if (hints.poolAddress) primary.vaultAddress = hints.poolAddress;
+  if (hints.poolName) primary.vaultTokenName = hints.poolName;
+  if (hints.poolSymbol) primary.vaultTokenSymbol = hints.poolSymbol;
   if (externalData?.defillamaChart?.firstTimestampMs) {
     primary.poolCreatedAt = primary.poolCreatedAt || externalData.defillamaChart.firstTimestampMs;
   }
