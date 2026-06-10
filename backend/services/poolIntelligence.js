@@ -44,6 +44,7 @@ function appendCriterionTrace(trace, risk, ctx) {
     label: ctx?.label,
     issuerSlug: ctx?.issuerSlug,
     integrators: ctx?.integrators,
+    url: ctx?.url,
   });
   const audit = buildScoringDataAudit(row, ctx || {}, poolType);
 
@@ -117,8 +118,14 @@ function parsePoolInput({ url, address, chain, project, symbolHint, query } = {}
       kind: "url",
       url: target.url,
       vaultAddress: target.vaultAddress,
+      marketId: target.marketId || null,
+      underlyingAsset: target.underlyingAsset || null,
+      protocolKind: target.protocolKind || null,
+      marketSlug: target.marketSlug || null,
+      solanaAddress: target.solanaAddress || null,
       chain: target.chain,
       nameHint: target.nameHint,
+      issuerSlug: target.issuerSlug || null,
       label: target.nameHint || target.url,
     };
   }
@@ -595,9 +602,14 @@ async function resolveContext(input, { trace = null } = {}) {
     const resolveCtx = {
       yieldsRows,
       vaultAddress: vaultAddr,
+      marketId: parsed.marketId || null,
+      underlyingAsset: parsed.underlyingAsset || null,
+      protocolKind: parsed.protocolKind || null,
+      marketSlug: parsed.marketSlug || null,
+      solanaAddress: parsed.solanaAddress || null,
       chain: chainHint,
       nameHint,
-      issuerSlug: slug,
+      issuerSlug: parsed.issuerSlug || slug,
       url: parsed.url,
     };
     yieldsRows = await resolveYieldsRowsUniversal(resolveCtx, allPools, trace);
@@ -952,7 +964,7 @@ async function fetchProtocolDetails(integrators) {
 
 async function enrichContextForScoring(ctx, { trace = null } = {}) {
   trace?.step?.("Fetching external data sources", {
-    detail: "DefiLlama chart, CoinGecko, CMC, inspector + scoring web research",
+    detail: "Web search + crawl (primary), protocol API, Dune, on-chain; DefiLlama APY/chart off by default",
     kind: "source",
   });
   const enriched = await enrichYieldsForScoring(ctx, { trace, webResearchIn: ctx.webResearch });

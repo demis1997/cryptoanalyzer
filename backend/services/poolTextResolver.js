@@ -58,7 +58,7 @@ export async function resolvePoolFromTextQuery(query, { trace = null } = {}) {
     searches.push(s);
     for (const h of s.hits || []) {
       const url = String(h.url || "");
-      if (/morpho\.org|pendle\.finance|aave\.com|euler\.finance|curve\.fi|defillama\.com\/yields/i.test(url)) {
+      if (/morpho\.org|pendle\.finance|aave\.com|spark\.fi|compound\.finance|maple\.finance|fluid\.io|kamino\.com|hyperliquid\.xyz|euler\.finance|curve\.fi|defillama\.com\/yields/i.test(url)) {
         candidateUrls.push(url);
       }
       const addrs = filterRealAddresses([...String(`${h.title} ${h.snippet} ${url}`).matchAll(/0x[a-fA-F0-9]{40}/g)].map((m) => m[0]));

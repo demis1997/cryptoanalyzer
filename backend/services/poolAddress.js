@@ -1,6 +1,7 @@
 /**
  * Pool / vault address parsing and placeholder filtering (shared across discovery + scoring).
  */
+import { parseProtocolPoolUrl } from "./protocolUrlParse.js";
 
 const PLACEHOLDER_EXACT = new Set(
   [
@@ -51,63 +52,11 @@ export function filterRealAddresses(addrs) {
   );
 }
 
-function humanizeSegment(seg) {
-  return String(seg || "")
-    .replace(/-pool$/i, "")
-    .replace(/-vault$/i, "")
-    .replace(/\.html?$/i, "")
-    .replace(/-/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 /**
- * Parse pool marketing URL: vault contract, chain hint, human name from path.
+ * Parse pool marketing URL: vault contract, market id, chain, protocol kind.
  */
 export function extractPoolTargetFromUrl(rawUrl) {
-  const url = String(rawUrl || "").trim();
-  const out = { url, vaultAddress: null, chain: null, nameHint: null };
-  if (!/^https?:\/\//i.test(url)) return out;
-
-  try {
-    const u = new URL(url);
-    const path = decodeURIComponent(u.pathname || "");
-    const search = decodeURIComponent(`${u.search || ""}${u.hash || ""}`);
-    const hay = `${path} ${search}`;
-
-    const chainAddr = hay.match(
-      /(ethereum|arbitrum|optimism|base|polygon|avalanche|bsc|hyperliquid_l1)[:\/](0x[a-fA-F0-9]{40})/i
-    );
-    if (chainAddr && !isPlaceholderAddress(chainAddr[2])) {
-      out.chain = normalizePoolChain(chainAddr[1]);
-      out.vaultAddress = chainAddr[2].toLowerCase();
-    }
-
-    const found = filterRealAddresses([...hay.matchAll(/0x[a-fA-F0-9]{40}/gi)].map((m) => m[0]));
-    if (!out.vaultAddress && found.length) {
-      const inPath = found.filter((a) => path.toLowerCase().includes(a));
-      out.vaultAddress = (inPath.length ? inPath[inPath.length - 1] : found[found.length - 1]).toLowerCase();
-    }
-
-    const segments = path.split("/").filter(Boolean);
-    const nameSegs = segments.filter(
-      (s) =>
-        !/^0x[a-fA-F0-9]{40}$/i.test(s) &&
-        !/^(ethereum|arbitrum|optimism|base|polygon|avalanche|bsc|hyperliquid_l1)$/i.test(s)
-    );
-    const hints = nameSegs.map(humanizeSegment).filter((s) => s.length > 2);
-    out.nameHint = hints.length ? hints[hints.length - 1] : null;
-
-    if (!out.chain && out.vaultAddress) {
-      const chainInUrl = hay.match(
-        /(ethereum|arbitrum|optimism|base|polygon|avalanche|bsc|hyperliquid_l1)/i
-      );
-      if (chainInUrl) out.chain = normalizePoolChain(chainInUrl[1]);
-    }
-  } catch {
-    // ignore
-  }
-  return out;
+  return parseProtocolPoolUrl(rawUrl);
 }
 
 export function yieldsRowMatchesVault(row, addr, chain = null) {

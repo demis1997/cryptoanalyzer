@@ -21,6 +21,8 @@ function moneyFromMatch(m) {
 }
 
 const TVL_PATTERNS = [
+  /\bAMM\s+Liquidity[\s\n:]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
+  /\b(?:SY|PT|YT|LP)\s+Liquidity[\s\n:]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
   /\b(?:pool|market|vault)\s+tvl[:\s]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
   /\btvl[:\s]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
   /\btotal\s+(?:value\s+locked|liquidity|assets|deposits?|supply|size)[:\s]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
@@ -114,6 +116,10 @@ export function parsePoolPageMetrics(text) {
     hints.poolTvlUsd = tvlHit.amount;
     hints.tvlSource = "pool_page";
     hints.tvlEvidence = `Parsed from page text: "${tvlHit.match}"`;
+    if (/AMM\s+Liquidity/i.test(tvlHit.match)) {
+      hints.pendleAmmLiquidityUsd = tvlHit.amount;
+      hints.ammLiquidityUsd = tvlHit.amount;
+    }
   }
 
   const utilHit = firstMatchNumber(t, UTIL_PATTERNS);
@@ -150,6 +156,49 @@ export function parsePoolPageMetrics(text) {
   } else if (/pyth/i.test(t)) hints.oracleType = "pyth";
   else if (/twap/i.test(t)) hints.oracleType = /30\s*min|1800/i.test(t) ? "twap_long" : "twap_short";
 
+  const apyBase = t.match(/\b(?:base|organic|supply)\s+apy[:\s]*(\d{1,2}(?:\.\d+)?)\s*%/i);
+  const apyReward = t.match(/\b(?:reward|incentive|emission|boost)\s+apy[:\s]*(\d{1,2}(?:\.\d+)?)\s*%/i);
+  const apyTotal =
+    t.match(/\b(?:net\s+)?apy[:\s]*(\d{1,2}(?:\.\d+)?)\s*%/i) ||
+    t.match(/\byield[:\s]*(\d{1,2}(?:\.\d+)?)\s*%/i) ||
+    t.match(/\b(\d{1,2}(?:\.\d+)?)\s*%\s+(?:apy|apr|yield)\b/i);
+  if (apyBase) {
+    hints.apyBase = Number(apyBase[1]);
+    hints.apySource = "pool_page";
+    hints.apyEvidence = `Parsed: "${apyBase[0].trim().slice(0, 60)}"`;
+  }
+  if (apyReward) {
+    hints.apyReward = Number(apyReward[1]);
+    hints.apySource = hints.apySource || "pool_page";
+    hints.apyEvidence = hints.apyEvidence || `Parsed: "${apyReward[0].trim().slice(0, 60)}"`;
+  }
+  if (apyTotal && hints.apyBase == null) {
+    hints.apy = Number(apyTotal[1]);
+    hints.apySource = "pool_page";
+    hints.apyEvidence = `Parsed: "${apyTotal[0].trim().slice(0, 60)}"`;
+  } else if (apyTotal && hints.apyBase != null && hints.apyReward == null) {
+    hints.apy = hints.apyBase + Number(apyTotal[1]) > hints.apyBase ? Number(apyTotal[1]) : hints.apyBase;
+  }
+
+  const volatile = /\b(?:apy|yield)\s+(?:volatile|unstable|highly variable)/i.test(t);
+  const stable = /\b(?:apy|yield)\s+(?:stable|steady|consistent)/i.test(t);
+  if (volatile) {
+    hints.apyCv30d = 0.55;
+    hints.apyStabilityEvidence = "Web text: APY described as volatile";
+  } else if (stable) {
+    hints.apyCv30d = 0.08;
+    hints.apyStabilityEvidence = "Web text: APY described as stable";
+  }
+
+  const launched = t.match(/\b(?:launched|deployed|created|live since)[:\s]*(\d{4}-\d{2}-\d{2})\b/i);
+  if (launched) {
+    const ms = Date.parse(launched[1]);
+    if (isFinite(ms)) {
+      hints.poolCreatedAt = ms;
+      hints.poolAgeEvidence = `Parsed launch date: ${launched[1]}`;
+    }
+  }
+
   return hints;
 }
 
@@ -181,5 +230,28 @@ export function mergePageMetricsIntoHints(hints, metrics) {
   }
   if (m.capUtilization != null && out.capUtilization == null) out.capUtilization = m.capUtilization;
   if (m.oracleType && !out.oracleType) out.oracleType = m.oracleType;
+  if (m.apy != null && out.apy == null) {
+    out.apy = m.apy;
+    out.apySource = m.apySource || "pool_page";
+    out.apyEvidence = m.apyEvidence;
+  }
+  if (m.apyBase != null && out.apyBase == null) {
+    out.apyBase = m.apyBase;
+    out.apySource = m.apySource || "pool_page";
+    out.apyEvidence = m.apyEvidence;
+  }
+  if (m.apyReward != null && out.apyReward == null) out.apyReward = m.apyReward;
+  if (m.apyCv30d != null && out.apyCv30d == null) {
+    out.apyCv30d = m.apyCv30d;
+    out.apyStabilityEvidence = m.apyStabilityEvidence;
+  }
+  if (m.poolCreatedAt != null && out.poolCreatedAt == null) {
+    out.poolCreatedAt = m.poolCreatedAt;
+    out.poolAgeEvidence = m.poolAgeEvidence;
+  }
+  if (m.pendleAmmLiquidityUsd != null) {
+    out.pendleAmmLiquidityUsd = m.pendleAmmLiquidityUsd;
+    out.ammLiquidityUsd = m.ammLiquidityUsd ?? m.pendleAmmLiquidityUsd;
+  }
   return out;
 }

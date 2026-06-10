@@ -23,7 +23,7 @@ const CHAINS = {
 };
 
 const RPC = {
-  ethereum: process.env.ETH_RPC_URL || "https://eth.llamarpc.com",
+  ethereum: process.env.ETH_RPC_URL || "https://ethereum.publicnode.com",
   arbitrum: process.env.ARBITRUM_RPC_URL || "https://arb1.arbitrum.io/rpc",
   optimism: process.env.OPTIMISM_RPC_URL || "https://mainnet.optimism.io",
   base: process.env.BASE_RPC_URL || "https://mainnet.base.org",
@@ -32,7 +32,7 @@ const RPC = {
 
 const clients = new Map();
 
-function clientForChain(chain) {
+export function clientForChain(chain) {
   const key = normalizePoolChain(chain);
   if (clients.has(key)) return clients.get(key);
   const viemChain = CHAINS[key] || mainnet;

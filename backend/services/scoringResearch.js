@@ -24,22 +24,23 @@ export async function gatherScoringWebResearch({
   const slugRoot = slug.split("-")[0] || slug;
   const isPendle = /pendle|pt-/i.test(`${label} ${sym} ${slug}`);
   const queries = [
-    sym && slug ? `site:dune.com ${slug} ${sym} pool TVL liquidity` : null,
-    sym && slug ? `${slug} ${sym} ${ch} pool TVL total liquidity market size deposits this pool` : null,
-    poolUrl ? `${poolUrl} TVL total liquidity total value locked assets utilization` : null,
-    sym && slug ? `${slug} ${sym} ${ch} pool oracle Chainlink Pyth TWAP liquidation price feed` : null,
-    sym && slug ? `${slug} ${sym} LLTV LTV loan-to-value collateral liquidation threshold parameters` : null,
-    label ? `"${label}" vault curator risk manager who manages` : null,
-    slug ? `${slug} ${sym || label} utilization rate supply utilization borrow cap filled` : null,
-    isPendle ? `${label || sym} Pendle days to maturity expiry PT secondary market liquidity` : null,
-    isPendle ? `pendle ${sym} market liquidity TVL time to maturity redeem` : null,
-    sym ? `defillama ${slug || label} ${sym} yields pool APY` : null,
-    label ? `${label} DeFi yield source organic emissions rewards sustainability` : null,
-    slug ? `${slugRoot} documentation oracle risk parameters vault` : null,
-    poolUrl ? `${poolUrl} risk parameters oracle LLTV utilization` : null,
+    poolUrl ? `${poolUrl} APY net yield supply rate rewards emissions` : null,
+    label ? `"${label}" ${slug || ""} pool APY net yield organic rewards emissions` : null,
+    sym && slug ? `${slug} ${sym} ${ch} current APY yield rate pool dashboard` : null,
+    sym && slug ? `site:dune.com ${slug} ${sym} pool TVL liquidity APY` : null,
+    sym && slug ? `${slug} ${sym} ${ch} pool TVL total liquidity market size deposits` : null,
+    poolUrl ? `${poolUrl} TVL total liquidity utilization LLTV oracle` : null,
+    sym && slug ? `${slug} ${sym} ${ch} oracle Chainlink Pyth TWAP liquidation` : null,
+    sym && slug ? `${slug} ${sym} LLTV LTV loan-to-value liquidation threshold` : null,
+    label ? `"${label}" vault curator risk manager` : null,
+    slug ? `${slug} ${sym || label} utilization supply cap borrow` : null,
+    isPendle ? `${label || sym} Pendle days to maturity expiry PT liquidity` : null,
+    label ? `${label} yield organic vs emissions sustainability APY stability` : null,
+    slug ? `${slugRoot} vault launched deployed date pool age` : null,
+    poolUrl ? `${poolUrl} risk parameters LLTV utilization` : null,
   ].filter(Boolean);
 
-  const maxQ = Number(process.env.POOL_SCORING_SEARCH_QUERIES || 5) || 5;
+  const maxQ = Number(process.env.POOL_SCORING_SEARCH_QUERIES || 7) || 7;
   const searches = [];
   for (const q of [...new Set(queries)].slice(0, maxQ)) {
     searches.push(await searchWeb(q, { maxResults: 5 }));

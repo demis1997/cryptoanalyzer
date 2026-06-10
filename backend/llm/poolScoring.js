@@ -49,15 +49,23 @@ export function primaryYieldsRow(rows, opts = {}) {
 }
 
 /** @returns {'lending'|'staking'|'amm_lp'|'pendle_pt'|'structured_vault'|'curated_vault'} */
-export function inferPoolType({ yieldsRows = [], label = "", issuerSlug = "", integrators = [] } = {}) {
+export function inferPoolType({ yieldsRows = [], label = "", issuerSlug = "", integrators = [], url = "" } = {}) {
   const row = primaryYieldsRow(yieldsRows);
   const sym = String(row?.symbol || "").toLowerCase();
   const meta = String(row?.poolMeta || "").toLowerCase();
   const exposure = String(row?.exposure || "").toLowerCase();
-  const hay = `${sym} ${meta} ${exposure} ${String(label).toLowerCase()} ${issuerSlug}`;
+  const proj = String(row?.project || "").toLowerCase();
+  const hay = `${sym} ${meta} ${exposure} ${proj} ${String(label).toLowerCase()} ${issuerSlug} ${String(url).toLowerCase()}`;
   const integHay = (integrators || []).map((p) => `${p.name} ${p.id}`).join(" ").toLowerCase();
 
-  if (PT_SYMBOLS.test(sym) || /pendle/i.test(hay)) return "pendle_pt";
+  if (
+    PT_SYMBOLS.test(sym) ||
+    /pendle/i.test(hay) ||
+    proj === "pendle" ||
+    /pendle\.finance/i.test(String(url))
+  ) {
+    return "pendle_pt";
+  }
   if (/metamorpho|euler|evault|steakhouse|gauntlet|re7|mev capital|smokehouse|curator/i.test(integHay + hay)) {
     return "curated_vault";
   }
@@ -76,7 +84,7 @@ export function isCriterionNA(criterionKey, poolType) {
     case "oracleQuality":
       return t === "staking";
     case "parameterSafety":
-      return t === "staking" || t === "amm_lp";
+      return t === "staking" || t === "amm_lp" || t === "pendle_pt";
     case "curatorQuality":
       return t === "staking" || t === "amm_lp" || t === "pendle_pt";
     default:
@@ -163,6 +171,7 @@ function scoreLiquidityExit(poolType, row) {
   }
   if (t === "pendle_pt") {
     const days = row?.pendleDaysToMaturity ?? row?.daysToMaturity;
+    const ammLiq = row?.pendleAmmLiquidityUsd ?? row?.ammLiquidityUsd;
     if (typeof days === "number" && isFinite(days)) {
       let baseSc = 0.9;
       let band = ">90d";
@@ -188,11 +197,31 @@ function scoreLiquidityExit(poolType, row) {
         calcBreakdown: calcParts.join("; "),
       };
     }
+    if (typeof ammLiq === "number" && isFinite(ammLiq) && ammLiq > 0) {
+      let sc = 0.7;
+      let band = "$500K–$1M";
+      if (ammLiq >= 10_000_000) {
+        sc = 0.9;
+        band = ">$10M AMM";
+      } else if (ammLiq >= 1_000_000) {
+        sc = 0.85;
+        band = "$1M–$10M AMM";
+      } else if (ammLiq >= 500_000) {
+        sc = 0.75;
+        band = "$500K–$1M AMM";
+      }
+      return {
+        score: sc,
+        input: `AMM liquidity $${Math.round(ammLiq).toLocaleString()}`,
+        evidence: row?.tvlEvidence || `Pendle AMM liquidity band ${band} (P.2).`,
+        calcBreakdown: `ammLiquidity=$${Math.round(ammLiq).toLocaleString()} → ${band} → score ${sc}`,
+      };
+    }
     return {
       unavailable: true,
-      input: "maturity not found",
+      input: "maturity/AMM liquidity not found",
       evidence:
-        "Days to maturity not parsed from Pendle pool page — criterion excluded (look for: days to maturity, expiry date, time to maturity).",
+        "Pendle P.2 needs days-to-maturity or AMM Liquidity from pool page / Pendle API — criterion excluded.",
     };
   }
   return {
@@ -385,18 +414,15 @@ function scorePoolAge(row, protocolListedAt) {
   } else if (typeof protocolListedAt === "number" && protocolListedAt > 0) {
     const tsMs = protocolListedAt > 1e12 ? protocolListedAt : protocolListedAt * 1000;
     ageMs = Date.now() - tsMs;
-  } else {
-    const count = Number(row?.count);
-    if (count > 300) ageMs = 400 * 86400000;
-    else if (count > 100) ageMs = 200 * 86400000;
-    else if (count > 30) ageMs = 90 * 86400000;
-    else if (count > 0) ageMs = 30 * 86400000;
   }
   if (ageMs == null) {
-    return { unavailable: true, input: "unknown", evidence: "Pool deployment date not available." };
+    return {
+      unavailable: true,
+      input: "launch date not found",
+      evidence: "Pool age not in web research or protocol docs — parse launched/deployed date (P.6).",
+    };
   }
   const months = ageMs / (30 * 86400000);
-  const count = Number(row?.count);
   let sc = 0.1;
   if (months >= 24) sc = 1.0;
   else if (months >= 12) sc = 0.85;
@@ -406,9 +432,7 @@ function scorePoolAge(row, protocolListedAt) {
   return {
     score: sc,
     input: `~${Math.round(months)} months`,
-    evidence: count > 0
-      ? `Pool age proxied from DefiLlama APY history (${count} samples ≈ ${Math.round(months)} mo, P.6).`
-      : "Pool age from deployment timestamp or protocol listedAt (P.6).",
+    evidence: row?.poolAgeEvidence || "Pool age from web-parsed launch date or protocol listedAt (P.6).",
   };
 }
 
@@ -822,6 +846,7 @@ export function buildPoolRiskAssessment(ctx, opts = {}) {
     label: ctx.label,
     issuerSlug: ctx.issuerSlug,
     integrators: ctx.integrators,
+    url: ctx.url,
   });
   const protocolListedAt = opts.protocolListedAt ?? opts.issuerListedAt ?? null;
 

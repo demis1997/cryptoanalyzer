@@ -69,6 +69,7 @@ export async function enrichPoolMetadataWithLlm({
   if (!yieldsRow?.curator && /vault|curat|metamorpho|euler/i.test(`${poolLabel} ${issuerSlug}`)) {
     missing.push("curator");
   }
+  if (yieldsRow?.apyBase == null && yieldsRow?.apy == null) missing.push("apyBasePct");
 
   trace?.step?.("LLM pool metadata (oracle / curator)", {
     kind: "llm",
@@ -78,8 +79,8 @@ export async function enrichPoolMetadataWithLlm({
   const tvlCandidates = poolIdentity?.tvlCandidates || [];
   const system = `You extract factual pool/vault metadata for DeFi risk scoring by comparing MULTIPLE sources.
 Works for ANY protocol (Aave, Morpho, Pendle, Euler, Curve, Compound, etc.) — not Morpho-specific.
-You cannot browse the web. Use WEB RESEARCH, DUNE, ON-CHAIN, and DEFILLAMA sections only.
-Prefer pool-specific protocol UI / Dune dashboard / on-chain over aggregate DefiLlama token TVL.
+You cannot browse the web. PRIMARY sources: WEB RESEARCH, pool page crawl, Dune, protocol dashboards.
+Do NOT use DefiLlama aggregates for APY/TVL unless explicitly the only pool-specific figure in the text.
 Return JSON only — no markdown:
 {
   "curator": string | null,
@@ -93,6 +94,11 @@ Return JSON only — no markdown:
   "daysToMaturity": number | null,
   "pendleSecondaryMarket": boolean | null,
   "maturityEvidence": string,
+  "apyTotalPct": number | null,
+  "apyBasePct": number | null,
+  "apyRewardPct": number | null,
+  "apyStability": "stable" | "moderate" | "volatile" | null,
+  "poolLaunchedDate": string | null,
   "confidence": "high" | "medium" | "low"
 }
 Rules:
@@ -157,6 +163,30 @@ Return JSON only.`.trim();
     }
     if (typeof j.pendleSecondaryMarket === "boolean") {
       out.hints.pendleSecondaryMarket = j.pendleSecondaryMarket;
+    }
+    if (typeof j.apyBasePct === "number" && isFinite(j.apyBasePct)) {
+      out.hints.apyBase = j.apyBasePct;
+      out.hints.apySource = "pool_page";
+      out.hints.apyEvidence = "LLM from web research";
+    }
+    if (typeof j.apyRewardPct === "number" && isFinite(j.apyRewardPct)) out.hints.apyReward = j.apyRewardPct;
+    if (typeof j.apyTotalPct === "number" && isFinite(j.apyTotalPct)) out.hints.apy = j.apyTotalPct;
+    if (j.apyStability === "stable") {
+      out.hints.apyCv30d = 0.08;
+      out.hints.apyStabilityEvidence = "LLM: stable APY from web research";
+    } else if (j.apyStability === "volatile") {
+      out.hints.apyCv30d = 0.55;
+      out.hints.apyStabilityEvidence = "LLM: volatile APY from web research";
+    } else if (j.apyStability === "moderate") {
+      out.hints.apyCv30d = 0.22;
+      out.hints.apyStabilityEvidence = "LLM: moderate APY volatility from web research";
+    }
+    if (j.poolLaunchedDate && /^\d{4}-\d{2}-\d{2}/.test(String(j.poolLaunchedDate))) {
+      const ms = Date.parse(j.poolLaunchedDate);
+      if (isFinite(ms)) {
+        out.hints.poolCreatedAt = ms;
+        out.hints.poolAgeEvidence = `LLM: launched ${j.poolLaunchedDate}`;
+      }
     }
     out.llmConfidence = j.confidence || "medium";
     trace?.step?.("Pool metadata from LLM", {
@@ -227,6 +257,25 @@ export function applyMetadataHintsToRow(row, meta) {
   if (hints.pendleSecondaryMarket != null) {
     next.pendleSecondaryMarket = hints.pendleSecondaryMarket;
     next.pendleSecondaryEvidence = hints.pendleSecondaryEvidence;
+  }
+  if (hints.apy != null && isFinite(Number(hints.apy))) {
+    next.apy = Number(hints.apy);
+    next.apySource = hints.apySource || "pool_page";
+    next.apyEvidence = hints.apyEvidence || null;
+  }
+  if (hints.apyBase != null && isFinite(Number(hints.apyBase))) {
+    next.apyBase = Number(hints.apyBase);
+    next.apySource = hints.apySource || "pool_page";
+    next.apyEvidence = hints.apyEvidence || next.apyEvidence;
+  }
+  if (hints.apyReward != null && isFinite(Number(hints.apyReward))) next.apyReward = Number(hints.apyReward);
+  if (hints.apyCv30d != null) {
+    next.apyCv30d = hints.apyCv30d;
+    if (hints.apyStabilityEvidence) next.apyStabilityEvidence = hints.apyStabilityEvidence;
+  }
+  if (hints.poolCreatedAt != null) {
+    next.poolCreatedAt = hints.poolCreatedAt;
+    if (hints.poolAgeEvidence) next.poolAgeEvidence = hints.poolAgeEvidence;
   }
   return next;
 }

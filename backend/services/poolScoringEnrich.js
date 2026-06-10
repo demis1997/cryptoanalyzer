@@ -9,6 +9,7 @@ import {
   applyExternalDataToYieldsRows,
 } from "./poolDataSources.js";
 import { resolveVaultToYields } from "./poolResolver.js";
+import { resolvePoolFromProtocolTarget } from "./poolProtocolResolver.js";
 import { enrichPoolMetadataWithLlm, applyMetadataHintsToRow } from "./poolEnrich.js";
 import { gatherScoringWebResearch, mergeResearchBlobs } from "./scoringResearch.js";
 import { applyVaultScoringMetaToRow } from "./scoringAudit.js";
@@ -23,8 +24,21 @@ function rowOptsFromCtx(ctx) {
 }
 
 export async function resolveYieldsRowsUniversal(ctx, allPools, trace) {
-  const rows = hydrateYieldsRows(ctx.yieldsRows, allPools);
+  let rows = hydrateYieldsRows(ctx.yieldsRows, allPools);
+
+  const protocolResolved = await resolvePoolFromProtocolTarget(ctx, allPools, trace).catch(() => null);
+  if (protocolResolved?.yieldsRows?.length) {
+    if (protocolResolved.vaultMeta) ctx.vaultMeta = { ...ctx.vaultMeta, ...protocolResolved.vaultMeta };
+    if (protocolResolved.vaultMeta?.vaultAddress && !ctx.vaultAddress) {
+      ctx.vaultAddress = protocolResolved.vaultMeta.vaultAddress;
+    }
+    return protocolResolved.yieldsRows;
+  }
+
   const vault = ctx.vaultAddress;
+  const marketId = ctx.marketId;
+  if (marketId && !protocolResolved) return rows;
+
   if (!vault || !/^0x[a-f0-9]{40}$/.test(String(vault).toLowerCase())) return rows;
 
   const resolved = await resolveVaultToYields({
@@ -149,8 +163,11 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
           : scoredRow?.tvlUncertain
             ? "TVL rejected (symbol-only DefiLlama)"
             : "TVL missing — need pool page",
-        scoredRow?.count != null ? `${scoredRow.count} APY samples` : null,
-        scoredRow?.apyBase != null ? `apyBase ${Number(scoredRow.apyBase).toFixed(2)}%` : null,
+        scoredRow?.apyBase != null
+          ? `apyBase ${Number(scoredRow.apyBase).toFixed(2)}% (${scoredRow.apySource || "?"})`
+          : scoredRow?.apy != null
+            ? `apy ${Number(scoredRow.apy).toFixed(2)}% (${scoredRow.apySource || "?"})`
+            : "APY missing — need pool page",
         scoredRow?.utilization != null
           ? `util ${((scoredRow.utilization > 1 ? scoredRow.utilization : scoredRow.utilization * 100)).toFixed(1)}%`
           : null,
@@ -160,9 +177,11 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
       ]
         .filter(Boolean)
         .join(" · "),
-      sources: scoredRow?.project
-        ? [{ label: "DefiLlama yields", url: `https://defillama.com/protocol/${scoredRow.project}` }]
-        : [],
+      sources: ctx?.url
+        ? [{ label: "Pool page", url: ctx.url }]
+        : scoredRow?.apySource === "protocol_api"
+          ? [{ label: "Protocol API", url: ctx?.url || null }]
+          : [{ label: "Web research", url: null }],
     });
   }
 

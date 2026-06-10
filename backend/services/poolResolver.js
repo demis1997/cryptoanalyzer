@@ -8,55 +8,74 @@ import { fetchMorphoVaultByAddress, matchYieldsRowForMorphoVault } from "./morph
 import { applyVaultScoringMetaToRow } from "./scoringAudit.js";
 import { defillamaSlugFromWebsite } from "./yieldsDiscover.js";
 import { findBestYieldsPool } from "./yieldsPoolMatch.js";
-import fetch from "node-fetch";
+import { findPendleMarket, pendleMetaForVault, syntheticYieldsRowFromPendle } from "./pendleMarket.js";
+import { buildSyntheticYieldsRow } from "./syntheticYieldsRow.js";
 
-/** Pendle: match market/PT/YT/SY address → market name → DefiLlama. */
-async function resolveViaPendle(address, chain, allPools, trace) {
-  const chainIds = { ethereum: 1, arbitrum: 42161, optimism: 10, base: 8453, polygon: 137 };
-  const chainId = chainIds[normalizePoolChain(chain)] || 1;
-  const addr = address.toLowerCase();
+/** Pendle: match market/PT/YT/SY address → API scoring + optional DefiLlama row. */
+async function resolveViaPendle(address, chain, allPools, trace, { nameHint = null, poolUrl = null } = {}) {
+  const addr = String(address || "").toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(addr)) return null;
   try {
-    const markets = [];
-    for (let page = 0; page < 4; page++) {
-      const resp = await fetch(
-        `https://api-v2.pendle.finance/core/v2/markets/all?skip=${page * 100}&limit=100`,
-        { headers: { "User-Agent": "cryptoanalyzer/pool-resolver" } }
-      );
-      if (!resp.ok) break;
-      const json = await resp.json().catch(() => ({}));
-      const batch = Array.isArray(json?.results) ? json.results : [];
-      markets.push(...batch.filter((m) => Number(m?.chainId) === chainId));
-      if (batch.length < 100) break;
-    }
-    const hit = markets.find((m) => {
-      const addrs = [m?.address, m?.pt, m?.yt, m?.sy, m?.underlyingAsset]
-        .map((x) => String(x || "").toLowerCase().replace(/^\d+-/, ""))
-        .filter((a) => /^0x[a-f0-9]{40}$/.test(a));
-      return addrs.includes(addr);
-    });
-    if (!hit) return null;
+    const found = await findPendleMarket({ address: addr, chain, nameHint, poolUrl });
+    if (!found?.market) return null;
+    const hit = found.market;
     const name = String(hit.name || hit.symbol || "").trim();
+    const vaultMeta = pendleMetaForVault(hit);
     trace?.step?.("Pendle market API", {
       kind: "source",
-      detail: name || addr.slice(0, 10),
+      detail: [
+        name,
+        vaultMeta?.tvlUsd != null ? `TVL $${Math.round(vaultMeta.tvlUsd).toLocaleString()}` : null,
+        vaultMeta?.pendleDaysToMaturity != null ? `${vaultMeta.pendleDaysToMaturity}d to maturity` : null,
+        vaultMeta?.pendleAmmLiquidityUsd != null
+          ? `AMM liq $${Math.round(vaultMeta.pendleAmmLiquidityUsd).toLocaleString()}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
       sources: [{ label: "Pendle API", url: "https://api-v2.pendle.finance" }],
     });
-    const row = findBestYieldsPool(allPools, {
+    const dlRow = findBestYieldsPool(allPools, {
       symbol: name,
       chain,
       issuerSlug: "pendle",
       nameHint: name,
       vaultAddress: address,
     });
-    return row
-      ? {
-          yieldsRow: row,
-          vaultMeta: { symbol: name, name, source: "pendle_api", curator: null },
-        }
-      : null;
+    const yieldsRow = dlRow
+      ? fullYieldsPoolRow(dlRow)
+      : syntheticYieldsRowFromPendle(hit, chain, addr);
+    return { yieldsRow, vaultMeta };
   } catch {
     return null;
   }
+}
+
+/** Resolve Pendle market by name or pool URL (no vault address). */
+export async function resolvePendleByHint({ nameHint, poolUrl, chain, allPools, trace } = {}) {
+  const found = await findPendleMarket({ nameHint, poolUrl, chain });
+  if (!found?.market) return null;
+  const hit = found.market;
+  const vaultMeta = pendleMetaForVault(hit);
+  const addr = vaultMeta?.marketAddress;
+  trace?.step?.("Pendle market API (by name/URL)", {
+    kind: "source",
+    detail: vaultMeta?.name || nameHint,
+  });
+  const dlRow = findBestYieldsPool(allPools, {
+    symbol: hit.name,
+    chain: chain || "ethereum",
+    issuerSlug: "pendle",
+    nameHint: hit.name,
+    vaultAddress: addr,
+  });
+  const yieldsRow = dlRow
+    ? fullYieldsPoolRow(dlRow)
+    : syntheticYieldsRowFromPendle(hit, chain, addr);
+  return {
+    yieldsRows: [{ ...yieldsRow, vaultAddress: addr, issuerSlug: "pendle" }],
+    vaultMeta,
+  };
 }
 
 /**
@@ -100,41 +119,49 @@ export async function resolveVaultToYields({
       sources: [{ label: "Morpho GraphQL", url: poolUrl || `https://defillama.com/protocol/morpho-blue` }],
     });
     const matched = matchYieldsRowForMorphoVault(morpho, allPools, { nameHint });
-    if (matched) {
-      let row = fullYieldsPoolRow(matched);
-      row = applyVaultScoringMetaToRow(row, morpho.scoring || morpho);
-      trace?.step?.("Morpho scoring fields", {
-        kind: "source",
-        detail: [
-          row.tvlUsd != null ? `TVL $${Math.round(row.tvlUsd).toLocaleString()}` : null,
-          row.lltv != null ? `LLTV ${Number(row.lltv).toFixed(1)}%` : null,
-          row.utilization != null ? `util ${(row.utilization * 100).toFixed(1)}%` : null,
-          row.oracleType ? `oracle ${row.oracleType}` : null,
-        ]
-          .filter(Boolean)
-          .join(" · ") || "curator/symbol only",
-      });
-      return {
-        yieldsRows: [
-          {
-            ...row,
-            vaultAddress: addr,
-            curator: morpho.curator,
-            curatorEvidence: morpho.curator
-              ? `Morpho API curator ${morpho.curatorAddress || morpho.curator}`
-              : null,
-          },
-        ],
-        vaultMeta,
-      };
-    }
+    const baseRow = matched
+      ? fullYieldsPoolRow(matched)
+      : buildSyntheticYieldsRow({
+          symbol: morpho.symbol,
+          name: morpho.name,
+          project: "morpho-blue",
+          chain: morpho.chain,
+          vaultAddress: addr,
+          meta: morpho,
+        });
+    let row = applyVaultScoringMetaToRow(baseRow, morpho.scoring || morpho);
+    trace?.step?.("Morpho scoring fields", {
+      kind: "source",
+      detail: [
+        row.tvlUsd != null ? `TVL $${Math.round(row.tvlUsd).toLocaleString()}` : null,
+        row.lltv != null ? `LLTV ${Number(row.lltv).toFixed(1)}%` : null,
+        row.utilization != null ? `util ${(row.utilization * 100).toFixed(1)}%` : null,
+        row.oracleType ? `oracle ${row.oracleType}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ") || "curator/symbol only",
+    });
+    return {
+      yieldsRows: [
+        {
+          ...row,
+          vaultAddress: addr,
+          curator: morpho.curator,
+          curatorEvidence: morpho.curator
+            ? `Morpho API curator ${morpho.curatorAddress || morpho.curator}`
+            : null,
+        },
+      ],
+      vaultMeta,
+    };
   }
 
   // 3) Pendle API
-  const pendle = await resolveViaPendle(addr, chainNorm, allPools, trace);
+  const pendle = await resolveViaPendle(addr, chainNorm, allPools, trace, { nameHint, poolUrl });
   if (pendle?.yieldsRow) {
+    let row = applyVaultScoringMetaToRow({ ...pendle.yieldsRow, vaultAddress: addr }, pendle.vaultMeta?.scoring || pendle.vaultMeta);
     return {
-      yieldsRows: [{ ...pendle.yieldsRow, vaultAddress: addr }],
+      yieldsRows: [row],
       vaultMeta: pendle.vaultMeta,
     };
   }

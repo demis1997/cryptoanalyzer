@@ -7,6 +7,7 @@ import { readErc20Metadata, readErc4626VaultTvlUsd } from "./onChainToken.js";
 import { moralisErc20Metadata } from "./moralisClient.js";
 import { gatherDunePoolResearch } from "./duneResearch.js";
 import { searchWeb } from "./webResearch.js";
+import { findPendleMarket, extractPendleScoringMeta } from "./pendleMarket.js";
 
 const TVL_SOURCE_RANK = {
   pool_page: 0,
@@ -185,6 +186,51 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
       source: "protocol_api",
       evidence: vaultMeta.tvlEvidence || "Protocol API totalAssetsUsd",
     });
+  }
+  if (vaultMeta?.pendleAmmLiquidityUsd != null && isFinite(Number(vaultMeta.pendleAmmLiquidityUsd))) {
+    Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, vaultMeta));
+  }
+
+  const needsPendleMetrics =
+    !scoringHints.pendleDaysToMaturity &&
+    !scoringHints.pendleAmmLiquidityUsd &&
+    !scoringHints.poolTvlUsd;
+  if (
+    needsPendleMetrics ||
+    /pendle/i.test(`${ctx?.issuerSlug || ""} ${ctx?.label || ""} ${ctx?.url || ""}`)
+  ) {
+    const pendleHit = await findPendleMarket({
+      address: vaultAddress,
+      chain,
+      nameHint: ctx?.label || row?.symbol,
+      poolUrl: ctx?.url,
+    }).catch(() => null);
+    if (pendleHit?.market) {
+      const pendleMeta = extractPendleScoringMeta(pendleHit.market);
+      Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, pendleMeta || {}));
+      if (pendleMeta?.tvlUsd) {
+        tvlCandidates.push({
+          value: pendleMeta.tvlUsd,
+          source: "protocol_api",
+          evidence: pendleMeta.tvlEvidence || "Pendle API totalTvl",
+        });
+      }
+      sources.push({
+        id: "pendle_api",
+        label: "Pendle API",
+        provider: "Pendle",
+        ok: true,
+        detail: [
+          pendleMeta?.pendleDaysToMaturity != null ? `${pendleMeta.pendleDaysToMaturity}d to maturity` : null,
+          pendleMeta?.pendleAmmLiquidityUsd != null
+            ? `AMM $${Math.round(pendleMeta.pendleAmmLiquidityUsd).toLocaleString()}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        url: "https://api-v2.pendle.finance",
+      });
+    }
   }
 
   if (defillamaTvlAllowed() && row?.tvlUsd != null && !row?.tvlUncertain) {

@@ -23,12 +23,13 @@ export function applyVaultScoringMetaToRow(row, meta) {
 
   if (meta.totalAssetsUsd != null && isFinite(Number(meta.totalAssetsUsd)) && row.tvlSource !== "pool_page") {
     next.tvlUsd = Number(meta.totalAssetsUsd);
-    next.tvlSource = "protocol_api";
+    next.tvlSource = row.tvlSource || meta.tvlSource || "protocol_api";
     next.tvlEvidence = meta.tvlEvidence || "Protocol API totalAssetsUsd";
     next.tvlUncertain = false;
   }
   if (meta.apyPct != null && isFinite(Number(meta.apyPct))) {
     next.apyBase = Number(meta.apyPct);
+    next.apySource = "protocol_api";
     next.apyEvidence = meta.apyEvidence || "Protocol API net APY";
   }
   if (meta.lltvPct != null) {
@@ -51,6 +52,20 @@ export function applyVaultScoringMetaToRow(row, meta) {
     next.curatorEvidence = meta.curatorEvidence || null;
   }
   if (meta.poolCreatedAt) next.poolCreatedAt = meta.poolCreatedAt;
+
+  if (meta.pendleDaysToMaturity != null) {
+    next.pendleDaysToMaturity = meta.pendleDaysToMaturity;
+    next.daysToMaturity = meta.daysToMaturity ?? meta.pendleDaysToMaturity;
+    if (meta.maturityEvidence) next.maturityEvidence = meta.maturityEvidence;
+  }
+  if (meta.pendleAmmLiquidityUsd != null) {
+    next.pendleAmmLiquidityUsd = Number(meta.pendleAmmLiquidityUsd);
+    next.ammLiquidityUsd = Number(meta.ammLiquidityUsd ?? meta.pendleAmmLiquidityUsd);
+  }
+  if (meta.pendleSecondaryMarket != null) {
+    next.pendleSecondaryMarket = meta.pendleSecondaryMarket;
+    next.pendleSecondaryEvidence = meta.pendleSecondaryEvidence || null;
+  }
 
   return next;
 }

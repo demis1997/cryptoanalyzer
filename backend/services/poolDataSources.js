@@ -24,6 +24,10 @@ function enabled(name, defaultOn = true) {
   return !/^(0|false|no|off)$/i.test(String(v).trim());
 }
 
+function defillamaScoringFlag(name) {
+  return /^(1|true|yes|on)$/i.test(String(process.env[name] || "0").trim());
+}
+
 function clamp(s, max = 500) {
   const t = String(s || "");
   return t.length <= max ? t : `${t.slice(0, max)}…`;
@@ -225,7 +229,8 @@ function inferTvlMatchQuality(row, rowOpts = {}) {
   if (vault && /^0x[a-f0-9]{40}$/.test(vault) && yieldsRowMatchesVault(row, vault, rowOpts.chain)) {
     return "vault";
   }
-  if (row?.tvlSource === "pool_page" || row?.tvlSource === "protocol_api") return "verified";
+  if (row?.tvlSource === "pool_page" || row?.tvlSource === "protocol_api" || row?.tvlSource === "protocol_url_match")
+    return "verified";
   const poolId = String(row?.pool || "").toLowerCase();
   const meta = String(row?.poolMeta || "").toLowerCase();
   if (vault && (poolId.includes(vault) || meta.includes(vault))) return "pool_id";
@@ -261,7 +266,32 @@ export async function gatherPoolExternalData(ctx, { webResearch = null } = {}) {
   const scoringHints = { ...(ctx?.metricsResolution?.scoringHints || {}) };
   let chart = null;
 
-  if (row?.pool && enabled("POOL_DEFILLAMA_CHART", true)) {
+  const webBlob = [
+    webResearch?.formatted || "",
+    webResearch?.crawl?.formatted || "",
+    webResearch?.scoringResearch?.formatted || "",
+    webResearch?.duneResearch?.formatted || "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  if (webBlob.trim()) {
+    Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, parseScoringHintsFromText(webBlob)));
+    sources.push({
+      id: "web_research_parse",
+      label: "Web search + pool page parse",
+      provider: "Web",
+      ok: true,
+      detail: [
+        scoringHints.poolTvlUsd != null ? `TVL $${Math.round(scoringHints.poolTvlUsd).toLocaleString()}` : null,
+        scoringHints.apyBase != null ? `apyBase ${scoringHints.apyBase}%` : scoringHints.apy != null ? `apy ${scoringHints.apy}%` : null,
+        scoringHints.utilization != null ? `util ${(scoringHints.utilization * 100).toFixed(1)}%` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ") || "parsed crawl/search text",
+    });
+  }
+
+  if (row?.pool && defillamaScoringFlag("POOL_DEFILLAMA_CHART")) {
     chart = await fetchDefiLlamaYieldsChart(row.pool);
     sources.push({
       id: "defillama_chart",
@@ -362,18 +392,11 @@ export async function gatherPoolExternalData(ctx, { webResearch = null } = {}) {
         detail: clamp(sn.title || sn.snippet, 120),
       });
     }
-    const blob = [
-      webResearch?.formatted || "",
-      webResearch?.crawl?.formatted || "",
-      webResearch?.scoringResearch?.formatted || "",
-      ...(inspectors.searches || []).flatMap((s) => (s.hits || []).map((h) => `${h.title} ${h.snippet}`)),
-    ].join("\n");
-    Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, parseScoringHintsFromText(blob)));
-    if (webResearch?.crawl?.formatted) {
-      Object.assign(
-        scoringHints,
-        mergePageMetricsIntoHints(scoringHints, parseScoringHintsFromText(webResearch.crawl.formatted))
-      );
+    const inspectorBlob = (inspectors.searches || [])
+      .flatMap((s) => (s.hits || []).map((h) => `${h.title} ${h.snippet}`))
+      .join("\n");
+    if (inspectorBlob) {
+      Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, parseScoringHintsFromText(inspectorBlob)));
     }
   }
 
@@ -382,16 +405,16 @@ export async function gatherPoolExternalData(ctx, { webResearch = null } = {}) {
     : row?.project
       ? `https://defillama.com/protocol/${encodeURIComponent(row.project)}`
       : "https://defillama.com/yields";
-  sources.unshift({
-    id: "defillama_yields",
-    label: "DefiLlama yields",
-    provider: "DefiLlama",
-    url: yieldsUrl,
-    ok: Boolean(row),
-    detail: row
-      ? `${row.project || "?"} · ${row.symbol || "?"} · ${row.chain || "?"} · TVL $${row.tvlUsd ? Math.round(row.tvlUsd).toLocaleString() : "—"}${row.pool ? ` · pool ${String(row.pool).slice(0, 8)}…` : ""}`
-      : "No yields row matched",
-  });
+  if (defillamaScoringFlag("POOL_DEFILLAMA_REFERENCE") && row) {
+    sources.push({
+      id: "defillama_yields",
+      label: "DefiLlama yields (reference only)",
+      provider: "DefiLlama",
+      url: yieldsUrl,
+      ok: true,
+      detail: `${row.project || "?"} · ${row.symbol || "?"} · not used for scoring unless POOL_DEFILLAMA_APY/TVL=1`,
+    });
+  }
 
   return {
     enabled: true,
@@ -426,7 +449,12 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
     primary.tvlUncertain = false;
   } else if (!hints.poolTvlUsd) {
     const allowDl = /^(1|true|yes|on)$/i.test(String(process.env.POOL_DEFILLAMA_TVL || "0").trim());
-    if (tvlMatchQuality === "symbol" || !allowDl) {
+    const authoritativeTvl =
+      tvlMatchQuality === "vault" ||
+      tvlMatchQuality === "verified" ||
+      tvlMatchQuality === "pool_id" ||
+      /^(protocol_api|pool_page|on_chain|dune|protocol_url_match)$/i.test(String(primary.tvlSource || ""));
+    if (!authoritativeTvl && (tvlMatchQuality === "symbol" || !allowDl)) {
       primary.defillamaTvlUsd = primary.tvlUsd;
       primary.tvlUsd = null;
       primary.tvlUncertain = true;
@@ -439,7 +467,32 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
     }
   }
 
-  if (hints.apyCv30d != null) primary.apyCv30d = hints.apyCv30d;
+  const allowDlApy = defillamaScoringFlag("POOL_DEFILLAMA_APY");
+  if (!allowDlApy && primary.apySource !== "protocol_api") {
+    primary.apy = null;
+    primary.apyBase = null;
+    primary.apyReward = null;
+    primary.sigma = null;
+    primary.count = null;
+  }
+
+  if (hints.apy != null && isFinite(Number(hints.apy))) {
+    primary.apy = Number(hints.apy);
+    primary.apySource = hints.apySource || "pool_page";
+    primary.apyEvidence = hints.apyEvidence || "Parsed from web research";
+  }
+  if (hints.apyBase != null && isFinite(Number(hints.apyBase))) {
+    primary.apyBase = Number(hints.apyBase);
+    primary.apySource = hints.apySource || "pool_page";
+    primary.apyEvidence = hints.apyEvidence || primary.apyEvidence || "Parsed from web research";
+  }
+  if (hints.apyReward != null && isFinite(Number(hints.apyReward))) {
+    primary.apyReward = Number(hints.apyReward);
+  }
+  if (hints.apyCv30d != null) {
+    primary.apyCv30d = hints.apyCv30d;
+    if (hints.apyStabilityEvidence) primary.apyStabilityEvidence = hints.apyStabilityEvidence;
+  }
   if (hints.utilization != null) {
     primary.utilization = hints.utilization;
     if (hints.utilizationEvidence) primary.utilizationEvidence = hints.utilizationEvidence;
@@ -449,7 +502,10 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
     if (hints.lltvEvidence) primary.lltvEvidence = hints.lltvEvidence;
   }
   if (hints.capUtilization != null) primary.capUtilization = hints.capUtilization;
-  if (hints.poolCreatedAt != null) primary.poolCreatedAt = hints.poolCreatedAt;
+  if (hints.poolCreatedAt != null) {
+    primary.poolCreatedAt = hints.poolCreatedAt;
+    if (hints.poolAgeEvidence) primary.poolAgeEvidence = hints.poolAgeEvidence;
+  }
   if (hints.pendleDaysToMaturity != null) {
     primary.pendleDaysToMaturity = hints.pendleDaysToMaturity;
     primary.daysToMaturity = hints.daysToMaturity;
@@ -462,8 +518,13 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
   if (hints.poolAddress) primary.vaultAddress = hints.poolAddress;
   if (hints.poolName) primary.vaultTokenName = hints.poolName;
   if (hints.poolSymbol) primary.vaultTokenSymbol = hints.poolSymbol;
-  if (externalData?.defillamaChart?.firstTimestampMs) {
+  if (hints.pendleAmmLiquidityUsd != null) {
+    primary.pendleAmmLiquidityUsd = Number(hints.pendleAmmLiquidityUsd);
+    primary.ammLiquidityUsd = Number(hints.ammLiquidityUsd ?? hints.pendleAmmLiquidityUsd);
+  }
+  if (defillamaScoringFlag("POOL_DEFILLAMA_CHART") && externalData?.defillamaChart?.firstTimestampMs) {
     primary.poolCreatedAt = primary.poolCreatedAt || externalData.defillamaChart.firstTimestampMs;
+    primary.poolAgeEvidence = primary.poolAgeEvidence || "DefiLlama APY history first sample";
   }
   if (hints.oracleType === "chainlink") primary.oracleType = "Chainlink";
   else if (hints.oracleType === "chainlink_derived") primary.oracleType = "Chainlink derived";
@@ -471,9 +532,12 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
   else if (hints.oracleType === "twap_long") primary.oracleType = "TWAP 30min";
   else if (hints.oracleType === "twap_short") primary.oracleType = "TWAP";
   if (hints.top100Token) primary.assetRankHint = "top100";
-  if (externalData?.defillamaChart?.apyCv30d != null) primary.apyCv30d = externalData.defillamaChart.apyCv30d;
-  else if (primary.apyCv30d == null && isFinite(Number(primary.sigma))) {
+  if (defillamaScoringFlag("POOL_DEFILLAMA_CHART") && externalData?.defillamaChart?.apyCv30d != null) {
+    primary.apyCv30d = externalData.defillamaChart.apyCv30d;
+    primary.apyStabilityEvidence = "DefiLlama 30d APY coefficient of variation";
+  } else if (allowDlApy && primary.apyCv30d == null && isFinite(Number(primary.sigma))) {
     primary.apyCv30d = Number(primary.sigma);
+    primary.apyStabilityEvidence = "DefiLlama yields sigma (POOL_DEFILLAMA_APY=1)";
   }
   rows[safeIdx] = primary;
   return rows;
