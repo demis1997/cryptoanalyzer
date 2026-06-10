@@ -16,6 +16,7 @@ import { buildPoolSourceNotes } from "./poolDataSources.js";
 import { createIntelligenceTrace } from "./intelligenceTrace.js";
 import { fullYieldsPoolRow, hydrateYieldsRows } from "./yieldsPoolRow.js";
 import { enrichYieldsForScoring, resolveYieldsRowsUniversal } from "./poolScoringEnrich.js";
+import { resolvePoolFromTextQuery } from "./poolTextResolver.js";
 import { buildScoringDataAudit, auditTraceDetail } from "./scoringAudit.js";
 import {
   GENERIC_UNDERLYING,
@@ -688,48 +689,117 @@ async function resolveContext(input, { trace = null } = {}) {
   }
 
   trace?.step?.("Resolving pool by name / market", { detail: parsed.label || parsed.query });
+
+  const textResolved = await resolvePoolFromTextQuery(parsed.query || parsed.label, { trace }).catch(() => null);
+  const issuerFromText = textResolved?.issuerSlug || guessIssuerFromQuery(parsed.query || parsed.label);
+  const projectHint = parsed.project || issuerFromText || parsed.query;
+
   const market = await discoverProtocolsForYieldsMarket({
-    project: parsed.project || parsed.query,
-    symbolHint: parsed.symbolHint || "",
+    project: projectHint,
+    symbolHint: parsed.symbolHint || parsed.query || "",
   });
   const allPools = await fetchYieldsPoolsCached();
-  let integrators = findProtocolsSharingUnderlying(market.yieldsPools || [], allPools);
-  const slug = String(parsed.project || parsed.query || "").toLowerCase();
-  let webResearch = null;
-  const poolUrl =
-    /^https?:\/\//i.test(String(parsed.query || "")) ? String(parsed.query).trim() : null;
-  if (poolUrl) {
-    webResearch = await gatherPoolWebResearch({
+  let yieldsRows = hydrateYieldsRows(market.yieldsPools || [], allPools);
+  let integrators = findProtocolsSharingUnderlying(yieldsRows, allPools);
+  const slug = String(issuerFromText || parsed.project || parsed.query || "").toLowerCase();
+
+  let vaultAddr = textResolved?.vaultAddress || null;
+  let chainHint = textResolved?.chain || null;
+  const nameHint = textResolved?.nameHint || parsed.query || parsed.label;
+  let poolUrl = textResolved?.poolUrl || null;
+
+  if (vaultAddr) {
+    const byVault = filterYieldsRowsByVault(allPools, vaultAddr, chainHint).map((r) => fullYieldsPoolRow(r));
+    if (byVault.length) yieldsRows = byVault;
+  }
+
+  const resolveCtx = {
+    yieldsRows,
+    vaultAddress: vaultAddr,
+    chain: chainHint,
+    nameHint,
+    issuerSlug: slug,
+    url: poolUrl,
+  };
+  yieldsRows = await resolveYieldsRowsUniversal(resolveCtx, allPools, trace);
+  if (resolveCtx.vaultMeta && !vaultAddr) {
+    vaultAddr = resolveCtx.vaultAddress || vaultAddr;
+  }
+
+  let webResearch = textResolved?.webResearch || null;
+  if (poolUrl && /^https?:\/\//i.test(poolUrl)) {
+    const crawlResearch = await gatherPoolWebResearch({
       poolLabel: market.marketLabel || parsed.label,
       poolUrl,
       issuerSlug: slug,
     }).catch(() => null);
+    webResearch = crawlResearch || webResearch;
+    if (!vaultAddr && crawlResearch?.addresses?.length) {
+      vaultAddr = crawlResearch.addresses[0];
+      chainHint = chainHint || normalizeChain(yieldsRows[0]?.chain);
+      trace?.step?.("Vault address from page crawl", { kind: "source", detail: vaultAddr });
+    }
     if (webResearch?.formatted) {
-      const mentions = await discoverIntegratorsFromWebResearch(webResearch, { issuerSlug: slug });
+      const mentions = await discoverIntegratorsFromWebResearch(webResearch, {
+        issuerSlug: slug,
+        poolLabel: market.marketLabel || parsed.label,
+      });
       integrators = mergeWebMentionIntegrators(integrators, mentions);
     }
   }
+
   const usingCount = filterUsingIntegrators(integrators).length;
   if (llmEnabled() && (poolUrl || usingCount < 6)) {
     const llm = await discoverPoolIntegratorsWithLlm({
       poolLabel: market.marketLabel || parsed.label,
       poolUrl,
       issuerSlug: slug,
-      yieldsRows: market.yieldsPools || [],
+      yieldsRows,
       webResearch,
+      trace,
     });
     webResearch = llm.webResearch || webResearch;
     integrators = mergeLlmIntegrators(integrators, llm);
   }
+
+  const label = derivePoolLabel({
+    yieldsRows,
+    vaultAddress: vaultAddr,
+    chain: chainHint,
+    nameHint,
+    fallback: market.marketLabel || parsed.label,
+  });
+
   return {
-    label: market.marketLabel || parsed.label,
-    poolRef: `market:${market.marketLabel}`,
-    yieldsRows: market.yieldsPools || [],
-    underlyingTokens: tokensFromRows(market.yieldsPools || [], null),
+    label,
+    poolRef: vaultAddr
+      ? `contract:${chainHint || normalizeChain(yieldsRows[0]?.chain)}:${vaultAddr}`
+      : `market:${market.marketLabel || parsed.label}`,
+    url: poolUrl,
+    vaultAddress: vaultAddr,
+    chain: chainHint || (vaultAddr ? normalizeChain(yieldsRows[0]?.chain) : null),
+    nameHint,
+    issuerSlug: slug,
+    yieldsRows,
+    vaultMeta: resolveCtx.vaultMeta || null,
+    underlyingTokens: tokensFromRows(yieldsRows, vaultAddr, {
+      vaultAddress: vaultAddr,
+      chain: chainHint,
+      nameHint,
+    }),
     integrators,
     webResearch,
-    source: "yields_market",
+    source: vaultAddr ? "text+yields+web" : textResolved?.vaultAddress ? "text_search" : "yields_market",
   };
+}
+
+function guessIssuerFromQuery(q) {
+  const s = String(q || "").toLowerCase();
+  if (/morpho|steakusdc|steakhouse|metamorpho/i.test(s)) return "morpho";
+  if (/pendle|pt-/i.test(s)) return "pendle";
+  if (/aave/i.test(s)) return "aave";
+  if (/euler/i.test(s)) return "euler";
+  return null;
 }
 
 function tokensFromRows(rows, extraAddr, rowOpts = {}) {
