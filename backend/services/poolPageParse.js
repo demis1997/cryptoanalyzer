@@ -252,6 +252,13 @@ export function mergePageMetricsIntoHints(hints, metrics) {
   if (m.pendleAmmLiquidityUsd != null) {
     out.pendleAmmLiquidityUsd = m.pendleAmmLiquidityUsd;
     out.ammLiquidityUsd = m.ammLiquidityUsd ?? m.pendleAmmLiquidityUsd;
+    if (out.poolTvlUsd == null) {
+      out.poolTvlUsd = m.pendleAmmLiquidityUsd;
+      out.tvlSource = out.tvlSource || "protocol_api";
+      out.tvlEvidence =
+        out.tvlEvidence ||
+        `Pendle AMM liquidity $${Math.round(m.pendleAmmLiquidityUsd).toLocaleString()}`;
+    }
   }
   return out;
 }

@@ -436,7 +436,27 @@ function scorePoolAge(row, protocolListedAt) {
   };
 }
 
-function scorePoolTvl(row) {
+function resolvePoolTvlForScoring(row, poolType) {
+  if (poolType === "pendle_pt") {
+    const amm = row?.pendleAmmLiquidityUsd ?? row?.ammLiquidityUsd;
+    if (amm != null && isFinite(Number(amm)) && Number(amm) > 0) {
+      return {
+        tvl: Number(amm),
+        source: row?.tvlSource || "protocol_api",
+        evidence:
+          row?.tvlEvidence ||
+          `Pendle AMM liquidity $${Math.round(Number(amm)).toLocaleString()} (P.7)`,
+      };
+    }
+  }
+  return {
+    tvl: Number(row?.tvlUsd),
+    source: row?.tvlSource || "unknown",
+    evidence: row?.tvlEvidence,
+  };
+}
+
+function scorePoolTvl(row, poolType) {
   if (row?.tvlUncertain) {
     return {
       unavailable: true,
@@ -446,7 +466,7 @@ function scorePoolTvl(row) {
         "DefiLlama TVL is token/protocol aggregate, not this pool — parse pool page TVL or resolve vault address (P.7).",
     };
   }
-  const tvl = Number(row?.tvlUsd);
+  const { tvl, source, evidence } = resolvePoolTvlForScoring(row, poolType);
   if (!isFinite(tvl) || tvl <= 0) {
     return {
       unavailable: true,
@@ -470,11 +490,10 @@ function scorePoolTvl(row) {
     sc = 0.4;
     band = "$500K–$1M";
   }
-  const source = row?.tvlSource || "unknown";
   return {
     score: sc,
     input: `$${Math.round(tvl).toLocaleString()}`,
-    evidence: row?.tvlEvidence || `Pool TVL band ${band} → ${sc} (source: ${source}, P.7).`,
+    evidence: evidence || `Pool TVL band ${band} → ${sc} (source: ${source}, P.7).`,
     calcBreakdown: `tvl=$${Math.round(tvl).toLocaleString()} (${source}) → band ${band} → score ${sc}`,
   };
 }
@@ -659,6 +678,7 @@ function defillamaPoolUrl(row) {
 }
 
 function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
+  const poolType = opts.poolType;
   if (result.na) {
     return {
       confidence: "n/a",
@@ -775,10 +795,36 @@ function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
       }
       break;
     }
-    case "poolTvl":
-      confidence = "high";
-      confidenceReason = "TVL taken directly from DefiLlama yields row.";
+    case "poolTvl": {
+      if (result.unavailable || row?.tvlUncertain) {
+        confidence = "low";
+        confidenceReason =
+          row?.tvlEvidence ||
+          result.evidence ||
+          "Pool-specific TVL not resolved — DefiLlama token TVL excluded (P.7).";
+      } else {
+        const src = String(row?.tvlSource || "").toLowerCase();
+        if (/pool_page|crawl/.test(src)) {
+          confidence = "high";
+          confidenceReason = row?.tvlEvidence || "TVL parsed from pool web page.";
+        } else if (/protocol_api|on_chain|dune|protocol_url/.test(src)) {
+          confidence = "high";
+          confidenceReason =
+            row?.tvlEvidence ||
+            (poolType === "pendle_pt"
+              ? "Pendle AMM liquidity from protocol API (matches pool UI)."
+              : "TVL from protocol API or on-chain resolver.");
+        } else if (/defillama/.test(src)) {
+          confidence = "medium";
+          confidenceReason = "TVL from DefiLlama yields row (vault-matched only).";
+        } else {
+          confidence = "medium";
+          confidenceReason = result.evidence || row?.tvlEvidence || "Pool TVL from enriched scoring inputs.";
+        }
+      }
+      if (ctx.url) sources.push({ label: "Pool URL", url: ctx.url });
       break;
+    }
     case "yieldQuality": {
       pickFromNotes("defillama_chart");
       if (chartUrl) sources.push({ label: "DefiLlama APY chart", url: chartUrl });
@@ -857,7 +903,7 @@ export function buildPoolRiskAssessment(ctx, opts = {}) {
     parameterSafety: () => scoreParameterSafety(poolType, row),
     depositorConcentration: () => scoreDepositorConcentration(row),
     poolAge: () => scorePoolAge(row, protocolListedAt),
-    poolTvl: () => scorePoolTvl(row),
+    poolTvl: () => scorePoolTvl(row, poolType),
     yieldQuality: () => scoreYieldQuality(row),
     curatorQuality: () => scoreCurator(poolType, ctx.integrators, ctx.issuerSlug, ctx.label, row),
   };
@@ -873,7 +919,7 @@ export function buildPoolRiskAssessment(ctx, opts = {}) {
       result = scorers[def.key]() || {};
     }
 
-    const meta = enrichCriterionMeta(def.key, result, row, ctx, opts);
+    const meta = enrichCriterionMeta(def.key, result, row, ctx, { ...opts, poolType });
     const entry = {
       id: def.id,
       key: def.key,

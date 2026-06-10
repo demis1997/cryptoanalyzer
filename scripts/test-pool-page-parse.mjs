@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { parsePoolPageMetrics } from "../backend/services/poolPageParse.js";
+import { applyExternalDataToYieldsRows } from "../backend/services/poolDataSources.js";
 import { buildPoolRiskAssessment } from "../backend/llm/poolScoring.js";
 
 let failed = 0;
@@ -90,6 +91,27 @@ assert(p2amm.score === 0.85, `P.2 AMM liquidity score ${p2amm.score}`);
 const p4na = pendleAmm.criteria.find((c) => c.key === "parameterSafety");
 assert(p4na.na === true, "P.4 N/A for Pendle");
 const p7pendle = pendleAmm.criteria.find((c) => c.key === "poolTvl");
-assert(p7pendle.score === 0.8, `P.7 Pendle TVL score ${p7pendle.score}`);
+assert(p7pendle.score === 0.6, `P.7 Pendle AMM TVL score ${p7pendle.score}`);
+assert(p7pendle.input.includes("8,210,000"), `P.7 uses AMM not totalTvl: ${p7pendle.input}`);
+
+const [dlPendleRow] = applyExternalDataToYieldsRows(
+  [
+    {
+      symbol: "sUSDai",
+      project: "pendle",
+      pool: "fake-pool-id",
+      tvlUsd: 20_000_000_000,
+      tvlSource: "defillama",
+    },
+  ],
+  {
+    scoringHints: {
+      pendleAmmLiquidityUsd: 8_210_000,
+      ammLiquidityUsd: 8_210_000,
+    },
+  }
+);
+assert(Math.round(dlPendleRow.tvlUsd) === 8_210_000, `strip DL TVL for Pendle AMM ${dlPendleRow.tvlUsd}`);
+assert(dlPendleRow.tvlSource === "protocol_api", `Pendle TVL source ${dlPendleRow.tvlSource}`);
 
 process.exit(failed);

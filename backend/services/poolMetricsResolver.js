@@ -208,11 +208,18 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
     if (pendleHit?.market) {
       const pendleMeta = extractPendleScoringMeta(pendleHit.market);
       Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, pendleMeta || {}));
-      if (pendleMeta?.tvlUsd) {
+      const pendleTvl =
+        pendleMeta?.pendleAmmLiquidityUsd != null && isFinite(Number(pendleMeta.pendleAmmLiquidityUsd))
+          ? Number(pendleMeta.pendleAmmLiquidityUsd)
+          : pendleMeta?.tvlUsd;
+      if (pendleTvl != null && isFinite(Number(pendleTvl)) && Number(pendleTvl) > 0) {
         tvlCandidates.push({
-          value: pendleMeta.tvlUsd,
+          value: Number(pendleTvl),
           source: "protocol_api",
-          evidence: pendleMeta.tvlEvidence || "Pendle API totalTvl",
+          evidence:
+            pendleMeta?.pendleAmmLiquidityUsd != null
+              ? pendleMeta.tvlEvidence || "Pendle API AMM liquidity"
+              : pendleMeta.tvlEvidence || "Pendle API totalTvl",
         });
       }
       sources.push({

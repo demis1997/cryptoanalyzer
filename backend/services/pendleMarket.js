@@ -63,9 +63,15 @@ function marketAddresses(m) {
 export function extractPendleScoringMeta(market) {
   if (!market) return null;
   const details = market.details || {};
-  const totalTvl = Number(details.totalTvl ?? details.liquidity ?? 0);
+  const totalTvl = Number(details.totalTvl ?? 0);
   const ammLiq = Number(details.liquidity ?? 0);
-  const tvlUsd = isFinite(totalTvl) && totalTvl > 0 ? totalTvl : isFinite(ammLiq) && ammLiq > 0 ? ammLiq : null;
+  // P.7 matches Pendle UI "AMM Liquidity", not protocol-wide totalTvl.
+  const tvlUsd =
+    isFinite(ammLiq) && ammLiq > 0
+      ? ammLiq
+      : isFinite(totalTvl) && totalTvl > 0
+        ? totalTvl
+        : null;
 
   let daysToMaturity = null;
   if (market.expiry) {
@@ -90,7 +96,13 @@ export function extractPendleScoringMeta(market) {
     totalAssetsUsd: tvlUsd,
     tvlUsd,
     tvlSource: "protocol_api",
-    tvlEvidence: tvlUsd != null ? `Pendle API totalTvl/liquidity $${Math.round(tvlUsd).toLocaleString()}` : null,
+    tvlEvidence:
+      tvlUsd != null
+        ? ammLiq > 0
+          ? `Pendle API AMM liquidity $${Math.round(ammLiq).toLocaleString()}`
+          : `Pendle API totalTvl $${Math.round(totalTvl).toLocaleString()}`
+        : null,
+    pendleTotalTvlUsd: isFinite(totalTvl) && totalTvl > 0 ? totalTvl : null,
     pendleAmmLiquidityUsd: isFinite(ammLiq) && ammLiq > 0 ? ammLiq : null,
     ammLiquidityUsd: isFinite(ammLiq) && ammLiq > 0 ? ammLiq : null,
     pendleSecondaryMarket: hasSecondary,

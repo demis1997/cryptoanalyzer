@@ -224,6 +224,31 @@ export function parseScoringHintsFromText(text) {
   return hints;
 }
 
+function isPendleRow(row) {
+  return /pendle/i.test(String(row?.project || row?.issuerSlug || ""));
+}
+
+/** P.7 for Pendle uses AMM liquidity (pool UI), not DefiLlama token TVL or totalTvl. */
+function applyPendleAmmTvlForScoring(primary) {
+  if (!isPendleRow(primary)) return;
+  const amm = primary.pendleAmmLiquidityUsd ?? primary.ammLiquidityUsd;
+  if (amm == null || !isFinite(Number(amm)) || Number(amm) <= 0) return;
+  if (primary.tvlSource === "pool_page") return;
+  const current = Number(primary.tvlUsd ?? 0);
+  const looksLikeAggregate =
+    primary.tvlUncertain ||
+    /defillama/i.test(String(primary.tvlSource || "")) ||
+    current > Number(amm) * 3 ||
+    current >= 500_000_000;
+  if (!primary.tvlUsd || looksLikeAggregate) {
+    primary.defillamaTvlUsd = primary.defillamaTvlUsd ?? primary.tvlUsd;
+    primary.tvlUsd = Number(amm);
+    primary.tvlSource = "protocol_api";
+    primary.tvlEvidence = `Pendle AMM liquidity $${Math.round(amm).toLocaleString()}`;
+    primary.tvlUncertain = false;
+  }
+}
+
 function inferTvlMatchQuality(row, rowOpts = {}) {
   const vault = rowOpts.vaultAddress ? String(rowOpts.vaultAddress).toLowerCase() : null;
   if (vault && /^0x[a-f0-9]{40}$/.test(vault) && yieldsRowMatchesVault(row, vault, rowOpts.chain)) {
@@ -452,16 +477,29 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
     const authoritativeTvl =
       tvlMatchQuality === "vault" ||
       tvlMatchQuality === "verified" ||
-      tvlMatchQuality === "pool_id" ||
+      (tvlMatchQuality === "pool_id" && rowOpts.vaultAddress) ||
       /^(protocol_api|pool_page|on_chain|dune|protocol_url_match)$/i.test(String(primary.tvlSource || ""));
-    if (!authoritativeTvl && (tvlMatchQuality === "symbol" || !allowDl)) {
+    const dlTvlOk =
+      allowDl &&
+      (tvlMatchQuality === "vault" ||
+        (tvlMatchQuality === "name_hint" && rowOpts.nameHint) ||
+        (tvlMatchQuality === "pool_id" && rowOpts.vaultAddress));
+    if (!authoritativeTvl && !dlTvlOk) {
       primary.defillamaTvlUsd = primary.tvlUsd;
-      primary.tvlUsd = null;
-      primary.tvlUncertain = true;
-      primary.tvlEvidence = allowDl
-        ? "DefiLlama yields row matched by symbol only — not this pool's TVL; parse pool page or vault address"
-        : "DefiLlama TVL disabled for scoring (POOL_DEFILLAMA_TVL=0) — use pool page, on-chain, or Dune";
-    } else if (primary.tvlUsd != null) {
+      const pendleAmm = primary.pendleAmmLiquidityUsd ?? primary.ammLiquidityUsd;
+      if (isPendleRow(primary) && pendleAmm != null && isFinite(Number(pendleAmm)) && Number(pendleAmm) > 0) {
+        primary.tvlUsd = Number(pendleAmm);
+        primary.tvlSource = "protocol_api";
+        primary.tvlEvidence = `Pendle AMM liquidity $${Math.round(pendleAmm).toLocaleString()}`;
+        primary.tvlUncertain = false;
+      } else {
+        primary.tvlUsd = null;
+        primary.tvlUncertain = true;
+        primary.tvlEvidence = allowDl
+          ? "DefiLlama yields TVL is not pool-specific — parse pool page or resolve vault address"
+          : "DefiLlama TVL disabled for scoring (POOL_DEFILLAMA_TVL=0) — use pool page, on-chain, or Dune";
+      }
+    } else if (primary.tvlUsd != null && /defillama/i.test(String(primary.tvlSource || ""))) {
       primary.tvlSource = primary.tvlSource || (tvlMatchQuality === "vault" ? "defillama_vault" : "defillama_pool");
       primary.tvlUncertain = false;
     }
@@ -539,6 +577,7 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
     primary.apyCv30d = Number(primary.sigma);
     primary.apyStabilityEvidence = "DefiLlama yields sigma (POOL_DEFILLAMA_APY=1)";
   }
+  applyPendleAmmTvlForScoring(primary);
   rows[safeIdx] = primary;
   return rows;
 }

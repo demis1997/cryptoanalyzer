@@ -21,7 +21,18 @@ export function applyVaultScoringMetaToRow(row, meta) {
   if (!row || !meta || typeof meta !== "object") return row;
   const next = { ...row };
 
-  if (meta.totalAssetsUsd != null && isFinite(Number(meta.totalAssetsUsd)) && row.tvlSource !== "pool_page") {
+  if (meta.pendleAmmLiquidityUsd != null && isFinite(Number(meta.pendleAmmLiquidityUsd))) {
+    next.pendleAmmLiquidityUsd = Number(meta.pendleAmmLiquidityUsd);
+    next.ammLiquidityUsd = Number(meta.ammLiquidityUsd ?? meta.pendleAmmLiquidityUsd);
+    if (row.tvlSource !== "pool_page") {
+      next.tvlUsd = next.ammLiquidityUsd;
+      next.tvlSource = "protocol_api";
+      next.tvlEvidence =
+        meta.tvlEvidence ||
+        `Pendle AMM liquidity $${Math.round(next.ammLiquidityUsd).toLocaleString()}`;
+      next.tvlUncertain = false;
+    }
+  } else if (meta.totalAssetsUsd != null && isFinite(Number(meta.totalAssetsUsd)) && row.tvlSource !== "pool_page") {
     next.tvlUsd = Number(meta.totalAssetsUsd);
     next.tvlSource = row.tvlSource || meta.tvlSource || "protocol_api";
     next.tvlEvidence = meta.tvlEvidence || "Protocol API totalAssetsUsd";
@@ -58,7 +69,7 @@ export function applyVaultScoringMetaToRow(row, meta) {
     next.daysToMaturity = meta.daysToMaturity ?? meta.pendleDaysToMaturity;
     if (meta.maturityEvidence) next.maturityEvidence = meta.maturityEvidence;
   }
-  if (meta.pendleAmmLiquidityUsd != null) {
+  if (meta.pendleAmmLiquidityUsd != null && next.pendleAmmLiquidityUsd == null) {
     next.pendleAmmLiquidityUsd = Number(meta.pendleAmmLiquidityUsd);
     next.ammLiquidityUsd = Number(meta.ammLiquidityUsd ?? meta.pendleAmmLiquidityUsd);
   }
