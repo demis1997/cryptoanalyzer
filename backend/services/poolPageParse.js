@@ -50,6 +50,24 @@ const LLTV_PATTERNS = [
   /\bcollateral\s+factor[:\s]*(\d(?:\.\d+)?)/i,
 ];
 
+const WITHDRAWAL_QUEUE_PATTERNS = [
+  /\b(?:withdrawal|exit|unbonding|unstake|redemption)\s+queue[:\s]*(\d{1,4})\s*days?\b/i,
+  /\b(?:wait|delay|processing)\s+(?:time|period)[:\s]*(\d{1,4})\s*days?\b/i,
+  /\b(\d{1,4})\s*days?\s+(?:withdrawal|exit|unbonding|unstake|redemption)\s+queue\b/i,
+  /\bqueue\s+(?:time|wait|delay)[:\s]*(\d{1,4})\s*days?\b/i,
+  /\b(?:estimated|average)\s+(?:wait|delay)[:\s]*(\d{1,4})\s*days?\b/i,
+  /\bunbonding\s+period[:\s]*(\d{1,4})\s*days?\b/i,
+  /\b(\d{1,4})\s*days?\s+to\s+(?:withdraw|unstake|redeem|exit)\b/i,
+  /\b(?:withdraw|unstake|redeem)\s+(?:in|after)[:\s]*(\d{1,4})\s*days?\b/i,
+];
+
+const COOLDOWN_PATTERNS = [
+  /\b(?:cooldown|cool[- ]down|withdrawal)\s+period[:\s]*(\d{1,4})\s*days?\b/i,
+  /\b(\d{1,4})\s*days?\s+(?:cooldown|cool[- ]down|withdrawal\s+period)\b/i,
+  /\block(?:ed)?\s+for[:\s]*(\d{1,4})\s*days?\b/i,
+  /\b(?:exit|withdrawal)\s+cooldown[:\s]*(\d{1,4})\s*days?\b/i,
+];
+
 const MATURITY_PATTERNS = [
   /\b(\d{1,4})\s*days?\s+(?:to\s+)?maturity\b/i,
   /\bdays?\s+to\s+maturity[:\s]*(\d{1,4})\b/i,
@@ -103,6 +121,20 @@ function detectPendleSecondaryMarket(text) {
   return null;
 }
 
+function detectStakingSecondaryMarket(text) {
+  const t = String(text || "");
+  if (/\b(?:sell|trade|exit)\s+(?:on|via)\s+(?:dex|uniswap|curve|balancer)\b/i.test(t)) return true;
+  if (/\bsecondary\s+(?:market|liquidity)\b/i.test(t)) return true;
+  if (/\bliquid\s+(?:staking|derivative|token)\b/i.test(t) && /\b(?:uniswap|curve|dex)\b/i.test(t)) return true;
+  return null;
+}
+
+function detectInstantWithdrawal(text) {
+  const t = String(text || "");
+  if (/\b(?:sell|trade|exit)\s+(?:on|via)\s+(?:dex|uniswap|curve|balancer)\b/i.test(t)) return false;
+  return /\b(?:instant|immediate)\s+(?:withdraw|unstake|redemption)\b/i.test(t);
+}
+
 /**
  * @returns {Record<string, unknown>}
  */
@@ -146,6 +178,28 @@ export function parsePoolPageMetrics(text) {
   if (secondary != null) {
     hints.pendleSecondaryMarket = secondary;
     hints.pendleSecondaryEvidence = secondary ? "Secondary market mentioned on page" : "No active secondary market noted";
+  }
+
+  if (detectInstantWithdrawal(t)) {
+    hints.withdrawalQueueDays = 0;
+    hints.withdrawalQueueEvidence = "Parsed: instant withdrawal noted on page";
+  }
+  const queueHit = firstMatchNumber(t, WITHDRAWAL_QUEUE_PATTERNS);
+  if (queueHit) {
+    hints.withdrawalQueueDays = Math.round(queueHit.value);
+    hints.withdrawalQueueEvidence = `Parsed: "${queueHit.match}"`;
+  }
+
+  const cooldownHit = firstMatchNumber(t, COOLDOWN_PATTERNS);
+  if (cooldownHit) {
+    hints.vaultCooldownDays = Math.round(cooldownHit.value);
+    hints.vaultCooldownEvidence = `Parsed: "${cooldownHit.match}"`;
+  }
+
+  const stakingSecondary = detectStakingSecondaryMarket(t);
+  if (stakingSecondary != null) {
+    hints.stakingSecondaryMarket = stakingSecondary;
+    hints.stakingSecondaryEvidence = "Secondary DEX liquidity mentioned on page";
   }
 
   const cap = t.match(/\b(?:supply|borrow)\s+cap[:\s]*(\d{2,3}(?:\.\d+)?)\s*%\s*(?:filled|util)/i);
@@ -227,6 +281,18 @@ export function mergePageMetricsIntoHints(hints, metrics) {
   if (m.pendleSecondaryMarket != null) {
     out.pendleSecondaryMarket = m.pendleSecondaryMarket;
     out.pendleSecondaryEvidence = m.pendleSecondaryEvidence;
+  }
+  if (m.withdrawalQueueDays != null && out.withdrawalQueueDays == null) {
+    out.withdrawalQueueDays = m.withdrawalQueueDays;
+    out.withdrawalQueueEvidence = m.withdrawalQueueEvidence;
+  }
+  if (m.vaultCooldownDays != null && out.vaultCooldownDays == null) {
+    out.vaultCooldownDays = m.vaultCooldownDays;
+    out.vaultCooldownEvidence = m.vaultCooldownEvidence;
+  }
+  if (m.stakingSecondaryMarket != null && out.stakingSecondaryMarket == null) {
+    out.stakingSecondaryMarket = m.stakingSecondaryMarket;
+    out.stakingSecondaryEvidence = m.stakingSecondaryEvidence;
   }
   if (m.capUtilization != null && out.capUtilization == null) out.capUtilization = m.capUtilization;
   if (m.oracleType && !out.oracleType) out.oracleType = m.oracleType;

@@ -41,7 +41,11 @@ export function buildSyntheticYieldsRow({
     pendleDaysToMaturity: scoring?.pendleDaysToMaturity ?? null,
     pendleAmmLiquidityUsd: scoring?.pendleAmmLiquidityUsd ?? null,
     ammLiquidityUsd: scoring?.ammLiquidityUsd ?? null,
+    pendleTradingVolumeUsd: scoring?.pendleTradingVolumeUsd ?? null,
     pendleSecondaryMarket: scoring?.pendleSecondaryMarket ?? null,
+    withdrawalQueueDays: scoring?.withdrawalQueueDays ?? null,
+    vaultCooldownDays: scoring?.vaultCooldownDays ?? null,
+    stakingSecondaryMarket: scoring?.stakingSecondaryMarket ?? null,
     underlyingTokens: meta?.underlyingTokens || scoring?.underlyingTokens || [],
     synthetic: true,
   };

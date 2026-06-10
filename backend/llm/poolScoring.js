@@ -124,6 +124,48 @@ function scoreAssetQuality(row, underlyingTokens) {
   };
 }
 
+/** Infer Pendle PT secondary market when page/API did not set it explicitly. */
+function inferPendleSecondaryMarket(row) {
+  if (row?.pendleSecondaryMarket === true) return true;
+  if (row?.pendleSecondaryMarket === false) return false;
+  const amm = Number(row?.pendleAmmLiquidityUsd ?? row?.ammLiquidityUsd ?? 0);
+  const vol = Number(row?.pendleTradingVolumeUsd ?? 0);
+  if (amm >= 50_000 || vol > 0) return true;
+  if (amm > 0 && amm < 50_000) return false;
+  return null;
+}
+
+function scoreStakingQueueDays(days, hasSecondary) {
+  let sc = 0.3;
+  let band = ">30d";
+  if (days <= 0) {
+    sc = 1.0;
+    band = "instant";
+  } else if (days <= 1) {
+    sc = 0.9;
+    band = "≤1d";
+  } else if (days <= 7) {
+    sc = 0.75;
+    band = "2–7d";
+  } else if (days <= 30) {
+    sc = 0.55;
+    band = "8–30d";
+  }
+  if (hasSecondary) sc = clamp01(sc + 0.05);
+  return { sc, band };
+}
+
+function scoreVaultCooldownDays(days) {
+  if (days <= 1) return { sc: 0.85, band: "≤1d" };
+  if (days <= 7) return { sc: 0.7, band: "2–7d" };
+  return { sc: 0.5, band: ">7d" };
+}
+
+function scoreAmmLiquidityDepth(tvlUsd) {
+  if (tvlUsd >= 10_000_000) return { sc: 0.9, band: ">$10M pool liquidity" };
+  return { sc: 0.7, band: "<$10M pool liquidity (higher slippage risk)" };
+}
+
 function scoreLiquidityExit(poolType, row) {
   const t = poolType;
   if (t === "lending" || t === "curated_vault") {
@@ -160,6 +202,20 @@ function scoreLiquidityExit(poolType, row) {
     };
   }
   if (t === "staking") {
+    const days = row?.withdrawalQueueDays;
+    if (typeof days === "number" && isFinite(days)) {
+      const hasSecondary = row?.stakingSecondaryMarket === true;
+      const base = scoreStakingQueueDays(days, false);
+      const sc = hasSecondary ? clamp01(base.sc + 0.05) : base.sc;
+      const calcParts = [`queue=${days}d → band ${base.band} → base ${base.sc}`];
+      if (hasSecondary) calcParts.push(`+0.05 secondary DEX → ${sc}`);
+      return {
+        score: sc,
+        input: `${days === 0 ? "instant" : `${days}d queue`}${hasSecondary ? ", DEX secondary" : ""}`,
+        evidence: row?.withdrawalQueueEvidence || `Staking withdrawal queue band ${base.band} (P.2).`,
+        calcBreakdown: calcParts.join("; "),
+      };
+    }
     return {
       unavailable: true,
       input: "withdrawal queue unknown",
@@ -167,11 +223,24 @@ function scoreLiquidityExit(poolType, row) {
     };
   }
   if (t === "amm_lp") {
-    return { score: 0.9, input: "AMM/LP", evidence: "Exit anytime with slippage risk (P.2).", calcBreakdown: "AMM/LP default 0.90" };
+    const liq = Number(row?.tvlUsd ?? row?.poolTvlUsd ?? 0);
+    if (isFinite(liq) && liq > 0) {
+      const { sc, band } = scoreAmmLiquidityDepth(liq);
+      return {
+        score: sc,
+        input: `pool liquidity $${Math.round(liq).toLocaleString()}`,
+        evidence: row?.tvlEvidence || `AMM liquidity depth ${band} (P.2).`,
+        calcBreakdown: `liquidity=$${Math.round(liq).toLocaleString()} → ${band} → score ${sc}`,
+      };
+    }
+    return {
+      unavailable: true,
+      input: "pool liquidity unknown",
+      evidence: "AMM/LP pool liquidity not parsed — criterion excluded (P.2).",
+    };
   }
   if (t === "pendle_pt") {
     const days = row?.pendleDaysToMaturity ?? row?.daysToMaturity;
-    const ammLiq = row?.pendleAmmLiquidityUsd ?? row?.ammLiquidityUsd;
     if (typeof days === "number" && isFinite(days)) {
       let baseSc = 0.9;
       let band = ">90d";
@@ -185,49 +254,52 @@ function scoreLiquidityExit(poolType, row) {
         baseSc = 0.8;
         band = "31–90d";
       }
-      const hasSecondary = row?.pendleSecondaryMarket;
-      const secondaryAdj = hasSecondary === false ? 0.3 : 0;
+      const secondary = inferPendleSecondaryMarket(row);
+      const secondaryAdj = secondary === false ? 0.3 : 0;
       const sc = Math.max(0, baseSc - secondaryAdj);
       const calcParts = [`daysToMaturity=${days} → band ${band} → base ${baseSc}`];
       if (secondaryAdj) calcParts.push(`no secondary market −0.30 → ${sc}`);
+      else if (secondary === true) calcParts.push("secondary market active");
+      const secondaryLabel =
+        secondary === false ? ", no secondary market" : secondary === true ? ", secondary market" : "";
       return {
         score: sc,
-        input: `${days}d to maturity${hasSecondary === false ? ", no secondary market" : hasSecondary ? ", secondary market" : ""}`,
-        evidence: row?.maturityEvidence || `Pendle PT maturity table (P.2).`,
+        input: `${days}d to maturity${secondaryLabel}`,
+        evidence:
+          row?.maturityEvidence ||
+          row?.pendleSecondaryEvidence ||
+          `Pendle PT maturity table (P.2).`,
         calcBreakdown: calcParts.join("; "),
-      };
-    }
-    if (typeof ammLiq === "number" && isFinite(ammLiq) && ammLiq > 0) {
-      let sc = 0.7;
-      let band = "$500K–$1M";
-      if (ammLiq >= 10_000_000) {
-        sc = 0.9;
-        band = ">$10M AMM";
-      } else if (ammLiq >= 1_000_000) {
-        sc = 0.85;
-        band = "$1M–$10M AMM";
-      } else if (ammLiq >= 500_000) {
-        sc = 0.75;
-        band = "$500K–$1M AMM";
-      }
-      return {
-        score: sc,
-        input: `AMM liquidity $${Math.round(ammLiq).toLocaleString()}`,
-        evidence: row?.tvlEvidence || `Pendle AMM liquidity band ${band} (P.2).`,
-        calcBreakdown: `ammLiquidity=$${Math.round(ammLiq).toLocaleString()} → ${band} → score ${sc}`,
       };
     }
     return {
       unavailable: true,
-      input: "maturity/AMM liquidity not found",
+      input: "days to maturity not found",
       evidence:
-        "Pendle P.2 needs days-to-maturity or AMM Liquidity from pool page / Pendle API — criterion excluded.",
+        "Pendle P.2 requires days-to-maturity from Pendle API or pool page — AMM liquidity is used for P.7 only.",
+    };
+  }
+  if (t === "structured_vault") {
+    const days = row?.vaultCooldownDays;
+    if (typeof days === "number" && isFinite(days)) {
+      const { sc, band } = scoreVaultCooldownDays(days);
+      return {
+        score: sc,
+        input: `${days}d cooldown`,
+        evidence: row?.vaultCooldownEvidence || `Structured vault cooldown band ${band} (P.2).`,
+        calcBreakdown: `cooldown=${days}d → band ${band} → score ${sc}`,
+      };
+    }
+    return {
+      unavailable: true,
+      input: "exit terms unknown",
+      evidence: "Structured vault cooldown/exit not found on pool page — criterion excluded (P.2).",
     };
   }
   return {
     unavailable: true,
     input: "exit terms unknown",
-    evidence: "Structured vault cooldown/exit not found on pool page — criterion excluded (P.2).",
+    evidence: "Pool exit terms not resolved for this pool type — criterion excluded (P.2).",
   };
 }
 
@@ -633,7 +705,7 @@ const CRITERION_GUIDE = {
   },
   "P.2": {
     summary: "How easily you can exit at full value (utilization, queues, maturity).",
-    dataSources: "DefiLlama utilization; pool type heuristics; crawl text for withdrawal terms.",
+    dataSources: "Protocol API utilization; Pendle maturity; crawl text for withdrawal queue and cooldown.",
   },
   "P.3": {
     summary: "Oracle quality for liquidations and pricing (N/A for pure staking).",
@@ -652,8 +724,8 @@ const CRITERION_GUIDE = {
     dataSources: "Pool created timestamp, DefiLlama history, protocol listedAt fallback.",
   },
   "P.7": {
-    summary: "Absolute pool TVL from DefiLlama yields.",
-    dataSources: "DefiLlama yields API.",
+    summary: "Absolute pool TVL from pool page, protocol API, or on-chain.",
+    dataSources: "Pool page crawl, protocol API, on-chain ERC4626; DefiLlama only when vault-matched.",
   },
   "P.8": {
     summary: "Organic vs emission yield and APY stability over 30 days.",
@@ -726,14 +798,46 @@ function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
       break;
     }
     case "liquidityExit": {
-      if (typeof (row?.utilization ?? row?.utilizationRate) === "number") {
-        confidence = "high";
-        confidenceReason = "Utilization rate from DefiLlama yields row.";
+      if (result.unavailable) {
+        confidence = "low";
+        confidenceReason = result.evidence || "Exit liquidity data not resolved — criterion excluded.";
+      } else if (poolType === "lending" || poolType === "curated_vault") {
+        const src = String(row?.utilizationEvidence || row?.utilizationSource || "").toLowerCase();
+        if (/morpho|aave|compound|spark|fluid|kamino|protocol|on.?chain|pool page|parsed/i.test(src)) {
+          confidence = "high";
+          confidenceReason = row?.utilizationEvidence || "Utilization from protocol API or pool page.";
+        } else if (typeof (row?.utilization ?? row?.utilizationRate) === "number") {
+          confidence = "medium";
+          confidenceReason = row?.utilizationEvidence || "Utilization present but source unverified.";
+        } else {
+          confidence = "medium";
+          confidenceReason = result.evidence || "Pool-type default applied.";
+        }
+        pickFromNotes("morpho");
+        pickFromNotes("aave");
+        pickFromNotes("pendle");
+      } else if (poolType === "pendle_pt") {
+        confidence = row?.maturityEvidence ? "high" : "medium";
+        confidenceReason =
+          row?.maturityEvidence ||
+          row?.pendleSecondaryEvidence ||
+          "Pendle PT maturity and secondary market from protocol API or pool page.";
+        pickFromNotes("pendle");
+      } else if (poolType === "staking") {
+        confidence = row?.withdrawalQueueEvidence ? "high" : "medium";
+        confidenceReason = row?.withdrawalQueueEvidence || "Staking withdrawal queue from pool page crawl.";
+      } else if (poolType === "structured_vault") {
+        confidence = row?.vaultCooldownEvidence ? "high" : "medium";
+        confidenceReason = row?.vaultCooldownEvidence || "Vault cooldown parsed from pool page.";
+      } else if (poolType === "amm_lp") {
+        confidence = row?.tvlSource === "pool_page" || row?.tvlSource === "protocol_api" ? "high" : "medium";
+        confidenceReason = row?.tvlEvidence || "AMM liquidity depth proxy for exit slippage (P.2).";
       } else {
         confidence = "medium";
-        confidenceReason = "No utilization in API; score uses pool-type default (vault/LST/AMM).";
+        confidenceReason = result.evidence || "Pool-type heuristic applied.";
       }
       pickFromNotes("inspector");
+      if (ctx.url) sources.push({ label: "Pool URL", url: ctx.url });
       break;
     }
     case "oracleQuality": {

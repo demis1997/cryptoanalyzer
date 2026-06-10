@@ -105,6 +105,7 @@ export function extractPendleScoringMeta(market) {
     pendleTotalTvlUsd: isFinite(totalTvl) && totalTvl > 0 ? totalTvl : null,
     pendleAmmLiquidityUsd: isFinite(ammLiq) && ammLiq > 0 ? ammLiq : null,
     ammLiquidityUsd: isFinite(ammLiq) && ammLiq > 0 ? ammLiq : null,
+    pendleTradingVolumeUsd: isFinite(tradingVol) && tradingVol > 0 ? tradingVol : null,
     pendleSecondaryMarket: hasSecondary,
     pendleSecondaryEvidence: hasSecondary ? "Pendle API: AMM liquidity / trading volume" : "Low AMM liquidity on Pendle API",
     apyPct,
@@ -128,6 +129,7 @@ export function pendleMetaForVault(market) {
     maturityEvidence: base.maturityEvidence,
     pendleAmmLiquidityUsd: base.pendleAmmLiquidityUsd,
     ammLiquidityUsd: base.ammLiquidityUsd,
+    pendleTradingVolumeUsd: base.pendleTradingVolumeUsd,
     pendleSecondaryMarket: base.pendleSecondaryMarket,
     pendleSecondaryEvidence: base.pendleSecondaryEvidence,
   };

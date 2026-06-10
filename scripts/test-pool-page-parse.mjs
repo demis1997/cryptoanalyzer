@@ -43,6 +43,15 @@ const pa = parsePoolPageMetrics(pendleAmmText);
 assert(Math.round(pa.poolTvlUsd) === 8_210_000, `AMM liquidity tvl ${pa.poolTvlUsd}`);
 assert(Math.round(pa.pendleAmmLiquidityUsd) === 8_210_000, `AMM liq field ${pa.pendleAmmLiquidityUsd}`);
 
+const stakingText = `weETH staking vault · Withdrawal queue: 5 days · Trade on Uniswap for instant exit`;
+const st = parsePoolPageMetrics(stakingText);
+assert(st.withdrawalQueueDays === 5, `staking queue ${st.withdrawalQueueDays}`);
+assert(st.stakingSecondaryMarket === true, "staking secondary");
+
+const cooldownText = `Ethena USDe vault · Cooldown period: 3 days before withdrawal`;
+const cd = parsePoolPageMetrics(cooldownText);
+assert(cd.vaultCooldownDays === 3, `cooldown ${cd.vaultCooldownDays}`);
+
 const p4 = buildPoolRiskAssessment({
   label: "test vault",
   yieldsRows: [{ symbol: "USDC", apyBase: 5 }],
@@ -87,7 +96,7 @@ const pendleAmm = buildPoolRiskAssessment({
 });
 assert(pendleAmm.poolType === "pendle_pt", `pendle pool type ${pendleAmm.poolType}`);
 const p2amm = pendleAmm.criteria.find((c) => c.key === "liquidityExit");
-assert(p2amm.score === 0.85, `P.2 AMM liquidity score ${p2amm.score}`);
+assert(p2amm.unavailable === true, `P.2 excludes AMM-only Pendle ${p2amm.score}`);
 const p4na = pendleAmm.criteria.find((c) => c.key === "parameterSafety");
 assert(p4na.na === true, "P.4 N/A for Pendle");
 const p7pendle = pendleAmm.criteria.find((c) => c.key === "poolTvl");
@@ -113,5 +122,60 @@ const [dlPendleRow] = applyExternalDataToYieldsRows(
 );
 assert(Math.round(dlPendleRow.tvlUsd) === 8_210_000, `strip DL TVL for Pendle AMM ${dlPendleRow.tvlUsd}`);
 assert(dlPendleRow.tvlSource === "protocol_api", `Pendle TVL source ${dlPendleRow.tvlSource}`);
+
+const pendleMaturity = buildPoolRiskAssessment({
+  label: "PT-weETH",
+  issuerSlug: "pendle",
+  yieldsRows: [
+    {
+      symbol: "PT-weETH",
+      project: "pendle",
+      pendleDaysToMaturity: 120,
+      pendleAmmLiquidityUsd: 8_210_000,
+      pendleSecondaryMarket: true,
+    },
+  ],
+});
+const p2mat = pendleMaturity.criteria.find((c) => c.key === "liquidityExit");
+assert(p2mat.score === 0.9, `P.2 Pendle maturity+secondary ${p2mat.score}`);
+
+const stakingRisk = buildPoolRiskAssessment({
+  label: "weETH",
+  yieldsRows: [{ symbol: "weETH", withdrawalQueueDays: 5, stakingSecondaryMarket: true }],
+});
+assert(stakingRisk.poolType === "staking", `staking type ${stakingRisk.poolType}`);
+const p2st = stakingRisk.criteria.find((c) => c.key === "liquidityExit");
+assert(p2st.score === 0.8, `P.2 staking queue+secondary ${p2st.score}`);
+
+const vaultRisk = buildPoolRiskAssessment({
+  label: "USDe vault",
+  yieldsRows: [{ symbol: "USDe", poolMeta: "earn vault", vaultCooldownDays: 3 }],
+});
+const p2cd = vaultRisk.criteria.find((c) => c.key === "liquidityExit");
+assert(p2cd.score === 0.7, `P.2 vault cooldown ${p2cd.score}`);
+
+const ammRisk = buildPoolRiskAssessment({
+  label: "USDC/WETH",
+  yieldsRows: [{ symbol: "USDC-WETH", poolMeta: "uniswap v3", tvlUsd: 15_000_000, tvlSource: "pool_page" }],
+});
+assert(ammRisk.poolType === "amm_lp", `amm type ${ammRisk.poolType}`);
+const p2ammLiq = ammRisk.criteria.find((c) => c.key === "liquidityExit");
+assert(p2ammLiq.score === 0.9, `P.2 deep AMM ${p2ammLiq.score}`);
+
+const morphoP2 = buildPoolRiskAssessment({
+  label: "steakUSDC",
+  yieldsRows: [
+    {
+      symbol: "USDC",
+      utilization: 0.72,
+      utilizationEvidence: "Morpho API market utilization 72.0%",
+      poolMeta: "MetaMorpho",
+    },
+  ],
+  integrators: [{ name: "Morpho", id: "morpho" }],
+});
+const p2util = morphoP2.criteria.find((c) => c.key === "liquidityExit");
+assert(p2util.score === 0.85, `P.2 lending util ${p2util.score}`);
+assert(/Morpho API/i.test(p2util.confidenceReason), `P.2 audit text ${p2util.confidenceReason}`);
 
 process.exit(failed);

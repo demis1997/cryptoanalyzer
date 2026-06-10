@@ -77,13 +77,37 @@ export function applyVaultScoringMetaToRow(row, meta) {
     next.pendleSecondaryMarket = meta.pendleSecondaryMarket;
     next.pendleSecondaryEvidence = meta.pendleSecondaryEvidence || null;
   }
+  if (meta.pendleTradingVolumeUsd != null) {
+    next.pendleTradingVolumeUsd = Number(meta.pendleTradingVolumeUsd);
+  }
+  if (meta.withdrawalQueueDays != null) {
+    next.withdrawalQueueDays = Number(meta.withdrawalQueueDays);
+    next.withdrawalQueueEvidence = meta.withdrawalQueueEvidence || null;
+  }
+  if (meta.vaultCooldownDays != null) {
+    next.vaultCooldownDays = Number(meta.vaultCooldownDays);
+    next.vaultCooldownEvidence = meta.vaultCooldownEvidence || null;
+  }
+  if (meta.stakingSecondaryMarket != null) {
+    next.stakingSecondaryMarket = meta.stakingSecondaryMarket;
+    next.stakingSecondaryEvidence = meta.stakingSecondaryEvidence || null;
+  }
 
   return next;
 }
 
 const CRITERION_FIELDS = {
   assetQuality: ["symbol", "underlyingTokens", "assetRankHint"],
-  liquidityExit: ["utilization", "utilizationRate", "pendleDaysToMaturity", "daysToMaturity"],
+  liquidityExit: [
+    "utilization",
+    "utilizationRate",
+    "pendleDaysToMaturity",
+    "daysToMaturity",
+    "withdrawalQueueDays",
+    "vaultCooldownDays",
+    "pendleSecondaryMarket",
+    "stakingSecondaryMarket",
+  ],
   oracleQuality: ["oracleType", "oracle"],
   parameterSafety: ["lltv", "ltv", "capUtilization", "supplyCapFill"],
   depositorConcentration: ["depositorShares", "top1DepositorPct", "depositorSharePercents"],

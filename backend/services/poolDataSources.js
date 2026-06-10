@@ -560,6 +560,18 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
     primary.pendleAmmLiquidityUsd = Number(hints.pendleAmmLiquidityUsd);
     primary.ammLiquidityUsd = Number(hints.ammLiquidityUsd ?? hints.pendleAmmLiquidityUsd);
   }
+  if (hints.withdrawalQueueDays != null) {
+    primary.withdrawalQueueDays = Number(hints.withdrawalQueueDays);
+    primary.withdrawalQueueEvidence = hints.withdrawalQueueEvidence || null;
+  }
+  if (hints.vaultCooldownDays != null) {
+    primary.vaultCooldownDays = Number(hints.vaultCooldownDays);
+    primary.vaultCooldownEvidence = hints.vaultCooldownEvidence || null;
+  }
+  if (hints.stakingSecondaryMarket != null) {
+    primary.stakingSecondaryMarket = hints.stakingSecondaryMarket;
+    primary.stakingSecondaryEvidence = hints.stakingSecondaryEvidence || null;
+  }
   if (defillamaScoringFlag("POOL_DEFILLAMA_CHART") && externalData?.defillamaChart?.firstTimestampMs) {
     primary.poolCreatedAt = primary.poolCreatedAt || externalData.defillamaChart.firstTimestampMs;
     primary.poolAgeEvidence = primary.poolAgeEvidence || "DefiLlama APY history first sample";
