@@ -114,7 +114,12 @@ export async function fetchSparkReserve({ chain, underlyingAsset }) {
       priceUsd = Number(dlJson?.coins?.[key]?.price);
       if (!isFinite(priceUsd)) priceUsd = null;
     }
-    if (priceUsd != null && supply > 0) tvlUsd = supply * priceUsd;
+    const available = Math.max(0, supply - debt);
+    if (priceUsd != null && available > 0) {
+      tvlUsd = available * priceUsd;
+    } else if (priceUsd != null && supply > 0) {
+      tvlUsd = supply * priceUsd;
+    }
 
     const ltvPct = Number(configData[1]) / 100;
     const liqThreshPct = Number(configData[2]) / 100;
@@ -122,7 +127,12 @@ export async function fetchSparkReserve({ chain, underlyingAsset }) {
 
     const scoring = {
       totalAssetsUsd: tvlUsd,
-      tvlEvidence: tvlUsd != null ? `Spark on-chain supply ~$${Math.round(tvlUsd).toLocaleString()}` : null,
+      supplyAssetsUsd: priceUsd != null && supply > 0 ? supply * priceUsd : null,
+      liquidityAssetsUsd: tvlUsd,
+      tvlEvidence:
+        tvlUsd != null
+          ? `Spark on-chain available liquidity ~$${Math.round(tvlUsd).toLocaleString()} (supply − debt)`
+          : null,
       utilization: util != null && isFinite(util) ? util : null,
       utilizationEvidence:
         util != null ? `Spark reserve utilization ${(util * 100).toFixed(1)}% (variable+stable debt / supply)` : null,

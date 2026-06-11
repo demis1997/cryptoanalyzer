@@ -147,7 +147,7 @@ export async function gatherPoolWebResearch({ poolLabel, poolUrl, issuerSlug } =
   let page = null;
   let crawl = null;
   if (poolUrl && /^https?:\/\//i.test(poolUrl)) {
-    crawl = await crawlPoolWebsite(poolUrl).catch((e) => ({
+    crawl = await crawlPoolWebsite(poolUrl, { poolLabel }).catch((e) => ({
       enabled: true,
       ok: false,
       error: String(e?.message || e),

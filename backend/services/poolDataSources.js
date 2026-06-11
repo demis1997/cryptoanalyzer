@@ -7,6 +7,7 @@ import { searchWeb } from "./webResearch.js";
 import { selectPrimaryYieldsRow, yieldsRowMatchesVault, rowMatchesNameHint } from "./poolAddress.js";
 import { parsePoolPageMetrics, mergePageMetricsIntoHints } from "./poolPageParse.js";
 import { readErc20Metadata } from "./onChainToken.js";
+import { mergeTvlIntoRow } from "./tvlSourcePriority.js";
 
 const CG_PLATFORM = {
   ethereum: "ethereum",
@@ -300,7 +301,11 @@ export async function gatherPoolExternalData(ctx, { webResearch = null } = {}) {
     .filter(Boolean)
     .join("\n");
   if (webBlob.trim()) {
-    Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, parseScoringHintsFromText(webBlob)));
+    const webParsed = parseScoringHintsFromText(webBlob);
+    delete webParsed.poolTvlUsd;
+    delete webParsed.tvlSource;
+    delete webParsed.tvlEvidence;
+    Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, webParsed));
     sources.push({
       id: "web_research_parse",
       label: "Web search + pool page parse",
@@ -327,7 +332,6 @@ export async function gatherPoolExternalData(ctx, { webResearch = null } = {}) {
       detail: chart?.apyCv30d != null ? `30d APY CV ≈ ${chart.apyCv30d.toFixed(3)} (${chart.points} points)` : chart?.error || "no data",
     });
     if (chart?.apyCv30d != null) scoringHints.apyCv30d = chart.apyCv30d;
-    if (chart?.firstTimestampMs) scoringHints.poolCreatedAt = chart.firstTimestampMs;
   }
 
   const tokens = Array.isArray(ctx?.underlyingTokens) ? ctx.underlyingTokens : [];
@@ -421,7 +425,10 @@ export async function gatherPoolExternalData(ctx, { webResearch = null } = {}) {
       .flatMap((s) => (s.hits || []).map((h) => `${h.title} ${h.snippet}`))
       .join("\n");
     if (inspectorBlob) {
-      Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, parseScoringHintsFromText(inspectorBlob)));
+      const inspParsed = parseScoringHintsFromText(inspectorBlob);
+      delete inspParsed.poolTvlUsd;
+      delete inspParsed.tvlSource;
+      Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, inspParsed));
     }
   }
 
@@ -467,12 +474,17 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
   primary.tvlMatchQuality = tvlMatchQuality;
 
   if (hints.poolTvlUsd != null && isFinite(Number(hints.poolTvlUsd))) {
-    primary.defillamaTvlUsd = primary.tvlUsd;
-    primary.tvlUsd = Number(hints.poolTvlUsd);
-    primary.tvlSource = hints.tvlSource || "pool_page";
-    primary.tvlEvidence = hints.tvlEvidence || "Parsed from pool web page";
-    primary.tvlUncertain = false;
-  } else if (!hints.poolTvlUsd) {
+    const merged = mergeTvlIntoRow(primary, {
+      value: Number(hints.poolTvlUsd),
+      source: hints.tvlSource || "pool_page",
+      evidence: hints.tvlEvidence || "Parsed from pool web page",
+    });
+    Object.assign(primary, merged);
+  }
+  if (hints.tvlCandidates?.length) {
+    primary.tvlCandidates = hints.tvlCandidates;
+  }
+  if (!primary.tvlUsd || primary.tvlUncertain) {
     const allowDl = /^(1|true|yes|on)$/i.test(String(process.env.POOL_DEFILLAMA_TVL || "0").trim());
     const authoritativeTvl =
       tvlMatchQuality === "vault" ||
@@ -571,10 +583,6 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
   if (hints.stakingSecondaryMarket != null) {
     primary.stakingSecondaryMarket = hints.stakingSecondaryMarket;
     primary.stakingSecondaryEvidence = hints.stakingSecondaryEvidence || null;
-  }
-  if (defillamaScoringFlag("POOL_DEFILLAMA_CHART") && externalData?.defillamaChart?.firstTimestampMs) {
-    primary.poolCreatedAt = primary.poolCreatedAt || externalData.defillamaChart.firstTimestampMs;
-    primary.poolAgeEvidence = primary.poolAgeEvidence || "DefiLlama APY history first sample";
   }
   if (hints.oracleType === "chainlink") primary.oracleType = "Chainlink";
   else if (hints.oracleType === "chainlink_derived") primary.oracleType = "Chainlink derived";

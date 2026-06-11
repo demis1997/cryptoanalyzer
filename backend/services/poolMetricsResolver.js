@@ -1,6 +1,6 @@
 /**
- * Web-first pool identity + metrics resolution.
- * Priority: pool page / crawl > protocol API > on-chain > Dune > Moralis > DefiLlama (opt-in).
+ * Pool identity + metrics resolution.
+ * TVL priority: protocol/contract API → Playwright pool page → analytics (DL/Dune) → web search.
  */
 import { parsePoolPageMetrics, mergePageMetricsIntoHints } from "./poolPageParse.js";
 import { readErc20Metadata, readErc4626VaultTvlUsd } from "./onChainToken.js";
@@ -8,31 +8,14 @@ import { moralisErc20Metadata } from "./moralisClient.js";
 import { gatherDunePoolResearch } from "./duneResearch.js";
 import { searchWeb } from "./webResearch.js";
 import { findPendleMarket, extractPendleScoringMeta } from "./pendleMarket.js";
-
-const TVL_SOURCE_RANK = {
-  pool_page: 0,
-  protocol_api: 1,
-  on_chain: 2,
-  dune: 3,
-  moralis: 4,
-  defillama: 5,
-};
+import { pickBestTvlCandidate, tvlConfidenceForSource } from "./tvlSourcePriority.js";
 
 function defillamaTvlAllowed() {
   return /^(1|true|yes|on)$/i.test(String(process.env.POOL_DEFILLAMA_TVL || "0").trim());
 }
 
-function pickBestCandidate(candidates, { allowDefillama = false } = {}) {
-  const list = (candidates || []).filter((c) => c?.value != null && isFinite(Number(c.value)) && Number(c.value) > 0);
-  const filtered = allowDefillama ? list : list.filter((c) => c.source !== "defillama");
-  if (!filtered.length) return null;
-  filtered.sort((a, b) => (TVL_SOURCE_RANK[a.source] ?? 99) - (TVL_SOURCE_RANK[b.source] ?? 99));
-  return filtered[0];
-}
-
-function collectTextBlobs(webResearch) {
+function collectSearchBlobs(webResearch) {
   return [
-    webResearch?.crawl?.formatted || "",
     webResearch?.formatted || "",
     webResearch?.scoringResearch?.formatted || "",
     webResearch?.duneResearch?.formatted || "",
@@ -97,50 +80,24 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
   const tvlCandidates = [];
   const sources = [];
 
-  const blobs = collectTextBlobs(webResearch);
-  const pageParsed = parsePoolPageMetrics(blobs.join("\n"));
-  Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, pageParsed));
-  if (pageParsed.poolTvlUsd) {
+  // Tier 1: protocol API / on-chain (contract address)
+  const vaultMeta = ctx?.vaultMeta?.scoring || ctx?.vaultMeta;
+  if (vaultMeta?.totalAssetsUsd != null && isFinite(Number(vaultMeta.totalAssetsUsd))) {
     tvlCandidates.push({
-      value: pageParsed.poolTvlUsd,
-      source: "pool_page",
-      evidence: pageParsed.tvlEvidence || "Parsed from pool site / web crawl",
-    });
-  }
-
-  const metricsSearch = await searchPoolMetricsWeb({ ...ctx, yieldsRow: row, symbol: row.symbol });
-  Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, metricsSearch.hints));
-  if (metricsSearch.hints.poolTvlUsd) {
-    tvlCandidates.push({
-      value: metricsSearch.hints.poolTvlUsd,
-      source: "pool_page",
-      evidence: metricsSearch.hints.tvlEvidence || "Web search pool metrics",
-    });
-  }
-
-  const duneResearch = await gatherDunePoolResearch({
-    poolLabel: ctx?.label,
-    symbol: row?.symbol,
-    issuerSlug: ctx?.issuerSlug,
-    vaultAddress: /^0x[a-f0-9]{40}$/.test(vaultAddress) ? vaultAddress : null,
-    chain,
-  });
-  if (webResearch) webResearch.duneResearch = duneResearch;
-  Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, duneResearch.hints || {}));
-  if (duneResearch.hints?.poolTvlUsd) {
-    tvlCandidates.push({
-      value: duneResearch.hints.poolTvlUsd,
-      source: "dune",
-      evidence: duneResearch.hints.tvlEvidence || "Dune Analytics",
+      value: Number(vaultMeta.totalAssetsUsd),
+      source: "protocol_api",
+      evidence: vaultMeta.tvlEvidence || "Protocol API totalAssetsUsd",
     });
     sources.push({
-      id: "dune",
-      label: "Dune Analytics",
-      provider: "Dune",
+      id: "protocol_api",
+      label: "Protocol API",
+      provider: ctx?.vaultMeta?.source || "protocol",
       ok: true,
-      detail: `TVL $${Math.round(duneResearch.hints.poolTvlUsd).toLocaleString()}`,
-      url: "https://dune.com",
+      detail: vaultMeta.tvlEvidence || `TVL $${Math.round(vaultMeta.totalAssetsUsd).toLocaleString()}`,
     });
+  }
+  if (vaultMeta?.pendleAmmLiquidityUsd != null && isFinite(Number(vaultMeta.pendleAmmLiquidityUsd))) {
+    Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, vaultMeta));
   }
 
   if (/^0x[a-f0-9]{40}$/.test(vaultAddress)) {
@@ -177,18 +134,6 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
         detail: `${identity.symbol || "?"}${identity.name ? ` · ${identity.name}` : ""}`,
       });
     }
-  }
-
-  const vaultMeta = ctx?.vaultMeta?.scoring || ctx?.vaultMeta;
-  if (vaultMeta?.totalAssetsUsd != null && isFinite(Number(vaultMeta.totalAssetsUsd))) {
-    tvlCandidates.push({
-      value: Number(vaultMeta.totalAssetsUsd),
-      source: "protocol_api",
-      evidence: vaultMeta.tvlEvidence || "Protocol API totalAssetsUsd",
-    });
-  }
-  if (vaultMeta?.pendleAmmLiquidityUsd != null && isFinite(Number(vaultMeta.pendleAmmLiquidityUsd))) {
-    Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, vaultMeta));
   }
 
   const needsPendleMetrics =
@@ -240,15 +185,105 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
     }
   }
 
-  if (defillamaTvlAllowed() && row?.tvlUsd != null && !row?.tvlUncertain) {
+  // Tier 2: Playwright pool page crawl only (not Tavily snippets)
+  const primaryPage = webResearch?.crawl?.pages?.find((p) => p.primary) || webResearch?.crawl?.pages?.[0];
+  const crawlStructured =
+    webResearch?.crawl?.structuredHints ||
+    (primaryPage?.metrics ? primaryPage.metrics : null) ||
+    {};
+  const crawlParsed = mergePageMetricsIntoHints(
+    crawlStructured,
+    parsePoolPageMetrics(webResearch?.crawl?.formatted || "", {
+      innerText: primaryPage?.excerpt || "",
+      url: ctx?.url || primaryPage?.url,
+      poolLabel: ctx?.label,
+    })
+  );
+  Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, crawlParsed));
+  if (crawlParsed.poolTvlUsd) {
     tvlCandidates.push({
-      value: Number(row.tvlUsd),
-      source: "defillama",
-      evidence: "DefiLlama yields row (POOL_DEFILLAMA_TVL=1)",
+      value: crawlParsed.poolTvlUsd,
+      source: "pool_page",
+      evidence: crawlParsed.tvlEvidence || "Parsed from Playwright pool page crawl",
+    });
+    sources.push({
+      id: "pool_page_crawl",
+      label: "Pool page (Playwright)",
+      provider: "Crawl",
+      ok: true,
+      detail: crawlParsed.tvlEvidence || `TVL $${Math.round(crawlParsed.poolTvlUsd).toLocaleString()}`,
+      url: ctx?.url || null,
     });
   }
 
-  const bestTvl = pickBestCandidate(tvlCandidates, { allowDefillama: defillamaTvlAllowed() });
+  // Tier 3: Dune + DefiLlama analytics
+  const duneResearch = await gatherDunePoolResearch({
+    poolLabel: ctx?.label,
+    symbol: row?.symbol,
+    issuerSlug: ctx?.issuerSlug,
+    vaultAddress: /^0x[a-f0-9]{40}$/.test(vaultAddress) ? vaultAddress : null,
+    chain,
+  });
+  if (webResearch) webResearch.duneResearch = duneResearch;
+  Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, duneResearch.hints || {}));
+  if (duneResearch.hints?.poolTvlUsd) {
+    tvlCandidates.push({
+      value: duneResearch.hints.poolTvlUsd,
+      source: "dune",
+      evidence: duneResearch.hints.tvlEvidence || "Dune Analytics",
+    });
+    sources.push({
+      id: "dune",
+      label: "Dune Analytics",
+      provider: "Dune",
+      ok: true,
+      detail: `TVL $${Math.round(duneResearch.hints.poolTvlUsd).toLocaleString()}`,
+      url: "https://dune.com",
+    });
+  }
+
+  if (row?.tvlUsd != null && isFinite(Number(row.tvlUsd)) && row?.pool) {
+    tvlCandidates.push({
+      value: Number(row.tvlUsd),
+      source: "defillama",
+      evidence: row.tvlUncertain
+        ? "DefiLlama yields row (symbol match — reference only)"
+        : `DefiLlama yields pool ${String(row.pool).slice(0, 8)}…`,
+    });
+    sources.push({
+      id: "defillama_yields",
+      label: "DefiLlama yields",
+      provider: "DefiLlama",
+      ok: !row.tvlUncertain,
+      detail: `TVL $${Math.round(row.tvlUsd).toLocaleString()}${row.tvlUncertain ? " (uncertain match)" : ""}`,
+      url: row.pool ? `https://defillama.com/yields/pool/${row.pool}` : "https://defillama.com/yields",
+    });
+  }
+
+  // Tier 4: Web search (Tavily) — never outranks contract API or Playwright
+  const searchBlobs = collectSearchBlobs(webResearch);
+  const searchParsed = parsePoolPageMetrics(searchBlobs.join("\n"));
+  mergePageMetricsIntoHints(scoringHints, searchParsed);
+  if (searchParsed.poolTvlUsd) {
+    tvlCandidates.push({
+      value: searchParsed.poolTvlUsd,
+      source: "web_search",
+      evidence: searchParsed.tvlEvidence || "Parsed from web search snippets",
+    });
+  }
+
+  const metricsSearch = await searchPoolMetricsWeb({ ...ctx, yieldsRow: row, symbol: row.symbol });
+  Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, metricsSearch.hints));
+  if (metricsSearch.hints.poolTvlUsd) {
+    tvlCandidates.push({
+      value: metricsSearch.hints.poolTvlUsd,
+      source: "web_search",
+      evidence: metricsSearch.hints.tvlEvidence || "Web search pool metrics",
+    });
+  }
+
+  const allowDl = defillamaTvlAllowed();
+  const bestTvl = pickBestTvlCandidate(tvlCandidates, { allowDefillama: allowDl || Boolean(row?.pool) });
   if (bestTvl) {
     scoringHints.poolTvlUsd = bestTvl.value;
     scoringHints.tvlSource = bestTvl.source;
@@ -258,6 +293,13 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
     scoringHints.tvlUncertain = true;
   }
 
+  scoringHints.tvlCandidates = tvlCandidates.map((c) => ({
+    source: c.source,
+    value: c.value,
+    evidence: c.evidence,
+    confidence: tvlConfidenceForSource(c.source),
+  }));
+
   const poolIdentity = {
     address: scoringHints.poolAddress || (/^0x[a-f0-9]{40}$/.test(vaultAddress) ? vaultAddress : null),
     name: scoringHints.poolName || ctx?.label || row?.vaultTokenName || row?.symbol || null,
@@ -265,30 +307,27 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
     tvlUsd: bestTvl?.value ?? null,
     tvlSource: bestTvl?.source ?? null,
     tvlEvidence: bestTvl?.evidence ?? null,
-    tvlCandidates: tvlCandidates.map((c) => ({
-      source: c.source,
-      value: c.value,
-      evidence: c.evidence,
-    })),
+    tvlCandidates: scoringHints.tvlCandidates,
   };
 
   if (trace) {
-    trace.step("Pool metrics (web-first)", {
+    trace.step("Pool metrics (source priority)", {
       kind: bestTvl ? "source" : "error",
       detail: [
         poolIdentity.name ? `name: ${poolIdentity.name}` : null,
         poolIdentity.address ? `addr ${poolIdentity.address.slice(0, 10)}…` : null,
-        bestTvl ? `TVL $${Math.round(bestTvl.value).toLocaleString()} (${bestTvl.source})` : "TVL unresolved",
+        bestTvl
+          ? `TVL $${Math.round(bestTvl.value).toLocaleString()} (${bestTvl.source}, ${tvlConfidenceForSource(bestTvl.source)} confidence)`
+          : "TVL unresolved",
         scoringHints.utilization != null
           ? `util ${((scoringHints.utilization > 1 ? scoringHints.utilization : scoringHints.utilization * 100)).toFixed(1)}%`
           : null,
         scoringHints.lltv != null ? `LLTV ${scoringHints.lltv}%` : null,
-        scoringHints.pendleDaysToMaturity != null ? `maturity ${scoringHints.pendleDaysToMaturity}d` : null,
-        tvlCandidates.length > 1 ? `${tvlCandidates.length} TVL sources compared` : null,
+        tvlCandidates.length > 1 ? `${tvlCandidates.length} TVL sources ranked` : null,
       ]
         .filter(Boolean)
         .join(" · "),
-      sources: sources.slice(0, 6).map((s) => ({ label: s.label, url: s.url || null })),
+      sources: sources.slice(0, 8).map((s) => ({ label: s.label, url: s.url || null })),
     });
   }
 

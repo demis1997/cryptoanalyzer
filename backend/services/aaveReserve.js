@@ -3,6 +3,8 @@
  */
 import fetch from "node-fetch";
 import { normalizePoolChain } from "./poolAddress.js";
+import { getContractDeployedAtMs } from "./contractDeployTime.js";
+
 const CHAIN_IDS = { ethereum: 1, arbitrum: 42161, optimism: 10, base: 8453, polygon: 137 };
 
 async function aaveGql(query) {
@@ -16,6 +18,11 @@ async function aaveGql(query) {
   return json.data;
 }
 
+function numUsd(raw) {
+  const n = Number(raw);
+  return isFinite(n) && n > 0 ? n : null;
+}
+
 export async function fetchAaveReserve({ chain, underlyingAsset }) {
   const addr = String(underlyingAsset || "").toLowerCase();
   if (!/^0x[a-f0-9]{40}$/.test(addr)) return null;
@@ -27,8 +34,12 @@ export async function fetchAaveReserve({ chain, underlyingAsset }) {
       name
       reserves {
         underlyingToken { symbol address }
-        supplyInfo { total { value } apy { value } }
-        borrowInfo { utilizationRate { value } }
+        aToken { address }
+        supplyInfo { apy { value } }
+        borrowInfo {
+          utilizationRate { value }
+          availableLiquidity { usd }
+        }
         size { usd }
       }
     }
@@ -43,12 +54,35 @@ export async function fetchAaveReserve({ chain, underlyingAsset }) {
     );
     if (!reserve) return null;
 
-    const tvlUsd = Number(reserve?.size?.usd);
+    const supplyUsd = numUsd(reserve?.size?.usd ?? reserve?.supplyInfo?.total?.usd);
+    const liquidityUsd = numUsd(reserve?.borrowInfo?.availableLiquidity?.usd);
+    // Aave UI "available liquidity" for P.7 (not total supplied size).
+    const tvlUsd = liquidityUsd ?? supplyUsd;
     const util = Number(reserve?.borrowInfo?.utilizationRate?.value);
     const apy = Number(reserve?.supplyInfo?.apy?.value);
+    const aTokenAddr = reserve?.aToken?.address;
+
+    let poolCreatedAt = null;
+    let poolAgeEvidence = null;
+    if (aTokenAddr) {
+      poolCreatedAt = await getContractDeployedAtMs(aTokenAddr, chain);
+      if (poolCreatedAt) {
+        poolAgeEvidence = `Aave aToken deployment ${new Date(poolCreatedAt).toISOString().slice(0, 10)}`;
+      }
+    }
+
     const scoring = {
-      totalAssetsUsd: isFinite(tvlUsd) && tvlUsd > 0 ? tvlUsd : null,
-      tvlEvidence: isFinite(tvlUsd) ? `Aave API reserve size $${Math.round(tvlUsd).toLocaleString()}` : null,
+      totalAssetsUsd: tvlUsd,
+      supplyAssetsUsd: supplyUsd,
+      liquidityAssetsUsd: liquidityUsd,
+      tvlEvidence:
+        tvlUsd != null
+          ? liquidityUsd != null
+            ? `Aave API availableLiquidity $${Math.round(liquidityUsd).toLocaleString()}`
+            : `Aave API reserve size $${Math.round(supplyUsd).toLocaleString()}`
+          : null,
+      poolCreatedAt,
+      poolAgeEvidence,
       utilization: isFinite(util) ? util : null,
       utilizationEvidence: isFinite(util) ? `Aave API utilization ${(util * 100).toFixed(1)}%` : null,
       apyPct: isFinite(apy) ? apy * 100 : null,
@@ -61,6 +95,7 @@ export async function fetchAaveReserve({ chain, underlyingAsset }) {
       name: `${reserve.underlyingToken?.symbol || "Reserve"} (${market.name})`,
       chain: normalizePoolChain(chain),
       underlyingAsset: addr,
+      vaultAddress: aTokenAddr ? String(aTokenAddr).toLowerCase() : null,
       project: "aave-v3",
       source: "aave_api",
       scoring,

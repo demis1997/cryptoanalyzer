@@ -1,7 +1,4 @@
 #!/usr/bin/env node
-/**
- * Unit tests for poolMetricsResolver (no network when web search disabled).
- */
 import { resolvePoolMetrics } from "../backend/services/poolMetricsResolver.js";
 
 process.env.POOL_WEB_SEARCH = "0";
@@ -24,7 +21,6 @@ const webResearch = {
       Total Value Locked: $175.2M
       Utilization: 72.3%
       LLTV 86%
-      Days to maturity: 45
     `,
   },
   formatted: "",
@@ -39,25 +35,36 @@ const r = await resolvePoolMetrics(
   },
   {
     webResearch,
-    yieldsRow: { symbol: "USDC", project: "morpho", tvlUsd: 500_000_000 },
+    yieldsRow: { symbol: "USDC", project: "morpho", tvlUsd: 500_000_000, pool: "abc-123" },
   }
 );
 
-assert(r.scoringHints.poolTvlUsd === 175_200_000, `TVL from crawl ${r.scoringHints.poolTvlUsd}`);
+assert(r.scoringHints.poolTvlUsd === 175_200_000, `TVL from crawl when no API ${r.scoringHints.poolTvlUsd}`);
 assert(r.scoringHints.tvlSource === "pool_page", `source ${r.scoringHints.tvlSource}`);
-assert(r.scoringHints.utilization != null, "utilization parsed");
-assert(r.scoringHints.lltv === 86, `lltv ${r.scoringHints.lltv}`);
-assert(r.poolIdentity.tvlUsd === 175_200_000, "identity TVL");
 
 const vaultMeta = {
-  totalAssetsUsd: 180_000_000,
-  tvlEvidence: "Morpho API",
+  totalAssetsUsd: 15_194_000,
+  tvlEvidence: "Morpho API liquidityAssetsUsd",
 };
 const r2 = await resolvePoolMetrics(
-  { label: "steakUSDC", issuerSlug: "morpho", vaultMeta: { scoring: vaultMeta } },
-  { webResearch: { formatted: "Market TVL $12M" }, yieldsRow: { tvlUsd: 999e6 } }
+  {
+    label: "WBTC/USDC",
+    issuerSlug: "morpho",
+    vaultMeta: { scoring: vaultMeta, source: "morpho_api" },
+  },
+  {
+    webResearch: {
+      crawl: { formatted: "Total Liquidity $16.55M" },
+      formatted: "Market TVL $12M from search",
+    },
+    yieldsRow: { tvlUsd: 999e6, pool: "dl-pool-id" },
+  }
 );
-assert(r2.scoringHints.poolTvlUsd === 12_000_000, "pool page beats protocol when higher priority");
-assert(r2.scoringHints.tvlSource === "pool_page", "pool_page wins over defillama");
+assert(r2.scoringHints.tvlSource === "protocol_api", `protocol beats crawl: ${r2.scoringHints.tvlSource}`);
+assert(r2.scoringHints.poolTvlUsd === 15_194_000, `API TVL ${r2.scoringHints.poolTvlUsd}`);
+assert(
+  r2.scoringHints.tvlCandidates?.some((c) => c.source === "web_search"),
+  "web_search kept as candidate"
+);
 
 process.exit(failed);

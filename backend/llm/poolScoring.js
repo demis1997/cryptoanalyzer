@@ -4,6 +4,7 @@
  */
 
 import { selectPrimaryYieldsRow } from "../services/poolAddress.js";
+import { tvlConfidenceForSource } from "../services/tvlSourcePriority.js";
 
 const METHODOLOGY_VERSION = "2.0";
 
@@ -478,20 +479,18 @@ function scoreDepositorConcentration(row) {
   };
 }
 
-function scorePoolAge(row, protocolListedAt) {
-  const created = row?.poolCreatedAt ?? row?.createdAt ?? row?.listedAt;
+function scorePoolAge(row) {
+  const created = row?.poolCreatedAt ?? row?.createdAt;
   let ageMs = null;
   if (typeof created === "number" && created > 1e9) {
     ageMs = Date.now() - (created > 1e12 ? created : created * 1000);
-  } else if (typeof protocolListedAt === "number" && protocolListedAt > 0) {
-    const tsMs = protocolListedAt > 1e12 ? protocolListedAt : protocolListedAt * 1000;
-    ageMs = Date.now() - tsMs;
   }
   if (ageMs == null) {
     return {
       unavailable: true,
       input: "launch date not found",
-      evidence: "Pool age not in web research or protocol docs — parse launched/deployed date (P.6).",
+      evidence:
+        "Pool-specific creation date not from protocol API or pool page — protocol listedAt is not used (P.6).",
     };
   }
   const months = ageMs / (30 * 86400000);
@@ -724,8 +723,9 @@ const CRITERION_GUIDE = {
     dataSources: "Pool created timestamp, DefiLlama history, protocol listedAt fallback.",
   },
   "P.7": {
-    summary: "Absolute pool TVL from pool page, protocol API, or on-chain.",
-    dataSources: "Pool page crawl, protocol API, on-chain ERC4626; DefiLlama only when vault-matched.",
+    summary: "Absolute pool TVL for this specific pool.",
+    dataSources:
+      "1) Protocol/contract API · 2) Playwright pool page · 3) DefiLlama/Dune analytics · 4) Web search. CoinGecko/CMC used for asset rank (P.1), not pool TVL.",
   },
   "P.8": {
     summary: "Organic vs emission yield and APY stability over 30 days.",
@@ -876,9 +876,6 @@ function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
         confidenceReason = row?.poolCreatedAt
           ? "Pool age from DefiLlama APY history first sample or deployment timestamp."
           : "Pool age from deployment or listed timestamp.";
-      } else if (opts.protocolListedAt) {
-        confidence = "medium";
-        confidenceReason = "Pool age proxied from protocol listedAt on DefiLlama.";
       } else {
         confidence = "low";
         confidenceReason = "Age estimated from DefiLlama sample count or unknown.";
@@ -907,24 +904,22 @@ function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
           result.evidence ||
           "Pool-specific TVL not resolved — DefiLlama token TVL excluded (P.7).";
       } else {
-        const src = String(row?.tvlSource || "").toLowerCase();
-        if (/pool_page|crawl/.test(src)) {
-          confidence = "high";
-          confidenceReason = row?.tvlEvidence || "TVL parsed from pool web page.";
-        } else if (/protocol_api|on_chain|dune|protocol_url/.test(src)) {
-          confidence = "high";
-          confidenceReason =
-            row?.tvlEvidence ||
-            (poolType === "pendle_pt"
-              ? "Pendle AMM liquidity from protocol API (matches pool UI)."
-              : "TVL from protocol API or on-chain resolver.");
-        } else if (/defillama/.test(src)) {
-          confidence = "medium";
-          confidenceReason = "TVL from DefiLlama yields row (vault-matched only).";
-        } else {
-          confidence = "medium";
-          confidenceReason = result.evidence || row?.tvlEvidence || "Pool TVL from enriched scoring inputs.";
-        }
+        const src = row?.tvlSource || "unknown";
+        confidence = tvlConfidenceForSource(src);
+        const tierLabel =
+          confidence === "high"
+            ? src === "pool_page"
+              ? "Playwright pool page crawl (tier 2)."
+              : "Protocol/contract API or on-chain (tier 1)."
+            : confidence === "medium"
+              ? "Pool analytics — DefiLlama/Dune (tier 3)."
+              : "Web search or LLM inference (tier 4).";
+        confidenceReason = row?.tvlEvidence ? `${row.tvlEvidence} · ${tierLabel}` : tierLabel;
+        pickFromNotes("coingecko");
+        pickFromNotes("coinmarketcap");
+        pickFromNotes("protocol_api");
+        pickFromNotes("pool_page_crawl");
+        pickFromNotes("defillama");
       }
       if (ctx.url) sources.push({ label: "Pool URL", url: ctx.url });
       break;
@@ -1006,7 +1001,7 @@ export function buildPoolRiskAssessment(ctx, opts = {}) {
     oracleQuality: () => scoreOracle(poolType, row),
     parameterSafety: () => scoreParameterSafety(poolType, row),
     depositorConcentration: () => scoreDepositorConcentration(row),
-    poolAge: () => scorePoolAge(row, protocolListedAt),
+    poolAge: () => scorePoolAge(row),
     poolTvl: () => scorePoolTvl(row, poolType),
     yieldQuality: () => scoreYieldQuality(row),
     curatorQuality: () => scoreCurator(poolType, ctx.integrators, ctx.issuerSlug, ctx.label, row),

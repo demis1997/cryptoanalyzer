@@ -14,6 +14,7 @@ import { enrichPoolMetadataWithLlm, applyMetadataHintsToRow } from "./poolEnrich
 import { gatherScoringWebResearch, mergeResearchBlobs } from "./scoringResearch.js";
 import { applyVaultScoringMetaToRow } from "./scoringAudit.js";
 import { resolvePoolMetrics } from "./poolMetricsResolver.js";
+import { crawlPoolWebsite } from "./poolCrawl.js";
 
 function rowOptsFromCtx(ctx) {
   return {
@@ -80,6 +81,44 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
     scoringResearch,
   };
 
+  if (
+    ctx.url &&
+    /^https?:\/\//i.test(ctx.url) &&
+    !mergedWebResearch.crawl?.pages?.some((p) => p.ok && p.textLength > 100)
+  ) {
+    mergedWebResearch.crawl = await crawlPoolWebsite(ctx.url, { poolLabel: ctx.label }).catch((e) => ({
+      enabled: true,
+      ok: false,
+      error: String(e?.message || e),
+      pages: [],
+      addresses: [],
+      formatted: "",
+      structuredHints: {},
+    }));
+    if (mergedWebResearch.crawl?.formatted) {
+      mergedWebResearch.formatted = mergeResearchBlobs(mergedWebResearch, mergedWebResearch.crawl);
+    }
+    if (trace && mergedWebResearch.crawl?.ok) {
+      const primary = mergedWebResearch.crawl.pages?.find((p) => p.primary) || mergedWebResearch.crawl.pages?.[0];
+      trace.step("Pool page crawl (Playwright)", {
+        kind: "source",
+        detail: [
+          primary?.rendered ? "rendered SPA" : "static HTML",
+          primary?.metrics?.poolTvlUsd != null
+            ? `TVL $${Math.round(primary.metrics.poolTvlUsd).toLocaleString()}`
+            : `${primary?.textLength || 0} chars text`,
+          primary?.metrics?.utilization != null
+            ? `util ${(primary.metrics.utilization * 100).toFixed(1)}%`
+            : null,
+          primary?.metrics?.lltv != null ? `LLTV ${primary.metrics.lltv}%` : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        sources: [{ label: "Pool URL", url: ctx.url }],
+      });
+    }
+  }
+
   if (scoringResearch?.formatted && trace) {
     trace.step("Scoring-focused web research", {
       kind: "source",
@@ -133,6 +172,7 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
     yieldsRow: primary,
     webResearch: mergedWebResearch,
     poolIdentity: metricsResolution?.poolIdentity || ctx.poolIdentity,
+    externalData,
     trace,
   });
 

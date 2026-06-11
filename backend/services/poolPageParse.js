@@ -2,6 +2,7 @@
  * Parse pool-specific metrics from crawled protocol UI / docs text.
  * Used for P.2 (exit liquidity), P.4 (LLTV), P.7 (pool TVL) — not token-level aggregates.
  */
+import { parsePoolPageContent, parseStructuredPoolMetrics } from "./poolPageStructuredParse.js";
 
 function parseMoneyAmount(raw, suffix = "") {
   const num = Number(String(raw || "").replace(/,/g, ""));
@@ -21,6 +22,8 @@ function moneyFromMatch(m) {
 }
 
 const TVL_PATTERNS = [
+  /\bTotal\s+Liquidity[\s\n:]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
+  /\bAvailable\s+Liquidity[\s\n:]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
   /\bAMM\s+Liquidity[\s\n:]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
   /\b(?:SY|PT|YT|LP)\s+Liquidity[\s\n:]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
   /\b(?:pool|market|vault)\s+tvl[:\s]*\$?\s*([\d,.]+)\s*([kmbt])?\b/i,
@@ -138,16 +141,29 @@ function detectInstantWithdrawal(text) {
 /**
  * @returns {Record<string, unknown>}
  */
-export function parsePoolPageMetrics(text) {
+export function parsePoolPageMetrics(text, opts = {}) {
   const t = String(text || "");
   const hints = {};
   if (!t.trim()) return hints;
 
-  const tvlHit = firstMatchAmount(t, TVL_PATTERNS);
+  const structured =
+    opts.innerText != null || opts.html
+      ? parsePoolPageContent({
+          innerText: opts.innerText ?? t,
+          html: opts.html || "",
+          url: opts.url || "",
+          poolLabel: opts.poolLabel || "",
+        })
+      : parseStructuredPoolMetrics(t, { url: opts.url, poolLabel: opts.poolLabel });
+  Object.assign(hints, structured);
+
+  const tvlHit = hints.poolTvlUsd == null ? firstMatchAmount(t, TVL_PATTERNS) : null;
   if (tvlHit) {
-    hints.poolTvlUsd = tvlHit.amount;
-    hints.tvlSource = "pool_page";
-    hints.tvlEvidence = `Parsed from page text: "${tvlHit.match}"`;
+    if (hints.poolTvlUsd == null || /total\s+supply|supply\s+assets/i.test(tvlHit.match)) {
+      hints.poolTvlUsd = tvlHit.amount;
+      hints.tvlSource = "pool_page";
+      hints.tvlEvidence = `Parsed from page text: "${tvlHit.match}"`;
+    }
     if (/AMM\s+Liquidity/i.test(tvlHit.match)) {
       hints.pendleAmmLiquidityUsd = tvlHit.amount;
       hints.ammLiquidityUsd = tvlHit.amount;
@@ -244,12 +260,15 @@ export function parsePoolPageMetrics(text) {
     hints.apyStabilityEvidence = "Web text: APY described as stable";
   }
 
-  const launched = t.match(/\b(?:launched|deployed|created|live since)[:\s]*(\d{4}-\d{2}-\d{2})\b/i);
+  const launched =
+    t.match(/\b(?:launched|deployed|created|live since)[:\s]*(\d{4}-\d{2}-\d{2})\b/i) ||
+    t.match(/\bcreated[:\s]*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})\b/i);
   if (launched) {
     const ms = Date.parse(launched[1]);
     if (isFinite(ms)) {
       hints.poolCreatedAt = ms;
       hints.poolAgeEvidence = `Parsed launch date: ${launched[1]}`;
+      hints.poolCreatedAtSource = "pool_page";
     }
   }
 

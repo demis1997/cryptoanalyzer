@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import { parsePoolPageMetrics } from "../backend/services/poolPageParse.js";
+import { parseStructuredPoolMetrics } from "../backend/services/poolPageStructuredParse.js";
 import { applyExternalDataToYieldsRows } from "../backend/services/poolDataSources.js";
+import { applyVaultScoringMetaToRow } from "../backend/services/scoringAudit.js";
+import { fetchMorphoMarketById } from "../backend/services/morphoMarket.js";
+import { fetchAaveReserve } from "../backend/services/aaveReserve.js";
+import { fetchCompoundMarket } from "../backend/services/compoundMarket.js";
 import { buildPoolRiskAssessment } from "../backend/llm/poolScoring.js";
 
 let failed = 0;
@@ -12,6 +17,23 @@ function assert(cond, msg) {
     console.log("OK:", msg);
   }
 }
+
+const morphoSpaText = `WBTC / USDC
+Market
+Total Liquidity
+$16.55M
+Utilization
+89.17%
+LLTV
+86%
+Net APY
+4.2%`;
+const morphoSpa = parseStructuredPoolMetrics(morphoSpaText, {
+  url: "https://app.morpho.org/ethereum/market/0xabc/wbtc-usdc",
+});
+assert(Math.round(morphoSpa.poolTvlUsd) === 16_550_000, `Morpho SPA TVL ${morphoSpa.poolTvlUsd}`);
+assert(Math.abs(morphoSpa.utilization - 0.8917) < 0.001, `Morpho SPA util ${morphoSpa.utilization}`);
+assert(morphoSpa.lltv === 86, `Morpho SPA lltv ${morphoSpa.lltv}`);
 
 const morphoText = `
 steakUSDC MetaMorpho vault
@@ -177,5 +199,64 @@ const morphoP2 = buildPoolRiskAssessment({
 const p2util = morphoP2.criteria.find((c) => c.key === "liquidityExit");
 assert(p2util.score === 0.85, `P.2 lending util ${p2util.score}`);
 assert(/Morpho API/i.test(p2util.confidenceReason), `P.2 audit text ${p2util.confidenceReason}`);
+
+const morphoMkt = await fetchMorphoMarketById(
+  "0x3a85e619751152991742810df6ec69ce473daef99e28a64ab2340d7b7ccfee49",
+  "ethereum"
+);
+assert(morphoMkt?.scoring?.liquidityAssetsUsd > 0, "morpho market liquidity");
+assert(
+  morphoMkt.scoring.totalAssetsUsd === morphoMkt.scoring.liquidityAssetsUsd,
+  "P.7 uses liquidity not supply"
+);
+assert(morphoMkt.scoring.totalAssetsUsd < morphoMkt.scoring.supplyAssetsUsd / 2, "liquidity << supply");
+const morphoRow = applyVaultScoringMetaToRow(
+  { symbol: "WBTC/USDC", project: "morpho-blue", tvlSource: "protocol_api" },
+  morphoMkt.scoring
+);
+const morphoRisk = buildPoolRiskAssessment({
+  label: "WBTC/USDC",
+  issuerSlug: "morpho",
+  yieldsRows: [morphoRow],
+});
+const p7m = morphoRisk.criteria.find((c) => c.key === "poolTvl");
+const p6m = morphoRisk.criteria.find((c) => c.key === "poolAge");
+assert(p7m.score === 0.8, `Morpho market P.7 ~$15M liquidity: ${p7m.input} score ${p7m.score}`);
+assert(p7m.input.replace(/,/g, "").includes("15194") || p7m.input.includes("14"), `P.7 ~$15M not supply ${p7m.input}`);
+assert(/liquidityAssetsUsd/i.test(p7m.evidence), `P.7 evidence ${p7m.evidence}`);
+assert(!p6m.unavailable, `P.6 from creationTimestamp ${p6m.input}`);
+assert(p6m.score >= 0.7, `P.6 ~16mo market age ${p6m.score}`);
+
+const aaveDai = await fetchAaveReserve({
+  chain: "ethereum",
+  underlyingAsset: "0x6b175474e89094c44da98b954eedeac495271d0f",
+});
+assert(aaveDai?.liquidityAssetsUsd > 0, "aave liquidity");
+assert(aaveDai.totalAssetsUsd === aaveDai.liquidityAssetsUsd, "aave P.7 uses available liquidity");
+assert(aaveDai.totalAssetsUsd < aaveDai.supplyAssetsUsd / 2, "aave liquidity << supply");
+assert(aaveDai.poolCreatedAt > 0, `aave pool age ${aaveDai.poolCreatedAt}`);
+const aaveRow = applyVaultScoringMetaToRow(
+  { symbol: "DAI", project: "aave-v3", tvlSource: "protocol_api" },
+  aaveDai.scoring
+);
+const aaveRisk = buildPoolRiskAssessment({ label: "DAI", issuerSlug: "aave", yieldsRows: [aaveRow] });
+const p7a = aaveRisk.criteria.find((c) => c.key === "poolTvl");
+const p6a = aaveRisk.criteria.find((c) => c.key === "poolAge");
+assert(!p6a.unavailable, `Aave P.6 ${p6a.input}`);
+assert(/availableLiquidity/i.test(p7a.evidence), `Aave P.7 ${p7a.evidence}`);
+
+const comp = await fetchCompoundMarket({ marketSlug: "usdc-op", chain: "optimism" });
+assert(comp?.liquidityAssetsUsd > 0, "compound cash liquidity");
+assert(comp.totalAssetsUsd < (comp.supplyAssetsUsd || Infinity), "compound cash < supply");
+assert(comp.poolCreatedAt > 0, `compound pool age ${comp.poolCreatedAt}`);
+const compRow = applyVaultScoringMetaToRow(
+  { symbol: "USDC", project: "compound", tvlSource: "protocol_api" },
+  comp.scoring
+);
+const compRisk = buildPoolRiskAssessment({ label: "USDC", issuerSlug: "compound", yieldsRows: [compRow] });
+const p7comp = compRisk.criteria.find((c) => c.key === "poolTvl");
+const p6comp = compRisk.criteria.find((c) => c.key === "poolAge");
+assert(!p6comp.unavailable, `Compound P.6 ${p6comp.input}`);
+assert(/cash liquidity/i.test(p7comp.evidence), `Compound P.7 ${p7comp.evidence}`);
 
 process.exit(failed);

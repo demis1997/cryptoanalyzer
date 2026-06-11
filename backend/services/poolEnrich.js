@@ -1,5 +1,6 @@
 import { runHostedLlmJson } from "../llm/provider.js";
 import { parseScoringHintsFromText } from "./poolDataSources.js";
+import { mergeTvlIntoRow } from "./tvlSourcePriority.js";
 
 function llmEnabled() {
   return !/^(0|false|no|off)$/i.test(String(process.env.POOL_INTELLIGENCE_LLM || "1").trim());
@@ -24,6 +25,7 @@ export async function enrichPoolMetadataWithLlm({
   yieldsRow,
   webResearch,
   poolIdentity = null,
+  externalData = null,
   trace = null,
 } = {}) {
   const out = { hints: {}, sources: [] };
@@ -77,10 +79,28 @@ export async function enrichPoolMetadataWithLlm({
   });
 
   const tvlCandidates = poolIdentity?.tvlCandidates || [];
+  const cgSummary = (externalData?.coinGecko || [])
+    .filter((c) => c.ok)
+    .map((c) => `${c.token || c.symbol}: rank #${c.marketCapRank ?? "—"}, mcap $${c.marketCapUsd ? Math.round(c.marketCapUsd).toLocaleString() : "—"}`)
+    .join("; ");
+  const cmcSummary = externalData?.coinMarketCap?.ok
+    ? Object.entries(externalData.coinMarketCap.quotes || {})
+        .map(([s, q]) => `${s} rank #${q.rank ?? "—"}`)
+        .join(", ")
+    : "";
+
   const system = `You extract factual pool/vault metadata for DeFi risk scoring by comparing MULTIPLE sources.
 Works for ANY protocol (Aave, Morpho, Pendle, Euler, Curve, Compound, etc.) — not Morpho-specific.
-You cannot browse the web. PRIMARY sources: WEB RESEARCH, pool page crawl, Dune, protocol dashboards.
-Do NOT use DefiLlama aggregates for APY/TVL unless explicitly the only pool-specific figure in the text.
+You cannot browse the web.
+
+TVL SOURCE PRIORITY (for poolTvlUsd only — follow strictly):
+1. Protocol/contract API or on-chain resolver (already in TVL CANDIDATES as protocol_api / on_chain) — NEVER override with a lower tier.
+2. Playwright pool page crawl (pool_page).
+3. DefiLlama / Dune / pool analytics dashboards (defillama / dune).
+4. Web search snippets (lowest) — only if no higher tier exists.
+
+CoinGecko and CoinMarketCap are for ASSET quality (token rank/market cap), NOT pool TVL.
+Do NOT use token market cap as pool TVL.
 Return JSON only — no markdown:
 {
   "curator": string | null,
@@ -119,8 +139,14 @@ Issuer (DefiLlama): ${issuerSlug || "unknown"}
 DefiLlama yields row (reference only — may be wrong pool or token-level TVL):
 ${JSON.stringify(rowSummary, null, 2)}
 
-TVL CANDIDATES FROM OTHER SOURCES (pick pool-specific value; ignore token/protocol aggregates):
+TVL CANDIDATES (ranked — prefer lowest source number / highest tier: protocol_api > pool_page > defillama > web_search):
 ${tvlCandidates.length ? JSON.stringify(tvlCandidates, null, 2) : "none yet"}
+
+COIN GECKO (asset rank — NOT pool TVL):
+${cgSummary || "not fetched"}
+
+COINMARKETCAP (asset rank — NOT pool TVL):
+${cmcSummary || externalData?.coinMarketCap?.skipped ? "CMC_API_KEY not set" : "not fetched"}
 
 POOL IDENTITY (on-chain / resolver):
 ${poolIdentity ? JSON.stringify(poolIdentity, null, 2) : "unknown"}
@@ -153,8 +179,8 @@ Return JSON only.`.trim();
     }
     if (typeof j.poolTvlUsd === "number" && isFinite(j.poolTvlUsd) && j.poolTvlUsd > 0) {
       out.hints.poolTvlUsd = j.poolTvlUsd;
-      out.hints.tvlSource = "pool_page";
-      out.hints.tvlEvidence = j.poolTvlEvidence || "LLM from pool page text";
+      out.hints.tvlSource = "llm";
+      out.hints.tvlEvidence = j.poolTvlEvidence || "LLM inferred from web research (lowest TVL tier)";
     }
     if (typeof j.daysToMaturity === "number" && isFinite(j.daysToMaturity)) {
       out.hints.pendleDaysToMaturity = Math.round(j.daysToMaturity);
@@ -243,11 +269,14 @@ export function applyMetadataHintsToRow(row, meta) {
   }
   if (hints.capUtilization != null) next.capUtilization = hints.capUtilization;
   if (hints.poolTvlUsd != null && isFinite(Number(hints.poolTvlUsd))) {
-    next.defillamaTvlUsd = next.tvlUsd;
-    next.tvlUsd = Number(hints.poolTvlUsd);
-    next.tvlSource = hints.tvlSource || "pool_page";
-    next.tvlEvidence = hints.tvlEvidence || null;
-    next.tvlUncertain = false;
+    Object.assign(
+      next,
+      mergeTvlIntoRow(next, {
+        value: Number(hints.poolTvlUsd),
+        source: hints.tvlSource || "llm",
+        evidence: hints.tvlEvidence || null,
+      })
+    );
   }
   if (hints.pendleDaysToMaturity != null) {
     next.pendleDaysToMaturity = hints.pendleDaysToMaturity;

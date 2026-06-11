@@ -45,7 +45,7 @@ export async function fetchMorphoVaultByAddress(address, chain) {
   const v1Q = `
   query VaultV1($address: String!, $chainId: Int!) {
     vaultByAddress(address: $address, chainId: $chainId) {
-      address symbol name listed
+      address symbol name listed creationTimestamp
       state {
         curator fee totalAssetsUsd apy netApy
         allocation {
@@ -66,7 +66,7 @@ export async function fetchMorphoVaultByAddress(address, chain) {
   const v2Q = `
   query VaultV2($address: String!, $chainId: Int!) {
     vaultV2ByAddress(address: $address, chainId: $chainId) {
-      address symbol name listed
+      address symbol name listed creationTimestamp
       asset { symbol address }
       chain { id network }
     }
@@ -153,6 +153,11 @@ function extractMorphoScoringFields(v) {
 
   const apyRaw = Number(st.netApy ?? st.apy);
   const out = {};
+  if (v?.creationTimestamp != null && isFinite(Number(v.creationTimestamp))) {
+    const ms = Number(v.creationTimestamp) * 1000;
+    out.poolCreatedAt = ms;
+    out.poolAgeEvidence = `Morpho API vault creation ${new Date(ms).toISOString().slice(0, 10)}`;
+  }
   if (isFinite(Number(st.totalAssetsUsd))) {
     out.totalAssetsUsd = Number(st.totalAssetsUsd);
     out.tvlEvidence = "Morpho API state.totalAssetsUsd";

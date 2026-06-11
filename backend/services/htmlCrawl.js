@@ -173,17 +173,28 @@ export async function renderHtmlWithPlaywright(url, { timeoutMs } = {}) {
       } catch {}
 
       let html = await page.content();
-      let visible = htmlToVisibleText(html);
+      let innerText = "";
+      try {
+        innerText = await page.evaluate(() => (document.body && document.body.innerText) || "");
+      } catch {
+        innerText = "";
+      }
+      let visible = innerText.length > 80 ? innerText : htmlToVisibleText(html);
       if (visible.length < 300) {
         try {
           await page.waitForTimeout(2000);
         } catch {}
         html = await page.content();
-        visible = htmlToVisibleText(html);
+        try {
+          innerText = await page.evaluate(() => (document.body && document.body.innerText) || "");
+        } catch {
+          innerText = "";
+        }
+        visible = innerText.length > 80 ? innerText : htmlToVisibleText(html);
       }
 
       await context.close();
-      return { html, visible, lastErr: lastErr ? String(lastErr.message || lastErr) : null };
+      return { html, visible, innerText: innerText || visible, lastErr: lastErr ? String(lastErr.message || lastErr) : null };
     })();
 
     const result = await Promise.race([work, hardTimeout]);
@@ -249,12 +260,15 @@ export async function fetchHtmlWithOptionalRender(url, { forceRender = false } =
   }));
 
   const finalHtml = rendered?.html || html;
-  const visible = rendered?.visible || htmlToVisibleText(finalHtml);
+  const innerText = rendered?.innerText || "";
+  const visible =
+    innerText.length > 80 ? innerText : rendered?.visible || htmlToVisibleText(finalHtml);
   return {
     ok: true,
     status: resp.status,
     html: finalHtml,
     visible,
+    innerText: innerText || visible,
     rendered: Boolean(rendered?.html && rendered.html !== html),
     renderError: rendered?.lastErr || null,
     addresses: extractAddressesFromText(visible + finalHtml),

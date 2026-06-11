@@ -46,6 +46,8 @@ export function buildSyntheticYieldsRow({
     withdrawalQueueDays: scoring?.withdrawalQueueDays ?? null,
     vaultCooldownDays: scoring?.vaultCooldownDays ?? null,
     stakingSecondaryMarket: scoring?.stakingSecondaryMarket ?? null,
+    poolCreatedAt: scoring?.poolCreatedAt ?? null,
+    poolAgeEvidence: scoring?.poolAgeEvidence || null,
     underlyingTokens: meta?.underlyingTokens || scoring?.underlyingTokens || [],
     synthetic: true,
   };

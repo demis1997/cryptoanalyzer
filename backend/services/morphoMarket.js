@@ -31,7 +31,8 @@ export async function fetchMorphoMarketById(marketId, chain) {
       loanAsset { symbol address }
       collateralAsset { symbol address }
       oracle { address }
-      state { supplyAssetsUsd borrowAssetsUsd utilization }
+      creationTimestamp
+      state { supplyAssetsUsd borrowAssetsUsd liquidityAssetsUsd utilization }
     }
   }`;
 
@@ -42,13 +43,37 @@ export async function fetchMorphoMarketById(marketId, chain) {
 
     const loan = m.loanAsset?.symbol || "?";
     const coll = m.collateralAsset?.symbol || "?";
-    const tvlUsd = Number(m.state?.supplyAssetsUsd);
+    const supplyUsd = Number(m.state?.supplyAssetsUsd);
+    const liquidityUsd = Number(m.state?.liquidityAssetsUsd);
+    // Morpho market UI TVL = available loan-side liquidity, not total supply.
+    const tvlUsd =
+      isFinite(liquidityUsd) && liquidityUsd > 0
+        ? liquidityUsd
+        : isFinite(supplyUsd) && supplyUsd > 0
+          ? supplyUsd
+          : null;
     const util = Number(m.state?.utilization);
     const lltv = parseMorphoLltv(m.lltv);
+    const createdMs =
+      m.creationTimestamp != null && isFinite(Number(m.creationTimestamp))
+        ? Number(m.creationTimestamp) * 1000
+        : null;
 
     const scoring = {
-      totalAssetsUsd: isFinite(tvlUsd) && tvlUsd > 0 ? tvlUsd : null,
-      tvlEvidence: isFinite(tvlUsd) ? `Morpho API supplyAssetsUsd $${Math.round(tvlUsd).toLocaleString()}` : null,
+      totalAssetsUsd: tvlUsd,
+      supplyAssetsUsd: isFinite(supplyUsd) && supplyUsd > 0 ? supplyUsd : null,
+      liquidityAssetsUsd: isFinite(liquidityUsd) && liquidityUsd > 0 ? liquidityUsd : null,
+      tvlEvidence:
+        tvlUsd != null
+          ? isFinite(liquidityUsd) && liquidityUsd > 0
+            ? `Morpho API liquidityAssetsUsd $${Math.round(liquidityUsd).toLocaleString()} (market liquidity)`
+            : `Morpho API supplyAssetsUsd $${Math.round(supplyUsd).toLocaleString()}`
+          : null,
+      poolCreatedAt: createdMs,
+      poolAgeEvidence:
+        createdMs != null
+          ? `Morpho API market creation ${new Date(createdMs).toISOString().slice(0, 10)}`
+          : null,
       utilization: isFinite(util) ? util : null,
       utilizationEvidence: isFinite(util) ? `Morpho API market utilization ${(util * 100).toFixed(1)}%` : null,
       lltvPct: lltv,

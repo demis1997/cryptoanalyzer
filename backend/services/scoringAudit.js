@@ -8,6 +8,12 @@ function has(val) {
   return true;
 }
 
+export function normalizePoolCreatedAtMs(raw) {
+  const n = Number(raw);
+  if (!isFinite(n) || n <= 0) return null;
+  return n > 1e12 ? Math.round(n) : Math.round(n * 1000);
+}
+
 export function parseMorphoLltv(raw) {
   const n = Number(raw);
   if (!isFinite(n) || n <= 0) return null;
@@ -24,7 +30,7 @@ export function applyVaultScoringMetaToRow(row, meta) {
   if (meta.pendleAmmLiquidityUsd != null && isFinite(Number(meta.pendleAmmLiquidityUsd))) {
     next.pendleAmmLiquidityUsd = Number(meta.pendleAmmLiquidityUsd);
     next.ammLiquidityUsd = Number(meta.ammLiquidityUsd ?? meta.pendleAmmLiquidityUsd);
-    if (row.tvlSource !== "pool_page") {
+    {
       next.tvlUsd = next.ammLiquidityUsd;
       next.tvlSource = "protocol_api";
       next.tvlEvidence =
@@ -32,9 +38,10 @@ export function applyVaultScoringMetaToRow(row, meta) {
         `Pendle AMM liquidity $${Math.round(next.ammLiquidityUsd).toLocaleString()}`;
       next.tvlUncertain = false;
     }
-  } else if (meta.totalAssetsUsd != null && isFinite(Number(meta.totalAssetsUsd)) && row.tvlSource !== "pool_page") {
+  }
+  if (meta.totalAssetsUsd != null && isFinite(Number(meta.totalAssetsUsd)) && meta.pendleAmmLiquidityUsd == null) {
     next.tvlUsd = Number(meta.totalAssetsUsd);
-    next.tvlSource = row.tvlSource || meta.tvlSource || "protocol_api";
+    next.tvlSource = "protocol_api";
     next.tvlEvidence = meta.tvlEvidence || "Protocol API totalAssetsUsd";
     next.tvlUncertain = false;
   }
@@ -62,7 +69,11 @@ export function applyVaultScoringMetaToRow(row, meta) {
     next.curator = meta.curator;
     next.curatorEvidence = meta.curatorEvidence || null;
   }
-  if (meta.poolCreatedAt) next.poolCreatedAt = meta.poolCreatedAt;
+  const createdMs = normalizePoolCreatedAtMs(meta.poolCreatedAt ?? meta.creationTimestamp);
+  if (createdMs != null) {
+    next.poolCreatedAt = createdMs;
+    if (meta.poolAgeEvidence) next.poolAgeEvidence = meta.poolAgeEvidence;
+  }
 
   if (meta.pendleDaysToMaturity != null) {
     next.pendleDaysToMaturity = meta.pendleDaysToMaturity;

@@ -2,42 +2,31 @@
  * Compound V3 (Comet) market metrics — deployment map + on-chain totals.
  */
 import fetch from "node-fetch";
-import { createPublicClient, http } from "viem";
+import { createPublicClient, http, parseAbi } from "viem";
 import { optimism, mainnet, arbitrum, base, polygon } from "viem/chains";
 import { normalizePoolChain } from "./poolAddress.js";
+import { getContractDeployedAtMs } from "./contractDeployTime.js";
+import { moralisTokenPriceUsd } from "./moralisClient.js";
 
-const COMET_ABI = [
-  {
-    type: "function",
-    name: "totalSupply",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ type: "uint256" }],
-  },
-  {
-    type: "function",
-    name: "totalBorrow",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ type: "uint256" }],
-  },
-  {
-    type: "function",
-    name: "getUtilization",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ type: "uint64" }],
-  },
-  {
-    type: "function",
-    name: "baseToken",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ type: "address" }],
-  },
-];
+const COMET_ABI = parseAbi([
+  "function totalSupply() view returns (uint256)",
+  "function totalBorrow() view returns (uint256)",
+  "function getUtilization() view returns (uint64)",
+  "function baseToken() view returns (address)",
+]);
+
+const ERC20_DECIMALS_ABI = parseAbi(["function decimals() view returns (uint8)"]);
 
 const VIEM_CHAINS = { ethereum: mainnet, optimism, arbitrum, base, polygon };
+
+const STABLE_BASES = new Set([
+  "0x0b2c639c533813f4aa9d7837caf62653d097ff85", // USDC op
+  "0xaf88d065e77c8cc2239327c5edb3a432268e5831", // USDC arb
+  "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", // USDC base
+  "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", // USDC eth
+  "0xdac17f958d2ee523a2206206994597c13d831ec7", // USDT
+  "0x6b175474e89094c44da98b954eedeac495271d0f", // DAI
+]);
 
 /** URL slug → github deployment folder */
 const SLUG_DEPLOYMENTS = {
@@ -45,7 +34,7 @@ const SLUG_DEPLOYMENTS = {
   "usdc-arb": { chain: "arbitrum", path: "arbitrum/usdc", symbol: "USDC" },
   "usdc-base": { chain: "base", path: "base/usdc", symbol: "USDC" },
   "usdc-mainnet": { chain: "ethereum", path: "mainnet/usdc", symbol: "USDC" },
-  "usdc": { chain: "ethereum", path: "mainnet/usdc", symbol: "USDC" },
+  usdc: { chain: "ethereum", path: "mainnet/usdc", symbol: "USDC" },
   "weth-op": { chain: "optimism", path: "optimism/weth", symbol: "WETH" },
 };
 
@@ -66,6 +55,20 @@ function clientForChain(chain) {
   const c = VIEM_CHAINS[normalizePoolChain(chain)];
   if (!c) return null;
   return createPublicClient({ chain: c, transport: http() });
+}
+
+async function baseTokenUsdPrice(baseToken, chain) {
+  const addr = String(baseToken).toLowerCase();
+  if (STABLE_BASES.has(addr)) return 1;
+  const moralis = await moralisTokenPriceUsd(addr, chain).catch(() => null);
+  if (moralis?.usdPrice && isFinite(Number(moralis.usdPrice))) return Number(moralis.usdPrice);
+  const chainKey = normalizePoolChain(chain);
+  const dl = await fetch(`https://coins.llama.fi/prices/current/${chainKey}:${addr}`, {
+    headers: { "User-Agent": "cryptoanalyzer/compound" },
+  }).catch(() => null);
+  const dlJson = dl?.ok ? await dl.json().catch(() => null) : null;
+  const p = Number(dlJson?.coins?.[`${chainKey}:${addr}`]?.price);
+  return isFinite(p) && p > 0 ? p : null;
 }
 
 export async function fetchCompoundMarket({ marketSlug, chain }) {
@@ -90,14 +93,25 @@ export async function fetchCompoundMarket({ marketSlug, chain }) {
   if (!client) return null;
 
   try {
-    const [totalSupply, totalBorrow, utilizationRaw] = await Promise.all([
+    const [totalSupply, totalBorrow, utilizationRaw, baseToken] = await Promise.all([
       client.readContract({ address: cometAddr, abi: COMET_ABI, functionName: "totalSupply" }),
       client.readContract({ address: cometAddr, abi: COMET_ABI, functionName: "totalBorrow" }),
       client.readContract({ address: cometAddr, abi: COMET_ABI, functionName: "getUtilization" }).catch(() => null),
+      client.readContract({ address: cometAddr, abi: COMET_ABI, functionName: "baseToken" }),
     ]);
 
-    const supply = Number(totalSupply) / 1e6;
-    const borrow = Number(totalBorrow) / 1e6;
+    const decimals = Number(
+      await client.readContract({
+        address: baseToken,
+        abi: ERC20_DECIMALS_ABI,
+        functionName: "decimals",
+      })
+    );
+    const dec = isFinite(decimals) && decimals > 0 ? decimals : 6;
+    const supply = Number(totalSupply) / 10 ** dec;
+    const borrow = Number(totalBorrow) / 10 ** dec;
+    const cash = Math.max(0, supply - borrow);
+
     let util = null;
     if (utilizationRaw != null) {
       util = Number(utilizationRaw) / 1e18;
@@ -105,9 +119,25 @@ export async function fetchCompoundMarket({ marketSlug, chain }) {
       util = borrow / supply;
     }
 
+    const priceUsd = await baseTokenUsdPrice(baseToken, dep.chain);
+    const supplyUsd = priceUsd != null && supply > 0 ? supply * priceUsd : null;
+    const cashUsd = priceUsd != null && cash > 0 ? cash * priceUsd : cash > 0 ? cash : null;
+
+    const poolCreatedAt = await getContractDeployedAtMs(cometAddr, dep.chain);
+    const poolAgeEvidence = poolCreatedAt
+      ? `Compound Comet deployment ${new Date(poolCreatedAt).toISOString().slice(0, 10)}`
+      : null;
+
     const scoring = {
-      totalAssetsUsd: supply > 0 ? supply : null,
-      tvlEvidence: supply > 0 ? `Compound Comet totalSupply ~$${Math.round(supply).toLocaleString()} (base units)` : null,
+      totalAssetsUsd: cashUsd,
+      supplyAssetsUsd: supplyUsd,
+      liquidityAssetsUsd: cashUsd,
+      tvlEvidence:
+        cashUsd != null
+          ? `Compound Comet cash liquidity $${Math.round(cashUsd).toLocaleString()} (supply − borrow)`
+          : null,
+      poolCreatedAt,
+      poolAgeEvidence,
       utilization: util != null && isFinite(util) ? util : null,
       utilizationEvidence: util != null ? `Compound Comet utilization ${(util * 100).toFixed(1)}%` : null,
       oracleType: "Chainlink",
