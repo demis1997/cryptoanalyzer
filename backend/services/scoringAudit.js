@@ -1,5 +1,6 @@
 /** Per-criterion data audit for activity logs and transparency. */
 import { mergeTvlIntoRow } from "./tvlSourcePriority.js";
+import { shouldReplacePoolAge } from "./poolContractAge.js";
 
 function has(val) {
   if (val == null) return false;
@@ -70,6 +71,12 @@ export function applyVaultScoringMetaToRow(row, meta) {
   if (meta.capUtilization != null) {
     next.capUtilization = Number(meta.capUtilization);
   }
+  if (meta.top1DepositorPct != null && next.top1DepositorPct == null) {
+    next.top1DepositorPct = Number(meta.top1DepositorPct);
+    if (meta.depositorConcentrationEvidence) {
+      next.depositorConcentrationEvidence = meta.depositorConcentrationEvidence;
+    }
+  }
   if (meta.oracleType) {
     next.oracleType = meta.oracleType;
     next.oracleEvidence = meta.oracleEvidence || null;
@@ -80,8 +87,26 @@ export function applyVaultScoringMetaToRow(row, meta) {
   }
   const createdMs = normalizePoolCreatedAtMs(meta.poolCreatedAt ?? meta.creationTimestamp);
   if (createdMs != null) {
-    next.poolCreatedAt = createdMs;
-    if (meta.poolAgeEvidence) next.poolAgeEvidence = meta.poolAgeEvidence;
+    const incoming = {
+      poolCreatedAt: createdMs,
+      poolAgeSource: meta.poolAgeSource || "protocol_api",
+      poolAgeEvidence: meta.poolAgeEvidence || null,
+      poolAgeExplorerUrl: meta.poolAgeExplorerUrl || null,
+    };
+    if (
+      shouldReplacePoolAge(
+        {
+          poolCreatedAt: next.poolCreatedAt,
+          poolAgeSource: next.poolAgeSource,
+        },
+        incoming
+      )
+    ) {
+      next.poolCreatedAt = incoming.poolCreatedAt;
+      next.poolAgeSource = incoming.poolAgeSource;
+      if (incoming.poolAgeEvidence) next.poolAgeEvidence = incoming.poolAgeEvidence;
+      if (incoming.poolAgeExplorerUrl) next.poolAgeExplorerUrl = incoming.poolAgeExplorerUrl;
+    }
   }
 
   if (meta.pendleDaysToMaturity != null) {

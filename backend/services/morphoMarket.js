@@ -4,6 +4,8 @@
 import fetch from "node-fetch";
 import { normalizePoolChain } from "./poolAddress.js";
 import { parseMorphoLltv } from "./scoringAudit.js";
+import { morphoGraphqlUrl, morphoMarketPageUrl } from "./sourceUrls.js";
+import { resolvePoolCreatedAtMs } from "./poolContractAge.js";
 
 const CHAIN_IDS = { ethereum: 1, arbitrum: 42161, optimism: 10, base: 8453, polygon: 137 };
 
@@ -54,10 +56,11 @@ export async function fetchMorphoMarketById(marketId, chain) {
           : null;
     const util = Number(m.state?.utilization);
     const lltv = parseMorphoLltv(m.lltv);
-    const createdMs =
-      m.creationTimestamp != null && isFinite(Number(m.creationTimestamp))
-        ? Number(m.creationTimestamp) * 1000
-        : null;
+    const ageMeta = await resolvePoolCreatedAtMs({
+      marketId: id,
+      chain: normalizePoolChain(chain),
+      protocolKind: "morpho_market",
+    });
 
     const scoring = {
       totalAssetsUsd: tvlUsd,
@@ -69,17 +72,16 @@ export async function fetchMorphoMarketById(marketId, chain) {
             ? `Morpho API liquidityAssetsUsd $${Math.round(liquidityUsd).toLocaleString()} (market liquidity)`
             : `Morpho API supplyAssetsUsd $${Math.round(supplyUsd).toLocaleString()}`
           : null,
-      poolCreatedAt: createdMs,
-      poolAgeEvidence:
-        createdMs != null
-          ? `Morpho API market creation ${new Date(createdMs).toISOString().slice(0, 10)}`
-          : null,
       utilization: isFinite(util) ? util : null,
       utilizationEvidence: isFinite(util) ? `Morpho API market utilization ${(util * 100).toFixed(1)}%` : null,
       lltvPct: lltv,
       lltvEvidence: lltv != null ? `Morpho API LLTV ${lltv.toFixed(1)}%` : null,
       oracleType: m.oracle?.address ? "Chainlink" : null,
       oracleEvidence: m.oracle?.address ? `Morpho oracle ${m.oracle.address}` : null,
+      poolCreatedAt: ageMeta?.poolCreatedAt ?? null,
+      poolAgeEvidence: ageMeta?.poolAgeEvidence ?? null,
+      poolAgeSource: ageMeta?.poolAgeSource ?? null,
+      poolAgeExplorerUrl: ageMeta?.poolAgeExplorerUrl ?? null,
     };
 
     return {
@@ -89,6 +91,8 @@ export async function fetchMorphoMarketById(marketId, chain) {
       chain: normalizePoolChain(chain),
       project: "morpho-blue",
       source: "morpho_api",
+      sourceUrl: morphoGraphqlUrl(),
+      marketPageUrl: morphoMarketPageUrl(chain, id, `${coll}-${loan}`.toLowerCase()),
       tvlSource: "protocol_api",
       scoring,
       ...scoring,

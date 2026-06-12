@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { resolvePoolMetrics } from "../backend/services/poolMetricsResolver.js";
+import { pickBestTvlCandidate } from "../backend/services/tvlSourcePriority.js";
 
 process.env.POOL_WEB_SEARCH = "0";
 process.env.POOL_DUNE_SEARCH = "0";
@@ -66,5 +67,11 @@ assert(
   r2.scoringHints.tvlCandidates?.some((c) => c.source === "web_search"),
   "web_search kept as candidate"
 );
+
+const sgPick = pickBestTvlCandidate([
+  { value: 15_194_000, source: "protocol_api", evidence: "API" },
+  { value: 15_200_000, source: "subgraph", evidence: "Subgraph" },
+]);
+assert(sgPick?.source === "subgraph", `POOL_SUBGRAPH_PREFER picks subgraph: ${sgPick?.source}`);
 
 process.exit(failed);

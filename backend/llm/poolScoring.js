@@ -5,6 +5,13 @@
 
 import { selectPrimaryYieldsRow } from "../services/poolAddress.js";
 import { tvlConfidenceForSource } from "../services/tvlSourcePriority.js";
+import {
+  defillamaProtocolUrl,
+  defillamaYieldsPoolUrl,
+  explorerInternalTxUrl,
+  morphoGraphqlUrl,
+  theGraphSubgraphUrl,
+} from "../services/sourceUrls.js";
 
 const METHODOLOGY_VERSION = "2.0";
 
@@ -503,7 +510,9 @@ function scorePoolAge(row) {
   return {
     score: sc,
     input: `~${Math.round(months)} months`,
-    evidence: row?.poolAgeEvidence || "Pool age from web-parsed launch date or protocol listedAt (P.6).",
+    evidence:
+      row?.poolAgeEvidence ||
+      "Pool age from first on-chain activity on pool contract or market (P.6).",
   };
 }
 
@@ -725,7 +734,7 @@ const CRITERION_GUIDE = {
   "P.7": {
     summary: "Absolute pool TVL for this specific pool.",
     dataSources:
-      "1) Protocol/contract API · 2) Playwright pool page · 3) DefiLlama/Dune analytics · 4) Web search. CoinGecko/CMC used for asset rank (P.1), not pool TVL.",
+      "1) Protocol API + The Graph subgraph · 2) Playwright pool page · 3) DefiLlama/Dune · 4) Web search. CoinGecko/CMC for asset rank (P.1).",
   },
   "P.8": {
     summary: "Organic vs emission yield and APY stability over 30 days.",
@@ -743,10 +752,36 @@ const CONFIDENCE_HELP = {
   low: "Default or inferred value where key fields are missing; treat as directional only.",
 };
 
-function defillamaPoolUrl(row) {
-  const proj = String(row?.project || "").trim();
-  if (!proj) return "https://defillama.com/yields";
-  return `https://defillama.com/protocol/${encodeURIComponent(proj)}`;
+function scoringSourceUrls(row, ctx, ext = {}) {
+  const sources = [];
+  const push = (label, url) => {
+    if (label && url) sources.push({ label, url });
+  };
+
+  if (ctx?.url) push("Pool URL", ctx.url);
+  if (row?.pool) push("DefiLlama yields pool", defillamaYieldsPoolUrl(row.pool));
+  else if (row?.project) push("DefiLlama protocol", defillamaProtocolUrl(row.project));
+
+  if (row?.poolAgeExplorerUrl) push("Block explorer (pool age)", row.poolAgeExplorerUrl);
+  else if (row?.vaultAddress) {
+    const u = explorerInternalTxUrl(row.vaultAddress, row.chain || ctx?.chain);
+    if (u) push("Block explorer (contract)", u);
+  }
+
+  if (ext.defillamaChart?.url) push("DefiLlama APY chart", ext.defillamaChart.url);
+
+  for (const s of ext.sources || []) {
+    if (s?.url) push(s.label || s.provider || s.id, s.url);
+  }
+
+  if (/morpho/i.test(String(row?.project || ctx?.issuerSlug || ""))) {
+    push("Morpho GraphQL API", morphoGraphqlUrl());
+  }
+
+  const sgId = ext.metricsResolution?.sources?.find((s) => s.id === "subgraph")?.subgraphId;
+  if (sgId) push("The Graph subgraph", theGraphSubgraphUrl(sgId));
+
+  return sources;
 }
 
 function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
@@ -767,8 +802,10 @@ function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
   }
 
   const ext = opts.externalData || ctx.externalData || {};
-  const chartUrl = ext.defillamaChart?.url || null;
-  const sources = [{ label: "DefiLlama yields", url: defillamaPoolUrl(row) }];
+  const sources = scoringSourceUrls(row, ctx, {
+    ...ext,
+    metricsResolution: ctx.metricsResolution || ext.metricsResolution,
+  });
 
   const pickFromNotes = (idPrefix) => {
     for (const s of ext.sources || []) {
@@ -837,7 +874,7 @@ function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
         confidenceReason = result.evidence || "Pool-type heuristic applied.";
       }
       pickFromNotes("inspector");
-      if (ctx.url) sources.push({ label: "Pool URL", url: ctx.url });
+      pickFromNotes("subgraph");
       break;
     }
     case "oracleQuality": {
@@ -857,10 +894,11 @@ function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
         confidenceReason = "Oracle not confirmed — check protocol docs and Morpho market page.";
       }
       pickFromNotes("inspector");
-      if (ctx.url) sources.push({ label: "Pool URL", url: ctx.url });
+      pickFromNotes("subgraph");
       break;
     }
     case "parameterSafety": {
+      pickFromNotes("subgraph");
       if (typeof (row?.lltv ?? row?.ltv) === "number") {
         confidence = "high";
         confidenceReason = "LLTV/LTV from enriched on-chain or crawl-parsed parameters.";
@@ -871,16 +909,23 @@ function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
       break;
     }
     case "poolAge": {
+      const src = String(row?.poolAgeSource || "").toLowerCase();
       if (row?.poolCreatedAt || row?.createdAt) {
-        confidence = "high";
-        confidenceReason = row?.poolCreatedAt
-          ? "Pool age from DefiLlama APY history first sample or deployment timestamp."
-          : "Pool age from deployment or listed timestamp.";
+        confidence = /on_chain|internal_tx|market_event/.test(src) ? "high" : "medium";
+        confidenceReason =
+          row?.poolAgeEvidence ||
+          (src === "on_chain_internal_tx"
+            ? "Pool age from first internal transaction on pool contract (block explorer)."
+            : src === "on_chain_market_event"
+              ? "Pool age from first Morpho market on-chain event."
+              : "Pool age from on-chain or indexed source.");
       } else {
         confidence = "low";
-        confidenceReason = "Age estimated from DefiLlama sample count or unknown.";
+        confidenceReason = "Pool creation date not resolved — check contract on block explorer.";
       }
-      if (chartUrl) sources.push({ label: "DefiLlama protocol", url: defillamaPoolUrl(row) });
+      if (row?.poolAgeExplorerUrl) {
+        sources.push({ label: "Block explorer (first activity)", url: row.poolAgeExplorerUrl });
+      }
       break;
     }
     case "depositorConcentration": {
@@ -920,13 +965,12 @@ function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
         pickFromNotes("protocol_api");
         pickFromNotes("pool_page_crawl");
         pickFromNotes("defillama");
+        pickFromNotes("subgraph");
       }
-      if (ctx.url) sources.push({ label: "Pool URL", url: ctx.url });
       break;
     }
     case "yieldQuality": {
       pickFromNotes("defillama_chart");
-      if (chartUrl) sources.push({ label: "DefiLlama APY chart", url: chartUrl });
       if (isFinite(Number(row?.apyBase))) {
         confidence = "high";
         confidenceReason = "Organic vs reward split from DefiLlama apyBase/apyReward.";

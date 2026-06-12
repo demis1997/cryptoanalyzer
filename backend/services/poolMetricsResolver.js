@@ -9,6 +9,12 @@ import { gatherDunePoolResearch } from "./duneResearch.js";
 import { searchWeb } from "./webResearch.js";
 import { findPendleMarket, extractPendleScoringMeta } from "./pendleMarket.js";
 import { pickBestTvlCandidate, tvlConfidenceForSource } from "./tvlSourcePriority.js";
+import { fetchPoolSubgraphMetrics, subgraphExplorerUrlForPool } from "./poolSubgraph.js";
+import { resolvePoolCreatedAtMs } from "./poolContractAge.js";
+import {
+  defillamaYieldsPoolUrl,
+  explorerInternalTxUrl,
+} from "./sourceUrls.js";
 
 function defillamaTvlAllowed() {
   return /^(1|true|yes|on)$/i.test(String(process.env.POOL_DEFILLAMA_TVL || "0").trim());
@@ -98,6 +104,57 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
   }
   if (vaultMeta?.pendleAmmLiquidityUsd != null && isFinite(Number(vaultMeta.pendleAmmLiquidityUsd))) {
     Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, vaultMeta));
+  }
+
+  const subgraphMeta = await fetchPoolSubgraphMetrics(ctx).catch(() => null);
+  const sgScoring = subgraphMeta?.scoring;
+  if (sgScoring?.totalAssetsUsd != null && isFinite(Number(sgScoring.totalAssetsUsd))) {
+    tvlCandidates.push({
+      value: Number(sgScoring.totalAssetsUsd),
+      source: "subgraph",
+      evidence: sgScoring.tvlEvidence || "Subgraph indexed pool TVL",
+    });
+    Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, sgScoring));
+    sources.push({
+      id: "subgraph",
+      label: "The Graph subgraph",
+      provider: subgraphMeta?.protocol || "subgraph",
+      ok: true,
+      detail: sgScoring.tvlEvidence || `TVL $${Math.round(sgScoring.totalAssetsUsd).toLocaleString()}`,
+      url: subgraphMeta?.subgraphUrl || subgraphExplorerUrlForPool(ctx),
+      subgraphId: subgraphMeta?.subgraphId || null,
+    });
+  } else if (subgraphMeta?.error) {
+    sources.push({
+      id: "subgraph",
+      label: "The Graph subgraph",
+      provider: "subgraph",
+      ok: false,
+      detail: String(subgraphMeta.error).slice(0, 120),
+    });
+  }
+
+  const poolAgeAddr =
+    vaultMeta?.vaultAddress ||
+    vaultAddress ||
+    ctx?.vaultAddress ||
+    (ctx?.protocolKind === "aave_reserve" ? ctx?.underlyingAsset : null);
+  const onChainAge = await resolvePoolCreatedAtMs({
+    address: poolAgeAddr,
+    chain,
+    marketId: ctx?.marketId,
+    protocolKind: ctx?.protocolKind,
+  }).catch(() => null);
+  if (onChainAge?.poolCreatedAt) {
+    Object.assign(scoringHints, onChainAge);
+    sources.push({
+      id: "pool_age_on_chain",
+      label: "On-chain pool age",
+      provider: "block explorer",
+      ok: true,
+      detail: onChainAge.poolAgeEvidence,
+      url: onChainAge.poolAgeExplorerUrl || explorerInternalTxUrl(poolAgeAddr, chain),
+    });
   }
 
   if (/^0x[a-f0-9]{40}$/.test(vaultAddress)) {
@@ -269,7 +326,7 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
       provider: "DefiLlama",
       ok: !row.tvlUncertain,
       detail: `TVL $${Math.round(row.tvlUsd).toLocaleString()}${row.tvlUncertain ? " (uncertain match)" : ""}`,
-      url: row.pool ? `https://defillama.com/yields/pool/${row.pool}` : "https://defillama.com/yields",
+      url: defillamaYieldsPoolUrl(row.pool),
     });
   }
 

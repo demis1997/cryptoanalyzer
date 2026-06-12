@@ -15,6 +15,7 @@ import { fetchCompoundMarket } from "./compoundMarket.js";
 import { findPendleMarket, pendleMetaForVault, syntheticYieldsRowFromPendle } from "./pendleMarket.js";
 import { fetchFluidLendingToken } from "./fluidLending.js";
 import { fetchHyperliquidVault } from "./hyperliquidVault.js";
+import { fetchPoolSubgraphMetrics } from "./poolSubgraph.js";
 
 const API_FIRST_SOURCES = new Set([
   "aave_api",
@@ -28,7 +29,7 @@ const API_FIRST_SOURCES = new Set([
   "kamino_api",
 ]);
 
-function mergeDlOrSynthetic({ apiMeta, allPools, rowOpts, trace, label }) {
+async function mergeDlOrSynthetic({ apiMeta, allPools, rowOpts, trace, label, protocolKind = null }) {
   if (!apiMeta) return null;
   const scoring = apiMeta.scoring || apiMeta;
   const hasApiMetrics =
@@ -96,10 +97,29 @@ function mergeDlOrSynthetic({ apiMeta, allPools, rowOpts, trace, label }) {
     ]
       .filter(Boolean)
       .join(" · "),
-    sources: [{ label: apiMeta.source || label, url: null }],
+    sources: [
+      {
+        label: apiMeta.source || label,
+        url: apiMeta.sourceUrl || apiMeta.marketPageUrl || null,
+      },
+    ],
   });
 
-  return { yieldsRows: [row], vaultMeta: { ...apiMeta, scoring } };
+  const subgraph = await fetchPoolSubgraphMetrics({
+    protocolKind,
+    chain: apiMeta?.chain || rowOpts?.chain,
+    underlyingAsset: apiMeta?.underlyingAsset,
+    marketId: apiMeta?.marketId,
+    vaultAddress: apiMeta?.vaultAddress,
+  }).catch(() => null);
+
+  const vaultMeta = { ...apiMeta, scoring };
+  if (subgraph?.scoring) {
+    vaultMeta.subgraphScoring = subgraph.scoring;
+    vaultMeta.subgraphSource = subgraph.protocol;
+  }
+
+  return { yieldsRows: [row], vaultMeta };
 }
 
 /**
@@ -127,19 +147,39 @@ export async function resolvePoolFromProtocolTarget(ctx, allPools, trace = null)
         chain: ctx.chain,
         underlyingAsset: ctx.underlyingAsset || ctx.vaultAddress,
       });
-      return mergeDlOrSynthetic({ apiMeta: meta, allPools, rowOpts, trace, label: "Aave reserve API" });
+      return await mergeDlOrSynthetic({
+        apiMeta: meta,
+        allPools,
+        rowOpts,
+        trace,
+        label: "Aave reserve API",
+        protocolKind: "aave_reserve",
+      });
     }
     case "spark_reserve": {
       const meta = await fetchSparkReserve({
         chain: ctx.chain,
         underlyingAsset: ctx.underlyingAsset || ctx.vaultAddress,
       });
-      const spark = mergeDlOrSynthetic({ apiMeta: meta, allPools, rowOpts, trace, label: "Spark reserve" });
-      return spark;
+      return await mergeDlOrSynthetic({
+        apiMeta: meta,
+        allPools,
+        rowOpts,
+        trace,
+        label: "Spark reserve",
+        protocolKind: "spark_reserve",
+      });
     }
     case "morpho_market": {
       const meta = await fetchMorphoMarketById(ctx.marketId, ctx.chain);
-      return mergeDlOrSynthetic({ apiMeta: meta, allPools, rowOpts, trace, label: "Morpho market API" });
+      return await mergeDlOrSynthetic({
+        apiMeta: meta,
+        allPools,
+        rowOpts,
+        trace,
+        label: "Morpho market API",
+        protocolKind: "morpho_market",
+      });
     }
     case "morpho_vault": {
       const morpho = await fetchMorphoVaultByAddress(ctx.vaultAddress, ctx.chain);
@@ -166,19 +206,47 @@ export async function resolvePoolFromProtocolTarget(ctx, allPools, trace = null)
       return resolvePendle(ctx, allPools, trace);
     case "compound_market": {
       const meta = await fetchCompoundMarket({ marketSlug: ctx.marketSlug, chain: ctx.chain });
-      return mergeDlOrSynthetic({ apiMeta: meta, allPools, rowOpts, trace, label: "Compound Comet" });
+      return await mergeDlOrSynthetic({
+        apiMeta: meta,
+        allPools,
+        rowOpts,
+        trace,
+        label: "Compound Comet",
+        protocolKind: "compound_market",
+      });
     }
     case "fluid_lending": {
       const meta = await fetchFluidLendingToken({ chain: ctx.chain, nameHint: ctx.nameHint });
-      return mergeDlOrSynthetic({ apiMeta: meta, allPools, rowOpts, trace, label: "Fluid lending API" });
+      return await mergeDlOrSynthetic({
+        apiMeta: meta,
+        allPools,
+        rowOpts,
+        trace,
+        label: "Fluid lending API",
+        protocolKind: "fluid_lending",
+      });
     }
     case "hyperliquid_vault": {
       const meta = await fetchHyperliquidVault(ctx.vaultAddress);
-      return mergeDlOrSynthetic({ apiMeta: meta, allPools, rowOpts, trace, label: "Hyperliquid vault API" });
+      return await mergeDlOrSynthetic({
+        apiMeta: meta,
+        allPools,
+        rowOpts,
+        trace,
+        label: "Hyperliquid vault API",
+        protocolKind: "hyperliquid_vault",
+      });
     }
     case "maple_pool": {
       const meta = await fetchMaplePool({ nameHint: ctx.nameHint });
-      return mergeDlOrSynthetic({ apiMeta: meta, allPools, rowOpts, trace, label: "Maple GraphQL API" });
+      return await mergeDlOrSynthetic({
+        apiMeta: meta,
+        allPools,
+        rowOpts,
+        trace,
+        label: "Maple GraphQL API",
+        protocolKind: "maple_pool",
+      });
     }
     case "kamino_vault": {
       const meta = await fetchKaminoVault({
@@ -192,7 +260,14 @@ export async function resolvePoolFromProtocolTarget(ctx, allPools, trace = null)
         });
         return null;
       }
-      return mergeDlOrSynthetic({ apiMeta: meta, allPools, rowOpts, trace, label: "Kamino vault API" });
+      return await mergeDlOrSynthetic({
+        apiMeta: meta,
+        allPools,
+        rowOpts,
+        trace,
+        label: "Kamino vault API",
+        protocolKind: "kamino_vault",
+      });
     }
     default:
       return null;

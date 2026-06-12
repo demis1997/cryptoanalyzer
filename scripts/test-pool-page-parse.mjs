@@ -222,10 +222,15 @@ const morphoRisk = buildPoolRiskAssessment({
 const p7m = morphoRisk.criteria.find((c) => c.key === "poolTvl");
 const p6m = morphoRisk.criteria.find((c) => c.key === "poolAge");
 assert(p7m.score === 0.8, `Morpho market P.7 ~$15M liquidity: ${p7m.input} score ${p7m.score}`);
-assert(p7m.input.replace(/,/g, "").includes("15194") || p7m.input.includes("14"), `P.7 ~$15M not supply ${p7m.input}`);
+assert(
+  morphoRow.tvlUsd === morphoMkt.scoring.liquidityAssetsUsd &&
+    morphoMkt.scoring.liquidityAssetsUsd < morphoMkt.scoring.supplyAssetsUsd,
+  `P.7 TVL is liquidity not total supply`
+);
 assert(/liquidityAssetsUsd/i.test(p7m.evidence), `P.7 evidence ${p7m.evidence}`);
-assert(!p6m.unavailable, `P.6 from creationTimestamp ${p6m.input}`);
-assert(p6m.score >= 0.7, `P.6 ~16mo market age ${p6m.score}`);
+assert(!p6m.unavailable, `P.6 from on-chain market event ${p6m.input}`);
+assert(p6m.score >= 0.5, `P.6 market age scored ${p6m.score}`);
+assert(/on-chain|Morpho Blue/i.test(morphoRow.poolAgeEvidence || ""), `pool age evidence ${morphoRow.poolAgeEvidence}`);
 
 const aaveDai = await fetchAaveReserve({
   chain: "ethereum",

@@ -1,6 +1,8 @@
 import fetch from "node-fetch";
 import { normalizePoolChain } from "./poolAddress.js";
 import { parseMorphoLltv } from "./scoringAudit.js";
+import { resolvePoolCreatedAtMs } from "./poolContractAge.js";
+import { explorerInternalTxUrl, morphoGraphqlUrl } from "./sourceUrls.js";
 
 const CURATOR_ADDRESSES = {
   "0x827e86072b06674a077f592a531dce4590adecdb": "Steakhouse Financial",
@@ -88,6 +90,12 @@ export async function fetchMorphoVaultByAddress(address, chain) {
     }
     if (!v?.address) return null;
     const scoring = extractMorphoScoringFields(v);
+    const ageMeta = await resolvePoolCreatedAtMs({
+      address: addr,
+      chain: normalizePoolChain(v?.chain?.network || chain),
+      protocolKind: "morpho_vault",
+    });
+    if (ageMeta?.poolCreatedAt) Object.assign(scoring, ageMeta);
     const curatorAddr = String(v?.state?.curator || "").toLowerCase();
     const curatorName =
       CURATOR_ADDRESSES[curatorAddr] ||
@@ -110,6 +118,8 @@ export async function fetchMorphoVaultByAddress(address, chain) {
       chain: normalizePoolChain(v?.chain?.network || chain),
       chainId: v?.chain?.id ?? chainId,
       source,
+      sourceUrl: morphoGraphqlUrl(),
+      poolAgeExplorerUrl: ageMeta?.poolAgeExplorerUrl || explorerInternalTxUrl(addr, chain),
       scoring,
       ...scoring,
     };
@@ -153,11 +163,6 @@ function extractMorphoScoringFields(v) {
 
   const apyRaw = Number(st.netApy ?? st.apy);
   const out = {};
-  if (v?.creationTimestamp != null && isFinite(Number(v.creationTimestamp))) {
-    const ms = Number(v.creationTimestamp) * 1000;
-    out.poolCreatedAt = ms;
-    out.poolAgeEvidence = `Morpho API vault creation ${new Date(ms).toISOString().slice(0, 10)}`;
-  }
   if (isFinite(Number(st.totalAssetsUsd))) {
     out.totalAssetsUsd = Number(st.totalAssetsUsd);
     out.tvlEvidence = "Morpho API state.totalAssetsUsd";

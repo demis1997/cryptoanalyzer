@@ -8,6 +8,8 @@ import { selectPrimaryYieldsRow, yieldsRowMatchesVault, rowMatchesNameHint } fro
 import { parsePoolPageMetrics, mergePageMetricsIntoHints } from "./poolPageParse.js";
 import { readErc20Metadata } from "./onChainToken.js";
 import { mergeTvlIntoRow } from "./tvlSourcePriority.js";
+import { shouldReplacePoolAge } from "./poolContractAge.js";
+import { defillamaYieldsPoolUrl } from "./sourceUrls.js";
 
 const CG_PLATFORM = {
   ethereum: "ethereum",
@@ -432,11 +434,7 @@ export async function gatherPoolExternalData(ctx, { webResearch = null } = {}) {
     }
   }
 
-  const yieldsUrl = row?.pool
-    ? `https://defillama.com/yields/pool/${encodeURIComponent(row.pool)}`
-    : row?.project
-      ? `https://defillama.com/protocol/${encodeURIComponent(row.project)}`
-      : "https://defillama.com/yields";
+  const yieldsUrl = defillamaYieldsPoolUrl(row?.pool);
   if (defillamaScoringFlag("POOL_DEFILLAMA_REFERENCE") && row) {
     sources.push({
       id: "defillama_yields",
@@ -553,8 +551,29 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
   }
   if (hints.capUtilization != null) primary.capUtilization = hints.capUtilization;
   if (hints.poolCreatedAt != null) {
-    primary.poolCreatedAt = hints.poolCreatedAt;
-    if (hints.poolAgeEvidence) primary.poolAgeEvidence = hints.poolAgeEvidence;
+    const incoming = {
+      poolCreatedAt: hints.poolCreatedAt,
+      poolAgeSource: hints.poolAgeSource || hints.tvlSource || "pool_page",
+      poolAgeEvidence: hints.poolAgeEvidence || null,
+      poolAgeExplorerUrl: hints.poolAgeExplorerUrl || null,
+    };
+    if (
+      shouldReplacePoolAge(
+        { poolCreatedAt: primary.poolCreatedAt, poolAgeSource: primary.poolAgeSource },
+        incoming
+      )
+    ) {
+      primary.poolCreatedAt = incoming.poolCreatedAt;
+      primary.poolAgeSource = incoming.poolAgeSource;
+      if (incoming.poolAgeEvidence) primary.poolAgeEvidence = incoming.poolAgeEvidence;
+      if (incoming.poolAgeExplorerUrl) primary.poolAgeExplorerUrl = incoming.poolAgeExplorerUrl;
+    }
+  }
+  if (hints.top1DepositorPct != null && primary.top1DepositorPct == null) {
+    primary.top1DepositorPct = hints.top1DepositorPct;
+    if (hints.depositorConcentrationEvidence) {
+      primary.depositorConcentrationEvidence = hints.depositorConcentrationEvidence;
+    }
   }
   if (hints.pendleDaysToMaturity != null) {
     primary.pendleDaysToMaturity = hints.pendleDaysToMaturity;

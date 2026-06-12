@@ -6,6 +6,7 @@ import { clientForChain } from "./onChainToken.js";
 import { moralisTokenPriceUsd } from "./moralisClient.js";
 import fetch from "node-fetch";
 import { normalizePoolChain } from "./poolAddress.js";
+import { resolvePoolCreatedAtMs } from "./poolContractAge.js";
 
 /** Spark address registry — Ethereum mainnet (sparkdotfi/spark-address-registry). */
 const SPARK_ETHEREUM = {
@@ -30,6 +31,17 @@ const PROTOCOL_DATA_PROVIDER_ABI = [
       { type: "uint256" },
       { type: "uint256" },
       { type: "uint40" },
+    ],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "getReserveTokensAddresses",
+    inputs: [{ name: "asset", type: "address" }],
+    outputs: [
+      { name: "aTokenAddress", type: "address" },
+      { name: "stableDebtTokenAddress", type: "address" },
+      { name: "variableDebtTokenAddress", type: "address" },
     ],
     stateMutability: "view",
   },
@@ -76,7 +88,7 @@ export async function fetchSparkReserve({ chain, underlyingAsset }) {
 
   try {
     const client = clientForChain(chain);
-    const [reserveData, configData] = await Promise.all([
+    const [reserveData, configData, tokenAddrs] = await Promise.all([
       client.readContract({
         address: provider,
         abi: PROTOCOL_DATA_PROVIDER_ABI,
@@ -87,6 +99,12 @@ export async function fetchSparkReserve({ chain, underlyingAsset }) {
         address: provider,
         abi: PROTOCOL_DATA_PROVIDER_ABI,
         functionName: "getReserveConfigurationData",
+        args: [addr],
+      }),
+      client.readContract({
+        address: provider,
+        abi: PROTOCOL_DATA_PROVIDER_ABI,
+        functionName: "getReserveTokensAddresses",
         args: [addr],
       }),
     ]);
@@ -125,6 +143,11 @@ export async function fetchSparkReserve({ chain, underlyingAsset }) {
     const liqThreshPct = Number(configData[2]) / 100;
     const sym = KNOWN_SYMBOLS[addr] || "reserve";
 
+    const aTokenAddr = String(tokenAddrs?.[0] || "").toLowerCase();
+    const ageMeta = aTokenAddr
+      ? await resolvePoolCreatedAtMs({ address: aTokenAddr, chain, protocolKind: "spark_reserve" })
+      : null;
+
     const scoring = {
       totalAssetsUsd: tvlUsd,
       supplyAssetsUsd: priceUsd != null && supply > 0 ? supply * priceUsd : null,
@@ -145,6 +168,10 @@ export async function fetchSparkReserve({ chain, underlyingAsset }) {
             : null,
       oracleType: "Chainlink",
       oracleEvidence: "SparkLend Chainlink oracle infrastructure",
+      poolCreatedAt: ageMeta?.poolCreatedAt ?? null,
+      poolAgeEvidence: ageMeta?.poolAgeEvidence ?? null,
+      poolAgeSource: ageMeta?.poolAgeSource ?? null,
+      poolAgeExplorerUrl: ageMeta?.poolAgeExplorerUrl ?? null,
     };
 
     return {

@@ -5,7 +5,8 @@ import fetch from "node-fetch";
 import { createPublicClient, http, parseAbi } from "viem";
 import { optimism, mainnet, arbitrum, base, polygon } from "viem/chains";
 import { normalizePoolChain } from "./poolAddress.js";
-import { getContractDeployedAtMs } from "./contractDeployTime.js";
+import { resolvePoolCreatedAtMs } from "./poolContractAge.js";
+import { compoundMarketUrl } from "./sourceUrls.js";
 import { moralisTokenPriceUsd } from "./moralisClient.js";
 
 const COMET_ABI = parseAbi([
@@ -123,10 +124,11 @@ export async function fetchCompoundMarket({ marketSlug, chain }) {
     const supplyUsd = priceUsd != null && supply > 0 ? supply * priceUsd : null;
     const cashUsd = priceUsd != null && cash > 0 ? cash * priceUsd : cash > 0 ? cash : null;
 
-    const poolCreatedAt = await getContractDeployedAtMs(cometAddr, dep.chain);
-    const poolAgeEvidence = poolCreatedAt
-      ? `Compound Comet deployment ${new Date(poolCreatedAt).toISOString().slice(0, 10)}`
-      : null;
+    const ageMeta = await resolvePoolCreatedAtMs({
+      address: cometAddr,
+      chain: dep.chain,
+      protocolKind: "compound_market",
+    });
 
     const scoring = {
       totalAssetsUsd: cashUsd,
@@ -136,8 +138,10 @@ export async function fetchCompoundMarket({ marketSlug, chain }) {
         cashUsd != null
           ? `Compound Comet cash liquidity $${Math.round(cashUsd).toLocaleString()} (supply − borrow)`
           : null,
-      poolCreatedAt,
-      poolAgeEvidence,
+      poolCreatedAt: ageMeta?.poolCreatedAt ?? null,
+      poolAgeEvidence: ageMeta?.poolAgeEvidence ?? null,
+      poolAgeSource: ageMeta?.poolAgeSource ?? null,
+      poolAgeExplorerUrl: ageMeta?.poolAgeExplorerUrl ?? null,
       utilization: util != null && isFinite(util) ? util : null,
       utilizationEvidence: util != null ? `Compound Comet utilization ${(util * 100).toFixed(1)}%` : null,
       oracleType: "Chainlink",
@@ -151,6 +155,7 @@ export async function fetchCompoundMarket({ marketSlug, chain }) {
       vaultAddress: cometAddr,
       project: "compound",
       source: "compound_on_chain",
+      sourceUrl: compoundMarketUrl(marketSlug),
       scoring,
       ...scoring,
     };

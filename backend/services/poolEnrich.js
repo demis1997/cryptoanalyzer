@@ -1,6 +1,7 @@
 import { runHostedLlmJson } from "../llm/provider.js";
 import { parseScoringHintsFromText } from "./poolDataSources.js";
 import { mergeTvlIntoRow } from "./tvlSourcePriority.js";
+import { shouldReplacePoolAge } from "./poolContractAge.js";
 
 function llmEnabled() {
   return !/^(0|false|no|off)$/i.test(String(process.env.POOL_INTELLIGENCE_LLM || "1").trim());
@@ -94,7 +95,7 @@ Works for ANY protocol (Aave, Morpho, Pendle, Euler, Curve, Compound, etc.) — 
 You cannot browse the web.
 
 TVL SOURCE PRIORITY (for poolTvlUsd only — follow strictly):
-1. Protocol/contract API or on-chain resolver (already in TVL CANDIDATES as protocol_api / on_chain) — NEVER override with a lower tier.
+1. Protocol/contract API, The Graph subgraph, or on-chain resolver (protocol_api / subgraph / on_chain) — NEVER override with a lower tier.
 2. Playwright pool page crawl (pool_page).
 3. DefiLlama / Dune / pool analytics dashboards (defillama / dune).
 4. Web search snippets (lowest) — only if no higher tier exists.
@@ -211,6 +212,7 @@ Return JSON only.`.trim();
       const ms = Date.parse(j.poolLaunchedDate);
       if (isFinite(ms)) {
         out.hints.poolCreatedAt = ms;
+        out.hints.poolAgeSource = "llm";
         out.hints.poolAgeEvidence = `LLM: launched ${j.poolLaunchedDate}`;
       }
     }
@@ -303,8 +305,23 @@ export function applyMetadataHintsToRow(row, meta) {
     if (hints.apyStabilityEvidence) next.apyStabilityEvidence = hints.apyStabilityEvidence;
   }
   if (hints.poolCreatedAt != null) {
-    next.poolCreatedAt = hints.poolCreatedAt;
-    if (hints.poolAgeEvidence) next.poolAgeEvidence = hints.poolAgeEvidence;
+    const incoming = {
+      poolCreatedAt: hints.poolCreatedAt,
+      poolAgeSource: hints.poolAgeSource || "pool_page",
+      poolAgeEvidence: hints.poolAgeEvidence || null,
+      poolAgeExplorerUrl: hints.poolAgeExplorerUrl || null,
+    };
+    if (
+      shouldReplacePoolAge(
+        { poolCreatedAt: next.poolCreatedAt, poolAgeSource: next.poolAgeSource },
+        incoming
+      )
+    ) {
+      next.poolCreatedAt = incoming.poolCreatedAt;
+      next.poolAgeSource = incoming.poolAgeSource;
+      if (incoming.poolAgeEvidence) next.poolAgeEvidence = incoming.poolAgeEvidence;
+      if (incoming.poolAgeExplorerUrl) next.poolAgeExplorerUrl = incoming.poolAgeExplorerUrl;
+    }
   }
   return next;
 }
