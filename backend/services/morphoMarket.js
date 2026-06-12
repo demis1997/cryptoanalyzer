@@ -89,6 +89,7 @@ export async function fetchMorphoMarketById(marketId, chain) {
       chain: normalizePoolChain(chain),
       project: "morpho-blue",
       source: "morpho_api",
+      tvlSource: "protocol_api",
       scoring,
       ...scoring,
     };

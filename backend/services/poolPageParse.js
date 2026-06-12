@@ -144,7 +144,7 @@ function detectInstantWithdrawal(text) {
 export function parsePoolPageMetrics(text, opts = {}) {
   const t = String(text || "");
   const hints = {};
-  if (!t.trim()) return hints;
+  if (!t.trim() && !opts.html) return hints;
 
   const structured =
     opts.innerText != null || opts.html
@@ -153,6 +153,7 @@ export function parsePoolPageMetrics(text, opts = {}) {
           html: opts.html || "",
           url: opts.url || "",
           poolLabel: opts.poolLabel || "",
+          marketId: opts.marketId || null,
         })
       : parseStructuredPoolMetrics(t, { url: opts.url, poolLabel: opts.poolLabel });
   Object.assign(hints, structured);
@@ -280,9 +281,18 @@ export function mergePageMetricsIntoHints(hints, metrics) {
   const out = { ...hints };
   const m = metrics || {};
   if (m.poolTvlUsd != null) {
-    out.poolTvlUsd = m.poolTvlUsd;
-    out.tvlSource = m.tvlSource || "pool_page";
-    out.tvlEvidence = m.tvlEvidence || null;
+    const precise = /json|liquidityAssetsUsd|protocol|api/i.test(m.tvlEvidence || "");
+    const existingPrecise = /json|liquidityAssetsUsd|protocol|api/i.test(out.tvlEvidence || "");
+    const shouldTake =
+      out.poolTvlUsd == null ||
+      (precise && !existingPrecise) ||
+      (precise === existingPrecise &&
+        Math.abs(Number(m.poolTvlUsd) - Number(out.poolTvlUsd)) / Number(out.poolTvlUsd) > 0.02);
+    if (shouldTake) {
+      out.poolTvlUsd = m.poolTvlUsd;
+      out.tvlSource = m.tvlSource || "pool_page";
+      out.tvlEvidence = m.tvlEvidence || null;
+    }
   }
   if (m.utilization != null && out.utilization == null) {
     out.utilization = m.utilization;

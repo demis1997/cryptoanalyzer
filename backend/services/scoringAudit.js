@@ -1,4 +1,5 @@
 /** Per-criterion data audit for activity logs and transparency. */
+import { mergeTvlIntoRow } from "./tvlSourcePriority.js";
 
 function has(val) {
   if (val == null) return false;
@@ -11,7 +12,9 @@ function has(val) {
 export function normalizePoolCreatedAtMs(raw) {
   const n = Number(raw);
   if (!isFinite(n) || n <= 0) return null;
-  return n > 1e12 ? Math.round(n) : Math.round(n * 1000);
+  const ms = n > 1e12 ? Math.round(n) : Math.round(n * 1000);
+  if (ms > Date.now() + 86400000) return null;
+  return ms;
 }
 
 export function parseMorphoLltv(raw) {
@@ -30,20 +33,26 @@ export function applyVaultScoringMetaToRow(row, meta) {
   if (meta.pendleAmmLiquidityUsd != null && isFinite(Number(meta.pendleAmmLiquidityUsd))) {
     next.pendleAmmLiquidityUsd = Number(meta.pendleAmmLiquidityUsd);
     next.ammLiquidityUsd = Number(meta.ammLiquidityUsd ?? meta.pendleAmmLiquidityUsd);
-    {
-      next.tvlUsd = next.ammLiquidityUsd;
-      next.tvlSource = "protocol_api";
-      next.tvlEvidence =
-        meta.tvlEvidence ||
-        `Pendle AMM liquidity $${Math.round(next.ammLiquidityUsd).toLocaleString()}`;
-      next.tvlUncertain = false;
-    }
+    Object.assign(
+      next,
+      mergeTvlIntoRow(next, {
+        value: next.ammLiquidityUsd,
+        source: "protocol_api",
+        evidence:
+          meta.tvlEvidence ||
+          `Pendle AMM liquidity $${Math.round(next.ammLiquidityUsd).toLocaleString()}`,
+      })
+    );
   }
   if (meta.totalAssetsUsd != null && isFinite(Number(meta.totalAssetsUsd)) && meta.pendleAmmLiquidityUsd == null) {
-    next.tvlUsd = Number(meta.totalAssetsUsd);
-    next.tvlSource = "protocol_api";
-    next.tvlEvidence = meta.tvlEvidence || "Protocol API totalAssetsUsd";
-    next.tvlUncertain = false;
+    Object.assign(
+      next,
+      mergeTvlIntoRow(next, {
+        value: Number(meta.totalAssetsUsd),
+        source: "protocol_api",
+        evidence: meta.tvlEvidence || "Protocol API totalAssetsUsd",
+      })
+    );
   }
   if (meta.apyPct != null && isFinite(Number(meta.apyPct))) {
     next.apyBase = Number(meta.apyPct);

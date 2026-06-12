@@ -6,6 +6,7 @@ import {
 } from "./htmlCrawl.js";
 import { parsePoolPageContent } from "./poolPageStructuredParse.js";
 import { mergePageMetricsIntoHints } from "./poolPageParse.js";
+import { parseProtocolPoolUrl } from "./protocolUrlParse.js";
 
 function poolPlaywrightEnabled() {
   return !/^(0|false|no|off)$/i.test(String(process.env.POOL_PLAYWRIGHT_CRAWL || "1").trim());
@@ -82,11 +83,13 @@ export function buildPoolCrawlCandidates(poolUrl) {
 
 function parsePageMetrics(r, pageUrl, poolUrl) {
   const innerText = r.innerText || r.visible || htmlToVisibleText(r.html || "");
+  const parsed = parseProtocolPoolUrl(poolUrl);
   return parsePoolPageContent({
     innerText,
     html: r.html || "",
     url: pageUrl,
     poolLabel: poolUrl,
+    marketId: parsed?.marketId || null,
   });
 }
 
@@ -160,6 +163,8 @@ export async function crawlPoolWebsite(poolUrl, { timeBudgetMs, maxPages, poolLa
       textLength: visible.length,
       addresses: [...new Set(addrs)].slice(0, 24),
       excerpt: clamp(visible, 3200),
+      innerText: clamp(visible, 12_000),
+      html: isPrimary ? r.html || "" : "",
       metrics: pageMetrics,
       primary: isPrimary,
     });

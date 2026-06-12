@@ -106,6 +106,8 @@ export function parseStructuredPoolMetrics(innerText, { url = "", poolLabel = ""
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    if (isMarketSizeLabel(line)) continue;
+
     for (const group of TVL_LABEL_GROUPS) {
       if (group.skipIfLending && lending) continue;
       if (!lineMatchesLabel(line, group.labels)) continue;
@@ -194,30 +196,91 @@ export function parseStructuredPoolMetrics(innerText, { url = "", poolLabel = ""
   return hints;
 }
 
-/** Shallow JSON field extraction from embedded SPA payloads. */
-export function extractEmbeddedJsonMetrics(html) {
+const MARKET_SIZE_LABELS = ["total market size", "market size", "total supply", "supply assets"];
+
+function isMarketSizeLabel(line) {
+  const lower = String(line || "").toLowerCase();
+  return MARKET_SIZE_LABELS.some((lab) => lower === lab || lower.startsWith(`${lab} `) || lower.includes(`${lab}:`));
+}
+
+/** Morpho market page embeds exact API state in RSC payload — prefer over rounded UI text. */
+export function extractMorphoMarketMetrics(html, marketId) {
+  const id = String(marketId || "").toLowerCase();
+  const h = String(html || "");
+  if (!id || !h) return {};
+
+  const idx = h.toLowerCase().indexOf(id);
+  if (idx < 0) return {};
+  const window = h.slice(Math.max(0, idx - 20_000), idx + 160_000);
+  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const blockRe = new RegExp(
+    `${esc}[\\s\\S]{0,160000}liquidityAssetsUsd\\\\?":\\s*([\\d.]+)[\\s\\S]{0,8000}utilization\\\\?":\\s*([\\d.]+)`
+  );
+  const block = h.match(blockRe);
+
+  const liq = block
+    ? [null, block[1]]
+    : window.match(/liquidityAssetsUsd\\?":\s*([\d.]+)/);
+  const util = block
+    ? [null, block[2]]
+    : window.match(/utilization\\?":\s*([\d.]+)/);
+  const lltv = window.match(/lltv\\?":\s*([\d.]+)/);
+  const hints = {};
+
+  if (liq) {
+    const usd = Number(liq[1]);
+    if (isFinite(usd) && usd > 0) {
+      hints.poolTvlUsd = usd;
+      hints.tvlSource = "pool_page";
+      hints.tvlEvidence = `Morpho page JSON liquidityAssetsUsd $${Math.round(usd).toLocaleString()}`;
+      hints.availableLiquidityUsd = usd;
+    }
+  }
+  if (util) {
+    let u = Number(util[1]);
+    if (isFinite(u)) {
+      if (u > 1) u /= 100;
+      hints.utilization = u;
+      hints.utilizationEvidence = "Morpho page JSON utilization";
+    }
+  }
+  if (lltv) {
+    let l = Number(lltv[1]);
+    if (isFinite(l)) {
+      if (l > 0 && l <= 1) l *= 100;
+      hints.lltv = l;
+      hints.lltvEvidence = "Morpho page JSON LLTV";
+    }
+  }
+  return hints;
+}
+
+/** Shallow JSON field extraction from embedded SPA payloads (scoped near market id when provided). */
+export function extractEmbeddedJsonMetrics(html, { marketId = null, url = "" } = {}) {
+  if (/morpho\.org/i.test(url) && marketId) {
+    return extractMorphoMarketMetrics(html, marketId);
+  }
+
   const hints = {};
   const h = String(html || "");
   if (!h.trim()) return hints;
 
   const jsonFieldPatterns = [
-    { re: /"liquidityAssetsUsd"\s*:\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "liquidityAssetsUsd in page JSON" },
-    { re: /"availableLiquidityUsd"\s*:\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "availableLiquidityUsd in page JSON" },
-    { re: /"totalLiquidityUsd"\s*:\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "totalLiquidityUsd in page JSON" },
-    { re: /"supplyAssetsUsd"\s*:\s*([\d.]+)/i, field: "supplyAssetsUsd", evidence: "supplyAssetsUsd in page JSON", deprioritize: true },
-    { re: /"utilization"\s*:\s*([\d.]+)/i, field: "utilization", evidence: "utilization in page JSON", asPct: true },
-    { re: /"lltv"\s*:\s*([\d.]+)/i, field: "lltv", evidence: "lltv in page JSON", asPct: true },
-    { re: /"netApy"\s*:\s*([\d.]+)/i, field: "apy", evidence: "netApy in page JSON", asPct: true },
+    { re: /liquidityAssetsUsd\\?":\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "liquidityAssetsUsd in page JSON" },
+    { re: /availableLiquidityUsd\\?":\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "availableLiquidityUsd in page JSON" },
+    { re: /totalLiquidityUsd\\?":\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "totalLiquidityUsd in page JSON" },
+    { re: /utilization\\?":\s*([\d.]+)/i, field: "utilization", evidence: "utilization in page JSON", asPct: true },
+    { re: /lltv\\?":\s*([\d.]+)/i, field: "lltv", evidence: "lltv in page JSON", asPct: true },
+    { re: /netApy\\?":\s*([\d.]+)/i, field: "apy", evidence: "netApy in page JSON", asPct: true },
   ];
 
-  for (const { re, field, evidence, asPct, deprioritize } of jsonFieldPatterns) {
+  for (const { re, field, evidence, asPct } of jsonFieldPatterns) {
     const m = h.match(re);
     if (!m) continue;
     let val = Number(m[1]);
-    if (!isFinite(val)) continue;
+    if (!isFinite(val) || val <= 0) continue;
     if (asPct && val > 0 && val <= 1) val *= 100;
     if (field === "utilization" && val > 1) val /= 100;
-    if (deprioritize) continue;
     if (field === "poolTvlUsd" && hints.poolTvlUsd == null) {
       hints.poolTvlUsd = val;
       hints.tvlSource = "pool_page";
@@ -241,10 +304,17 @@ export function extractEmbeddedJsonMetrics(html) {
 /**
  * Full pool page parse: structured innerText + embedded JSON + fallback regex text.
  */
-export function parsePoolPageContent({ innerText = "", html = "", url = "", poolLabel = "" } = {}) {
+export function parsePoolPageContent({
+  innerText = "",
+  html = "",
+  url = "",
+  poolLabel = "",
+  marketId = null,
+} = {}) {
+  const embedded = extractEmbeddedJsonMetrics(html, { marketId, url });
   const structured = parseStructuredPoolMetrics(innerText, { url, poolLabel });
-  const embedded = extractEmbeddedJsonMetrics(html);
-  const combined = { ...embedded, ...structured };
+  // Embedded protocol JSON (exact USD) beats rounded UI labels like "$15.19M".
+  const combined = { ...structured, ...embedded };
 
   if (innerText && !combined.poolTvlUsd) {
     const blob = String(innerText).slice(0, 12000);

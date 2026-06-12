@@ -191,16 +191,29 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
     webResearch?.crawl?.structuredHints ||
     (primaryPage?.metrics ? primaryPage.metrics : null) ||
     {};
+  const pageText = primaryPage?.innerText || primaryPage?.excerpt || "";
+  const fromPage = parsePoolPageMetrics(pageText, {
+    innerText: pageText,
+    html: primaryPage?.html || "",
+    url: ctx?.url || primaryPage?.url,
+    poolLabel: ctx?.label,
+    marketId: ctx?.marketId || null,
+  });
+  const fromFormatted =
+    !fromPage.poolTvlUsd && webResearch?.crawl?.formatted
+      ? parsePoolPageMetrics(webResearch.crawl.formatted, {
+          url: ctx?.url,
+          poolLabel: ctx?.label,
+          marketId: ctx?.marketId || null,
+        })
+      : {};
   const crawlParsed = mergePageMetricsIntoHints(
-    crawlStructured,
-    parsePoolPageMetrics(webResearch?.crawl?.formatted || "", {
-      innerText: primaryPage?.excerpt || "",
-      url: ctx?.url || primaryPage?.url,
-      poolLabel: ctx?.label,
-    })
+    mergePageMetricsIntoHints(crawlStructured, fromPage),
+    fromFormatted
   );
   Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, crawlParsed));
-  if (crawlParsed.poolTvlUsd) {
+  const hasProtocolTvl = tvlCandidates.some((c) => c.source === "protocol_api" || c.source === "on_chain");
+  if (crawlParsed.poolTvlUsd && !hasProtocolTvl) {
     tvlCandidates.push({
       value: crawlParsed.poolTvlUsd,
       source: "pool_page",
@@ -283,7 +296,7 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
   }
 
   const allowDl = defillamaTvlAllowed();
-  const bestTvl = pickBestTvlCandidate(tvlCandidates, { allowDefillama: allowDl || Boolean(row?.pool) });
+  const bestTvl = pickBestTvlCandidate(tvlCandidates, { allowDefillama: allowDl });
   if (bestTvl) {
     scoringHints.poolTvlUsd = bestTvl.value;
     scoringHints.tvlSource = bestTvl.source;
