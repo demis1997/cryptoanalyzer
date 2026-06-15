@@ -228,9 +228,9 @@ assert(
   `P.7 TVL is total market size not liquidity`
 );
 assert(/supplyAssetsUsd|market size/i.test(p7m.evidence), `P.7 evidence ${p7m.evidence}`);
-assert(!p6m.unavailable, `P.6 from on-chain market event ${p6m.input}`);
+assert(!p6m.unavailable, `P.6 from pool creation ${p6m.input}`);
 assert(p6m.score >= 0.5, `P.6 market age scored ${p6m.score}`);
-assert(/on-chain|Morpho Blue/i.test(morphoRow.poolAgeEvidence || ""), `pool age evidence ${morphoRow.poolAgeEvidence}`);
+assert(/Morpho API market created|first contract transaction/i.test(morphoRow.poolAgeEvidence || ""), `pool age evidence ${morphoRow.poolAgeEvidence}`);
 
 const aaveDai = await fetchAaveReserve({
   chain: "ethereum",

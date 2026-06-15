@@ -145,8 +145,6 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
   const onChainAge = await resolvePoolCreatedAtMs({
     address: poolAgeAddr,
     chain,
-    marketId: ctx?.marketId,
-    protocolKind: ctx?.protocolKind,
   }).catch(() => null);
   if (onChainAge?.poolCreatedAt) {
     Object.assign(scoringHints, onChainAge);

@@ -3,9 +3,8 @@
  */
 import fetch from "node-fetch";
 import { normalizePoolChain } from "./poolAddress.js";
-import { parseMorphoLltv } from "./scoringAudit.js";
+import { parseMorphoLltv, normalizePoolCreatedAtMs } from "./scoringAudit.js";
 import { morphoGraphqlUrl, morphoMarketPageUrl } from "./sourceUrls.js";
-import { resolvePoolCreatedAtMs } from "./poolContractAge.js";
 
 const CHAIN_IDS = { ethereum: 1, arbitrum: 42161, optimism: 10, base: 8453, polygon: 137 };
 
@@ -56,11 +55,14 @@ export async function fetchMorphoMarketById(marketId, chain) {
           : null;
     const util = Number(m.state?.utilization);
     const lltv = parseMorphoLltv(m.lltv);
-    const ageMeta = await resolvePoolCreatedAtMs({
-      marketId: id,
-      chain: normalizePoolChain(chain),
-      protocolKind: "morpho_market",
-    });
+    const createdMs = normalizePoolCreatedAtMs(m.creationTimestamp);
+    const ageMeta = createdMs
+      ? {
+          poolCreatedAt: createdMs,
+          poolAgeSource: "protocol_api",
+          poolAgeEvidence: `Morpho API market created ${new Date(createdMs).toISOString().slice(0, 10)}`,
+        }
+      : null;
 
     const scoring = {
       totalAssetsUsd: tvlUsd,

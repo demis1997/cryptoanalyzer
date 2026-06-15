@@ -37,6 +37,14 @@ export function explorerInternalTxUrl(address, chain) {
   return base ? `${base}#internaltx` : null;
 }
 
+/** Direct link to a transaction on the chain explorer. */
+export function explorerTxUrl(txHash, chain) {
+  const hash = String(txHash || "").toLowerCase();
+  if (!/^0x[a-f0-9]{64}$/.test(hash)) return null;
+  const { host } = explorerMeta(chain);
+  return `https://${host}/tx/${hash}`;
+}
+
 async function etherscanV2Get(params, chain) {
   const key = apiKey();
   if (!key) return { ok: false, error: "missing_api_key" };
@@ -58,21 +66,12 @@ async function etherscanV2Get(params, chain) {
   }
 }
 
-/**
- * Earliest internal transaction timestamp for a contract (pool age proxy).
- * @returns {Promise<{ ms: number, txHash: string, explorerUrl: string }|null>}
- */
-export async function getFirstInternalTransactionMs(address, chain) {
-  const addr = String(address || "").toLowerCase();
-  if (!/^0x[a-f0-9]{40}$/.test(addr)) return null;
-  const cacheKey = `${normalizePoolChain(chain)}:${addr}:internal`;
-  if (txCache.has(cacheKey)) return txCache.get(cacheKey);
-
+async function earliestTxFromList(action, address, chain) {
   const r = await etherscanV2Get(
     {
       module: "account",
-      action: "txlistinternal",
-      address: addr,
+      action,
+      address,
       startblock: "0",
       endblock: "99999999",
       page: "1",
@@ -81,26 +80,47 @@ export async function getFirstInternalTransactionMs(address, chain) {
     },
     chain
   );
-
-  if (!r.ok || !Array.isArray(r.result) || !r.result.length) {
-    txCache.set(cacheKey, null);
-    return null;
-  }
-
+  if (!r.ok || !Array.isArray(r.result) || !r.result.length) return null;
   const tx = r.result[0];
   const ts = Number(tx.timeStamp);
-  if (!isFinite(ts) || ts <= 0) {
+  if (!isFinite(ts) || ts <= 0) return null;
+  return { ms: ts * 1000, txHash: tx.hash || null, action };
+}
+
+/**
+ * Earliest transaction timestamp for a contract (normal or internal).
+ * @returns {Promise<{ ms: number, txHash: string, explorerUrl: string }|null>}
+ */
+export async function getFirstTransactionMs(address, chain) {
+  const addr = String(address || "").toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(addr)) return null;
+  const cacheKey = `${normalizePoolChain(chain)}:${addr}:first_tx`;
+  if (txCache.has(cacheKey)) return txCache.get(cacheKey);
+
+  let best = null;
+  for (const action of ["txlist", "txlistinternal"]) {
+    const hit = await earliestTxFromList(action, addr, chain);
+    if (hit && (!best || hit.ms < best.ms)) best = hit;
+  }
+
+  if (!best) {
     txCache.set(cacheKey, null);
     return null;
   }
 
   const out = {
-    ms: ts * 1000,
-    txHash: tx.hash || null,
-    explorerUrl: explorerInternalTxUrl(addr, chain),
+    ms: best.ms,
+    txHash: best.txHash,
+    explorerUrl:
+      explorerTxUrl(best.txHash, chain) || explorerAddressUrl(addr, chain),
   };
   txCache.set(cacheKey, out);
   return out;
+}
+
+/** @deprecated Use getFirstTransactionMs */
+export async function getFirstInternalTransactionMs(address, chain) {
+  return getFirstTransactionMs(address, chain);
 }
 
 const logCache = new Map();

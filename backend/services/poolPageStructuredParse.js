@@ -84,9 +84,27 @@ const TVL_LABEL_GROUPS = [
   { key: "availableLiquidity", labels: ["available liquidity", "liquidity available", "borrowable liquidity", "cash liquidity"], priority: 0 },
   { key: "totalLiquidity", labels: ["total liquidity", "market liquidity", "pool liquidity", "liquidity in pool"], priority: 1 },
   { key: "ammLiquidity", labels: ["amm liquidity", "sy liquidity", "pt liquidity", "yt liquidity", "lp liquidity"], priority: 1 },
-  { key: "tvl", labels: ["tvl", "total value locked", "total assets", "net assets", "assets under management", "total deposits", "market size"], priority: 2 },
+  { key: "tvl", labels: ["tvl", "total value locked", "total assets", "net assets", "assets under management", "total deposits", "market size", "total supplied", "reserve size", "supplied"], priority: 2 },
   { key: "supply", labels: ["total supply", "supply assets", "supplied"], priority: 8, skipIfLending: true },
 ];
+
+function pickBestTvlHit(hits, { url = "", lending = false } = {}) {
+  if (!hits.length) return null;
+  const hay = String(url).toLowerCase();
+  const isCompound = /compound/i.test(hay);
+  // Aave / Morpho / Spark P.7 = total deposits or market size, not borrowable liquidity.
+  const preferDeposits = lending && !isCompound;
+  if (preferDeposits) {
+    const depositGroups = new Set(["tvl", "supply", "totalLiquidity"]);
+    const depositHits = hits.filter((h) => depositGroups.has(h.group)).sort((a, b) => a.priority - b.priority);
+    if (depositHits.length) return depositHits[0];
+  }
+  if (isCompound) {
+    const cashHit = hits.find((h) => h.group === "availableLiquidity");
+    if (cashHit) return cashHit;
+  }
+  return [...hits].sort((a, b) => a.priority - b.priority)[0];
+}
 
 function isLendingPage(text, url) {
   const hay = `${url || ""} ${text || ""}`.toLowerCase();
@@ -179,8 +197,7 @@ export function parseStructuredPoolMetrics(innerText, { url = "", poolLabel = ""
   }
 
   if (tvlHits.length) {
-    tvlHits.sort((a, b) => a.priority - b.priority);
-    const best = tvlHits[0];
+    const best = pickBestTvlHit(tvlHits, { url, lending });
     hints.poolTvlUsd = best.usd;
     hints.tvlSource = "pool_page";
     hints.tvlEvidence = `Structured page parse: ${best.evidence}`;
@@ -269,15 +286,17 @@ export function extractEmbeddedJsonMetrics(html, { marketId = null, url = "" } =
 
   const jsonFieldPatterns = [
     { re: /supplyAssetsUsd\\?":\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "supplyAssetsUsd in page JSON (market size)" },
-    { re: /liquidityAssetsUsd\\?":\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "liquidityAssetsUsd in page JSON" },
-    { re: /availableLiquidityUsd\\?":\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "availableLiquidityUsd in page JSON" },
+    { re: /"size"[^}]*"usd"\\?":\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "reserve size.usd in page JSON (total deposits)" },
     { re: /totalLiquidityUsd\\?":\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "totalLiquidityUsd in page JSON" },
+    { re: /liquidityAssetsUsd\\?":\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "liquidityAssetsUsd in page JSON" },
+    { re: /availableLiquidityUsd\\?":\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "availableLiquidityUsd in page JSON", compoundOnly: true },
     { re: /utilization\\?":\s*([\d.]+)/i, field: "utilization", evidence: "utilization in page JSON", asPct: true },
     { re: /lltv\\?":\s*([\d.]+)/i, field: "lltv", evidence: "lltv in page JSON", asPct: true },
     { re: /netApy\\?":\s*([\d.]+)/i, field: "apy", evidence: "netApy in page JSON", asPct: true },
   ];
 
-  for (const { re, field, evidence, asPct } of jsonFieldPatterns) {
+  for (const { re, field, evidence, asPct, compoundOnly } of jsonFieldPatterns) {
+    if (compoundOnly && !/compound/i.test(url)) continue;
     const m = h.match(re);
     if (!m) continue;
     let val = Number(m[1]);

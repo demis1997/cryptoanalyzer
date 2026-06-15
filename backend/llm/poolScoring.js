@@ -938,14 +938,12 @@ function enrichCriterionMeta(key, result, row, ctx, opts = {}) {
     case "poolAge": {
       const src = String(row?.poolAgeSource || "").toLowerCase();
       if (row?.poolCreatedAt || row?.createdAt) {
-        confidence = /on_chain|internal_tx|market_event/.test(src) ? "high" : "medium";
+        confidence = /on_chain|first_tx|internal_tx/.test(src) ? "high" : "medium";
         confidenceReason =
           row?.poolAgeEvidence ||
-          (src === "on_chain_internal_tx"
-            ? "Pool age from first internal transaction on pool contract (block explorer)."
-            : src === "on_chain_market_event"
-              ? "Pool age from first Morpho market on-chain event."
-              : "Pool age from on-chain or indexed source.");
+          (src === "on_chain_first_tx" || src === "on_chain_internal_tx"
+            ? "Pool age from first contract transaction (block explorer)."
+            : "Pool age from on-chain or indexed source.");
       } else {
         confidence = "low";
         confidenceReason = "Pool creation date not resolved — check contract on block explorer.";
