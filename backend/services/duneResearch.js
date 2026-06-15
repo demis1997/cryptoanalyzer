@@ -1,8 +1,10 @@
 import fetch from "node-fetch";
-import { searchWeb, fetchPageText } from "./webResearch.js";
+import { fetchPageText } from "./webResearch.js";
 import { parsePoolPageMetrics } from "./poolPageParse.js";
-import { traceLightFetch, traceWebSearch } from "./researchActivityLog.js";
+import { traceLightFetch } from "./researchActivityLog.js";
 import { duneSearchUrl } from "./sourceUrls.js";
+import { webResearchSession } from "./webResearchSession.js";
+import { shouldSkipDuneResearch } from "./researchSkip.js";
 
 function enabled() {
   return !/^(0|false|no|off)$/i.test(String(process.env.POOL_DUNE_SEARCH || "1").trim());
@@ -94,8 +96,25 @@ export async function gatherDunePoolResearch({
   vaultAddress,
   chain,
   trace = null,
+  session = null,
+  vaultMeta = null,
+  subgraphScoring = null,
+  scoringHints = null,
 } = {}) {
   if (!enabled()) return { enabled: false, searches: [], formatted: "", hints: {} };
+  if (shouldSkipDuneResearch({ vaultMeta, subgraphScoring, scoringHints })) {
+    return {
+      enabled: false,
+      searches: [],
+      formatted: "",
+      hints: {},
+      skipped: true,
+      skipReason: "tvl_resolved",
+      traceLogged: Boolean(trace),
+    };
+  }
+
+  const searchSession = session || webResearchSession(trace);
 
   const label = String(poolLabel || "").trim();
   const sym = String(symbol || "").trim();
@@ -103,19 +122,12 @@ export async function gatherDunePoolResearch({
   const addr = String(vaultAddress || "").toLowerCase();
   const queries = [
     `site:dune.com ${slug} ${sym} pool TVL liquidity deposits`,
-    `site:dune.com ${label} ${sym} vault`,
     addr ? `site:dune.com ${addr.slice(0, 10)} ${sym} TVL` : null,
-    `dune analytics ${slug} ${sym} ${label} pool total liquidity`,
-    `dune.com dashboard ${slug} ${sym} utilization LLTV`,
+    `dune analytics ${slug} ${sym} ${label} pool utilization`,
   ].filter(Boolean);
 
-  const maxQ = Number(process.env.POOL_DUNE_SEARCH_QUERIES || 3) || 3;
-  const searches = [];
-  for (const q of [...new Set(queries)].slice(0, maxQ)) {
-    const r = await searchWeb(q, { maxResults: 5 });
-    searches.push(r);
-    traceWebSearch(trace, { provider: r.provider, query: r.query, hits: r.hits, answer: r.answer });
-  }
+  const maxQ = Number(process.env.POOL_DUNE_SEARCH_QUERIES || 2) || 2;
+  const searches = await searchSession.runQueries(queries, { maxResults: 5, maxCount: maxQ });
 
   const hints = {};
   const lines = [];

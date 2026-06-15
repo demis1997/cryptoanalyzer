@@ -28,6 +28,11 @@ const aave = await fetchPoolSubgraphMetrics({
   underlyingAsset: "0x6b175474e89094c44da98b954eedeac495271d0f",
 });
 ok(aave?.scoring?.totalAssetsUsd > 0, `Aave DAI TVL $${Math.round(aave?.scoring?.totalAssetsUsd || 0).toLocaleString()}`);
+ok(aave?.scoring?.top1DepositorPct > 0, `Aave DAI P.5 top1 ~${aave?.scoring?.top1DepositorPct?.toFixed(1)}%`);
+ok(
+  Array.isArray(aave?.scoring?.depositorSharePercents) && aave.scoring.depositorSharePercents.length >= 5,
+  `Aave DAI depositor shares n=${aave?.scoring?.depositorSharePercents?.length}`
+);
 
 const morpho = await fetchPoolSubgraphMetrics({
   protocolKind: "morpho_market",

@@ -84,6 +84,9 @@ async function mergeDlOrSynthetic({ apiMeta, allPools, rowOpts, trace, label, pr
     },
     scoring
   );
+  if (subgraph?.scoring) {
+    applyVaultScoringMetaToRow(row, subgraph.scoring);
+  }
   if (apiMeta.tvlSource && row.tvlUsd != null) row.tvlSource = apiMeta.tvlSource;
 
   const pageUrl = apiMeta.marketPageUrl || apiMeta.sourceUrl || poolUrl || null;

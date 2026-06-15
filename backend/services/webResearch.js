@@ -1,6 +1,7 @@
 import fetch from "node-fetch";
 import { crawlPoolWebsite } from "./poolCrawl.js";
-import { traceLightFetch, traceWebSearch } from "./researchActivityLog.js";
+import { traceLightFetch } from "./researchActivityLog.js";
+import { webResearchSession } from "./webResearchSession.js";
 
 function webSearchEnabled() {
   return !/^(0|false|no|off)$/i.test(String(process.env.POOL_WEB_SEARCH || "1").trim());
@@ -123,10 +124,13 @@ export async function fetchPageText(url, { timeoutMs = 12_000, maxChars = 6000 }
 /**
  * Web research pack for pool integrator discovery: search queries + optional pool page scrape.
  */
-export async function gatherPoolWebResearch({ poolLabel, poolUrl, issuerSlug, trace = null } = {}) {
+export async function gatherPoolWebResearch({ poolLabel, poolUrl, issuerSlug, trace = null, session = null } = {}) {
   if (!webSearchEnabled()) {
     return { enabled: false, searches: [], page: null, formatted: "" };
   }
+  const searchSession = session || webResearchSession(trace);
+  if (session == null && trace) searchSession.seedFromPrior?.();
+
   const label = String(poolLabel || "").trim();
   const slug = String(issuerSlug || "").trim();
   const queries = [
@@ -135,21 +139,10 @@ export async function gatherPoolWebResearch({ poolLabel, poolUrl, issuerSlug, tr
     slug && label ? `${slug} ${label} integration deposit collateral` : null,
     label ? `${label} ERC-4626 vault share token integrations` : null,
     slug ? `${slug} protocol partners integrations DeFiLlama` : null,
-    label ? `${label} who deposits liquidity curators risk` : null,
   ].filter(Boolean);
 
-  const searches = [];
-  const maxQueries = Number(process.env.POOL_WEB_SEARCH_QUERIES || 5);
-  for (const q of [...new Set(queries)].slice(0, maxQueries)) {
-    const r = await searchWeb(q, { maxResults: 6 });
-    searches.push(r);
-    traceWebSearch(trace, {
-      provider: r.provider,
-      query: r.query,
-      hits: r.hits,
-      answer: r.answer,
-    });
-  }
+  const maxQueries = Number(process.env.POOL_WEB_SEARCH_QUERIES || 3);
+  const searches = await searchSession.runQueries(queries, { maxResults: 6, maxCount: maxQueries });
 
   let page = null;
   let crawl = null;

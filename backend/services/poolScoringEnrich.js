@@ -15,6 +15,8 @@ import { gatherScoringWebResearch, mergeResearchBlobs } from "./scoringResearch.
 import { applyVaultScoringMetaToRow } from "./scoringAudit.js";
 import { resolvePoolMetrics } from "./poolMetricsResolver.js";
 import { crawlPoolWebsite } from "./poolCrawl.js";
+import { webResearchSession } from "./webResearchSession.js";
+import { fetchPoolSubgraphMetrics } from "./poolSubgraph.js";
 
 function rowOptsFromCtx(ctx) {
   return {
@@ -67,6 +69,18 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
   let yieldsRows = await resolveYieldsRowsUniversal({ ...ctx, yieldsRows: ctx.yieldsRows }, allPools, trace);
 
   const primaryForResearch = selectPrimaryYieldsRow(yieldsRows, rowOpts);
+  const session = webResearchSession(trace);
+  session.seedFromPrior(webResearchIn || ctx.webResearch);
+
+  let subgraphScoring = ctx.vaultMeta?.subgraphScoring;
+  if (!subgraphScoring?.top1DepositorPct && ctx.protocolKind) {
+    const sg = await fetchPoolSubgraphMetrics(ctx).catch(() => null);
+    if (sg?.scoring) {
+      subgraphScoring = sg.scoring;
+      ctx.vaultMeta = { ...(ctx.vaultMeta || {}), subgraphScoring: sg.scoring, subgraphSource: sg.protocol };
+    }
+  }
+
   const scoringResearch = await gatherScoringWebResearch({
     poolLabel: ctx.label,
     poolUrl: ctx.url,
@@ -74,7 +88,18 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
     symbol: primaryForResearch?.symbol,
     chain: primaryForResearch?.chain || ctx.chain,
     trace,
+    session,
+    vaultMeta: ctx.vaultMeta,
+    subgraphScoring,
+    ctx,
   }).catch(() => null);
+
+  if (scoringResearch?.skipped && trace) {
+    trace.step("Scoring web research skipped", {
+      kind: "info",
+      detail: "Protocol API + subgraph already resolved TVL, utilization, LLTV, and depositor concentration",
+    });
+  }
 
   const mergedWebResearch = {
     ...(webResearchIn || ctx.webResearch || {}),
@@ -110,7 +135,7 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
 
   const metricsResolution = await resolvePoolMetrics(
     { ...ctx, yieldsRows },
-    { webResearch: mergedWebResearch, yieldsRow: primaryForResearch, trace }
+    { webResearch: mergedWebResearch, yieldsRow: primaryForResearch, trace, researchSession: session }
   ).catch(() => ({ scoringHints: {}, poolIdentity: null, sources: [] }));
 
   if (metricsResolution?.poolIdentity) {

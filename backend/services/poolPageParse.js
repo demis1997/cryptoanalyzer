@@ -311,6 +311,9 @@ export function mergePageMetricsIntoHints(hints, metrics) {
     if (m.top3DepositorPct != null) out.top3DepositorPct = m.top3DepositorPct;
     if (m.depositorConcentrationEvidence) out.depositorConcentrationEvidence = m.depositorConcentrationEvidence;
   }
+  if (Array.isArray(m.depositorSharePercents) && m.depositorSharePercents.length >= 2 && !out.depositorSharePercents?.length) {
+    out.depositorSharePercents = m.depositorSharePercents;
+  }
   if (m.pendleDaysToMaturity != null) {
     out.pendleDaysToMaturity = m.pendleDaysToMaturity;
     out.daysToMaturity = m.daysToMaturity;

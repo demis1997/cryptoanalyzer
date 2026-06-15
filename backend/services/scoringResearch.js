@@ -1,5 +1,6 @@
 import { searchWeb } from "./webResearch.js";
-import { traceWebSearch } from "./researchActivityLog.js";
+import { webResearchSession } from "./webResearchSession.js";
+import { shouldSkipScoringWebResearch } from "./researchSkip.js";
 
 function enabled() {
   return !/^(0|false|no|off)$/i.test(String(process.env.POOL_SCORING_SEARCH || "1").trim());
@@ -15,45 +16,43 @@ export async function gatherScoringWebResearch({
   symbol,
   chain,
   trace = null,
+  session = null,
+  vaultMeta = null,
+  subgraphScoring = null,
+  ctx = null,
 } = {}) {
-  if (!enabled()) return { enabled: false, searches: [], formatted: "" };
+  if (!enabled()) return { enabled: false, searches: [], formatted: "", skipped: true };
+
+  if (shouldSkipScoringWebResearch({ ctx, vaultMeta, subgraphScoring })) {
+    return {
+      enabled: false,
+      searches: [],
+      formatted: "",
+      skipped: true,
+      skipReason: "protocol_api_and_subgraph_resolved",
+      traceLogged: Boolean(trace),
+    };
+  }
 
   const label = String(poolLabel || "").trim();
   const slug = String(issuerSlug || "").trim();
   const sym = String(symbol || "").trim();
   const ch = String(chain || "").trim();
+  const searchSession = session || webResearchSession(trace);
 
   const slugRoot = slug.split("-")[0] || slug;
   const isPendle = /pendle|pt-/i.test(`${label} ${sym} ${slug}`);
   const queries = [
-    poolUrl ? `${poolUrl} APY net yield supply rate rewards emissions` : null,
-    label ? `"${label}" ${slug || ""} pool APY net yield organic rewards emissions` : null,
-    sym && slug ? `${slug} ${sym} ${ch} current APY yield rate pool dashboard` : null,
-    sym && slug ? `site:dune.com ${slug} ${sym} pool TVL liquidity APY` : null,
-    sym && slug ? `${slug} ${sym} ${ch} pool TVL total liquidity market size deposits` : null,
-    poolUrl ? `${poolUrl} TVL total liquidity utilization LLTV oracle` : null,
-    sym && slug ? `${slug} ${sym} ${ch} oracle Chainlink Pyth TWAP liquidation` : null,
-    sym && slug ? `${slug} ${sym} LLTV LTV loan-to-value liquidation threshold` : null,
+    poolUrl ? `${poolUrl} APY net yield supply rate` : null,
+    sym && slug ? `${slug} ${sym} ${ch} utilization LLTV oracle` : null,
+    sym && slug ? `${slug} ${sym} ${ch} pool TVL deposits` : null,
+    isPendle ? `${label || sym} Pendle days to maturity AMM liquidity` : null,
     label ? `"${label}" vault curator risk manager` : null,
-    slug ? `${slug} ${sym || label} utilization supply cap borrow` : null,
-    isPendle ? `${label || sym} Pendle days to maturity expiry PT liquidity` : null,
-    label ? `${label} yield organic vs emissions sustainability APY stability` : null,
-    slug ? `${slugRoot} vault launched deployed date pool age` : null,
-    poolUrl ? `${poolUrl} risk parameters LLTV utilization` : null,
+    poolUrl ? `${poolUrl} risk parameters utilization` : null,
   ].filter(Boolean);
 
-  const maxQ = Number(process.env.POOL_SCORING_SEARCH_QUERIES || 7) || 7;
-  const searches = [];
-  for (const q of [...new Set(queries)].slice(0, maxQ)) {
-    const r = await searchWeb(q, { maxResults: 5 });
-    searches.push(r);
-    traceWebSearch(trace, {
-      provider: r.provider,
-      query: r.query,
-      hits: r.hits,
-      answer: r.answer,
-    });
-  }
+  const maxQ = Number(process.env.POOL_SCORING_SEARCH_QUERIES || 4) || 4;
+  const searches = await searchSession.runQueries(queries, { maxResults: 5, maxCount: maxQ });
 
   const lines = [];
   for (const s of searches) {

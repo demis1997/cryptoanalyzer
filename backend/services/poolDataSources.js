@@ -603,6 +603,11 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
       primary.depositorConcentrationEvidence = hints.depositorConcentrationEvidence;
     }
   }
+  if (Array.isArray(hints.depositorSharePercents) && hints.depositorSharePercents.length >= 2) {
+    if (!primary.depositorSharePercents?.length) {
+      primary.depositorSharePercents = hints.depositorSharePercents.map(Number).filter((n) => isFinite(n));
+    }
+  }
   if (hints.pendleDaysToMaturity != null) {
     primary.pendleDaysToMaturity = hints.pendleDaysToMaturity;
     primary.daysToMaturity = hints.daysToMaturity;

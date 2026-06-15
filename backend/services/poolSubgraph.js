@@ -63,6 +63,51 @@ async function priceUsdForAsset(address, chain) {
   return num(json?.coins?.[key]?.price);
 }
 
+function computeDepositorConcentration(userReserves, totalLiquidityRaw) {
+  const total = num(totalLiquidityRaw);
+  if (total == null || total <= 0) return null;
+
+  const balances = (userReserves || [])
+    .map((ur) => num(ur.scaledATokenBalance) ?? num(ur.currentATokenBalance))
+    .filter((b) => b != null && b > 0)
+    .sort((a, b) => b - a);
+  if (!balances.length) return null;
+
+  const top1Pct = (balances[0] / total) * 100;
+  const top3Pct =
+    balances.length >= 2 ? (balances.slice(0, 3).reduce((s, b) => s + b, 0) / total) * 100 : top1Pct;
+  const depositorSharePercents = balances.slice(0, 10).map((b) => (b / total) * 100);
+  const sampled = balances.length;
+  const sumSampled = balances.reduce((s, b) => s + b, 0);
+  const coveragePct = (sumSampled / total) * 100;
+
+  return {
+    top1DepositorPct: top1Pct,
+    top3DepositorPct: top3Pct,
+    depositorSharePercents,
+    depositorConcentrationEvidence: `Aave subgraph top-${Math.min(sampled, 10)} suppliers cover ~${coveragePct.toFixed(0)}% of deposits (top1 ~${top1Pct.toFixed(1)}%)`,
+  };
+}
+
+async function fetchAaveDepositorConcentration(endpoint, underlyingAsset) {
+  const q = `query($underlying: String!) {
+    reserves(where: { underlyingAsset: $underlying }, first: 1) { totalLiquidity }
+    userReserves(
+      first: 50
+      orderBy: scaledATokenBalance
+      orderDirection: desc
+      where: { reserve_: { underlyingAsset: $underlying }, scaledATokenBalance_gt: "0" }
+    ) {
+      scaledATokenBalance
+      currentATokenBalance
+      user { id }
+    }
+  }`;
+  const r = await querySubgraph(endpoint, q, { underlying: underlyingAsset });
+  if (!r.ok) return null;
+  return computeDepositorConcentration(r.data?.userReserves, r.data?.reserves?.[0]?.totalLiquidity);
+}
+
 async function fetchAaveReserveSubgraph({ chain, underlyingAsset }) {
   const addr = String(underlyingAsset || "").toLowerCase();
   const c = normalizePoolChain(chain);
@@ -102,6 +147,8 @@ async function fetchAaveReserveSubgraph({ chain, underlyingAsset }) {
   const lltvPct =
     lltv != null ? (lltv > 100 ? lltv / 100 : lltv <= 1 ? lltv * 100 : lltv / 100) : null;
 
+  const depositors = await fetchAaveDepositorConcentration(endpoint, addr).catch(() => null);
+
   return {
     source: "subgraph",
     protocol: "aave-v3",
@@ -123,6 +170,10 @@ async function fetchAaveReserveSubgraph({ chain, underlyingAsset }) {
         util != null ? `Aave subgraph utilization ${(util * 100).toFixed(1)}%` : null,
       lltvPct: lltvPct != null && lltvPct <= 100 ? lltvPct : null,
       lltvEvidence: lltvPct != null ? `Aave subgraph liquidation threshold ${lltvPct.toFixed(1)}%` : null,
+      top1DepositorPct: depositors?.top1DepositorPct ?? null,
+      top3DepositorPct: depositors?.top3DepositorPct ?? null,
+      depositorSharePercents: depositors?.depositorSharePercents ?? null,
+      depositorConcentrationEvidence: depositors?.depositorConcentrationEvidence ?? null,
       poolAgeSource: null,
     },
     subgraphId,
@@ -192,6 +243,10 @@ async function fetchMorphoMarketSubgraph({ marketId, chain }) {
     totalSupplierBal > 0 && supplierBalances.length >= 2
       ? (supplierBalances.slice(0, 3).reduce((s, b) => s + b, 0) / totalSupplierBal) * 100
       : null;
+  const depositorSharePercents =
+    totalSupplierBal > 0
+      ? supplierBalances.slice(0, 10).map((b) => (b / totalSupplierBal) * 100)
+      : null;
 
   const createdMs =
     market.createdTimestamp != null && isFinite(Number(market.createdTimestamp))
@@ -226,6 +281,7 @@ async function fetchMorphoMarketSubgraph({ marketId, chain }) {
           : null,
       top1DepositorPct: top1Pct,
       top3DepositorPct: top3Pct,
+      depositorSharePercents,
       depositorConcentrationEvidence:
         top1Pct != null
           ? `Morpho subgraph top supplier ~${top1Pct.toFixed(1)}% of deposits (${supplierBalances.length} positions sampled)`

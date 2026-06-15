@@ -6,11 +6,12 @@ import { parsePoolPageMetrics, mergePageMetricsIntoHints } from "./poolPageParse
 import { readErc20Metadata, readErc4626VaultTvlUsd } from "./onChainToken.js";
 import { moralisErc20Metadata } from "./moralisClient.js";
 import { gatherDunePoolResearch } from "./duneResearch.js";
-import { searchWeb } from "./webResearch.js";
 import { findPendleMarket, extractPendleScoringMeta } from "./pendleMarket.js";
 import { pickBestTvlCandidate, tvlConfidenceForSource } from "./tvlSourcePriority.js";
 import { fetchPoolSubgraphMetrics, subgraphExplorerUrlForPool } from "./poolSubgraph.js";
 import { resolvePoolCreatedAtMs } from "./poolContractAge.js";
+import { webResearchSession } from "./webResearchSession.js";
+import { shouldSkipScoringWebResearch } from "./researchSkip.js";
 import {
   defillamaYieldsPoolUrl,
   duneSearchUrl,
@@ -37,7 +38,7 @@ function collectSearchBlobs(webResearch) {
   ].filter(Boolean);
 }
 
-async function searchPoolMetricsWeb(ctx) {
+async function searchPoolMetricsWeb(ctx, { session = null } = {}) {
   const label = String(ctx?.label || "").trim();
   const sym = String(ctx?.symbol || ctx?.yieldsRow?.symbol || "").trim();
   const slug = String(ctx?.issuerSlug || "").trim();
@@ -51,28 +52,18 @@ async function searchPoolMetricsWeb(ctx) {
     }
   }
   const queries = [
-    url ? `${url} TVL total liquidity utilization LLTV` : null,
-    label && siteHost ? `site:${siteHost} "${label}" TVL total liquidity utilization` : null,
-    label ? `"${label}" pool TVL total liquidity deposits utilization LLTV` : null,
-    sym && slug ? `${slug} ${sym} pool page TVL utilization loan-to-value LLTV` : null,
-    /pendle|pt-/i.test(`${label} ${sym}`)
-      ? `${label || sym} Pendle days to maturity expiry PT liquidity secondary market`
-      : null,
-    sym && slug ? `${slug} ${sym} morpho aave euler vault dashboard utilization` : null,
+    url ? `${url} TVL utilization LLTV` : null,
+    sym && slug ? `${slug} ${sym} pool utilization LLTV` : null,
+    /pendle|pt-/i.test(`${label} ${sym}`) ? `${label || sym} Pendle maturity liquidity` : null,
   ].filter(Boolean);
 
-  const maxQ = Number(process.env.POOL_METRICS_SEARCH_QUERIES || 4) || 4;
-  const searches = [];
+  const maxQ = Number(process.env.POOL_METRICS_SEARCH_QUERIES || 2) || 2;
+  const searchSession = session || webResearchSession(null);
+  const searches = await searchSession.runQueries(queries, { maxResults: 5, maxCount: maxQ });
   const hints = {};
-  for (const q of [...new Set(queries)].slice(0, maxQ)) {
-    try {
-      const s = await searchWeb(q, { maxResults: 5 });
-      searches.push(s);
-      const blob = [s.answer, ...(s.hits || []).map((h) => `${h.title} ${h.snippet}`)].join("\n");
-      mergePageMetricsIntoHints(hints, parsePoolPageMetrics(blob));
-    } catch {
-      /* skip */
-    }
+  for (const s of searches) {
+    const blob = [s.answer, ...(s.hits || []).map((h) => `${h.title} ${h.snippet}`)].join("\n");
+    mergePageMetricsIntoHints(hints, parsePoolPageMetrics(blob));
   }
   return { searches, hints };
 }
@@ -80,8 +71,12 @@ async function searchPoolMetricsWeb(ctx) {
 /**
  * Resolve pool address, name, and scoring metrics from multiple sources.
  */
-export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsRow = null, trace = null } = {}) {
+export async function resolvePoolMetrics(
+  ctx = {},
+  { webResearch = null, yieldsRow = null, trace = null, researchSession = null } = {}
+) {
   const row = yieldsRow || {};
+  const session = researchSession || webResearchSession(trace);
   const vaultAddress = String(ctx?.vaultAddress || row?.vaultAddress || "").toLowerCase();
   const chain = ctx?.chain || row?.chain || "ethereum";
   const scoringHints = {};
@@ -114,19 +109,31 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
 
   const subgraphMeta = await fetchPoolSubgraphMetrics(ctx).catch(() => null);
   const sgScoring = subgraphMeta?.scoring;
-  if (sgScoring?.totalAssetsUsd != null && isFinite(Number(sgScoring.totalAssetsUsd))) {
-    tvlCandidates.push({
-      value: Number(sgScoring.totalAssetsUsd),
-      source: "subgraph",
-      evidence: sgScoring.tvlEvidence || "Subgraph indexed pool TVL",
-    });
+  if (sgScoring && typeof sgScoring === "object") {
+    if (sgScoring.totalAssetsUsd != null && isFinite(Number(sgScoring.totalAssetsUsd))) {
+      tvlCandidates.push({
+        value: Number(sgScoring.totalAssetsUsd),
+        source: "subgraph",
+        evidence: sgScoring.tvlEvidence || "Subgraph indexed pool TVL",
+      });
+    }
     Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, sgScoring));
+    const sgDetail =
+      sgScoring.depositorConcentrationEvidence ||
+      sgScoring.tvlEvidence ||
+      (sgScoring.top1DepositorPct != null
+        ? `Top depositor ~${Number(sgScoring.top1DepositorPct).toFixed(1)}% (subgraph)`
+        : null);
     sources.push({
       id: "subgraph",
       label: "The Graph subgraph",
       provider: subgraphMeta?.protocol || "subgraph",
-      ok: true,
-      detail: sgScoring.tvlEvidence || `TVL $${Math.round(sgScoring.totalAssetsUsd).toLocaleString()}`,
+      ok: !subgraphMeta?.error,
+      detail:
+        sgDetail ||
+        (sgScoring.totalAssetsUsd != null
+          ? `TVL $${Math.round(sgScoring.totalAssetsUsd).toLocaleString()}`
+          : "Subgraph pool metrics"),
       url: subgraphMeta?.subgraphUrl || subgraphExplorerUrlForPool(ctx),
       subgraphId: subgraphMeta?.subgraphId || null,
     });
@@ -303,7 +310,14 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
     vaultAddress: /^0x[a-f0-9]{40}$/.test(vaultAddress) ? vaultAddress : null,
     chain,
     trace,
+    session,
+    vaultMeta: ctx?.vaultMeta,
+    subgraphScoring: sgScoring || ctx?.vaultMeta?.subgraphScoring,
+    scoringHints,
   });
+  if (duneResearch?.skipped && trace) {
+    trace.step("Dune research skipped", { kind: "info", detail: "TVL already resolved from protocol API or subgraph" });
+  }
   if (webResearch) webResearch.duneResearch = duneResearch;
   Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, duneResearch.hints || {}));
   if (duneResearch.hints?.poolTvlUsd) {
@@ -354,7 +368,16 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
     });
   }
 
-  const metricsSearch = await searchPoolMetricsWeb({ ...ctx, yieldsRow: row, symbol: row.symbol });
+  let metricsSearch = { searches: [], hints: {} };
+  if (
+    !shouldSkipScoringWebResearch({
+      ctx,
+      vaultMeta: ctx?.vaultMeta,
+      subgraphScoring: sgScoring || ctx?.vaultMeta?.subgraphScoring,
+    })
+  ) {
+    metricsSearch = await searchPoolMetricsWeb({ ...ctx, yieldsRow: row, symbol: row.symbol }, { session });
+  }
   Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, metricsSearch.hints));
   if (metricsSearch.hints.poolTvlUsd) {
     tvlCandidates.push({

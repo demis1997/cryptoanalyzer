@@ -83,6 +83,14 @@ export function applyVaultScoringMetaToRow(row, meta) {
       next.depositorConcentrationEvidence = meta.depositorConcentrationEvidence;
     }
   }
+  if (Array.isArray(meta.depositorSharePercents) && meta.depositorSharePercents.length >= 2) {
+    if (!next.depositorSharePercents?.length) {
+      next.depositorSharePercents = meta.depositorSharePercents.map(Number).filter((n) => isFinite(n));
+    }
+    if (!next.depositorConcentrationEvidence && meta.depositorConcentrationEvidence) {
+      next.depositorConcentrationEvidence = meta.depositorConcentrationEvidence;
+    }
+  }
   if (meta.oracleType) {
     next.oracleType = meta.oracleType;
     next.oracleEvidence = meta.oracleEvidence || null;
