@@ -1,6 +1,7 @@
 /**
  * Structured activity log for pool / protocol intelligence runs (UI "thinking" panel).
  */
+import { traceWebSearch } from "./researchActivityLog.js";
 
 function truncate(s, max = 1200) {
   const t = String(s ?? "");
@@ -92,6 +93,16 @@ export function createIntelligenceTrace({ kind = "unknown", query = "", label = 
   return trace;
 }
 
+function traceWebSearchFromReplay(trace, search) {
+  if (!search) return;
+  traceWebSearch(trace, {
+    provider: search.provider,
+    query: search.query,
+    hits: search.hits,
+    answer: search.answer,
+  });
+}
+
 /** Rebuild chat entries from a completed pool intelligence payload (fallback). */
 export function traceFromPoolIntel(data) {
   const trace = createIntelligenceTrace({
@@ -111,17 +122,19 @@ export function traceFromPoolIntel(data) {
     });
   }
   const wr = data?.webResearch;
-  if (wr?.enabled) {
-    const providers = (wr.providers || []).join(" + ") || "web";
-    const pages = wr.crawl?.pages?.length || 0;
-    trace.step("Web research", {
-      detail: `${providers}${pages ? ` · ${pages} page(s) crawled` : ""}`,
-      kind: "source",
-      sources: (wr.searches || []).slice(0, 6).map((s) => ({
-        label: s.query || s.provider || "search",
-        url: s.hits?.[0]?.url || null,
-      })),
-    });
+  if (wr?.enabled && !wr.traceLogged) {
+    const pages = wr.crawl?.pages || [];
+    for (const p of pages.slice(0, 6)) {
+      if (!p?.url) continue;
+      trace.step(`Crawl · ${p.url.replace(/^https?:\/\/(www\.)?/, "").split("/")[0]}`, {
+        kind: "source",
+        detail: p.url,
+        sources: [{ label: p.url, url: p.url }],
+      });
+    }
+    for (const s of (wr.searches || []).slice(0, 8)) {
+      traceWebSearchFromReplay(trace, s);
+    }
   }
   for (const n of (data?.sourceNotes || []).slice(0, 14)) {
     trace.step(n.label || n.source || "Data source", {

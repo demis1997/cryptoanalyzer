@@ -1,6 +1,8 @@
 import fetch from "node-fetch";
 import { searchWeb, fetchPageText } from "./webResearch.js";
 import { parsePoolPageMetrics } from "./poolPageParse.js";
+import { traceLightFetch, traceWebSearch } from "./researchActivityLog.js";
+import { duneSearchUrl } from "./sourceUrls.js";
 
 function enabled() {
   return !/^(0|false|no|off)$/i.test(String(process.env.POOL_DUNE_SEARCH || "1").trim());
@@ -91,6 +93,7 @@ export async function gatherDunePoolResearch({
   issuerSlug,
   vaultAddress,
   chain,
+  trace = null,
 } = {}) {
   if (!enabled()) return { enabled: false, searches: [], formatted: "", hints: {} };
 
@@ -109,7 +112,9 @@ export async function gatherDunePoolResearch({
   const maxQ = Number(process.env.POOL_DUNE_SEARCH_QUERIES || 3) || 3;
   const searches = [];
   for (const q of [...new Set(queries)].slice(0, maxQ)) {
-    searches.push(await searchWeb(q, { maxResults: 5 }));
+    const r = await searchWeb(q, { maxResults: 5 });
+    searches.push(r);
+    traceWebSearch(trace, { provider: r.provider, query: r.query, hits: r.hits, answer: r.answer });
   }
 
   const hints = {};
@@ -133,8 +138,11 @@ export async function gatherDunePoolResearch({
     }
   }
 
+  let primaryUrl = null;
   for (const url of [...duneUrls].slice(0, 2)) {
+    if (!primaryUrl) primaryUrl = url;
     const page = await fetchPageText(url, { maxChars: 5000 });
+    traceLightFetch(trace, { url, ok: page?.ok, error: page?.error });
     if (page?.ok && page.text) {
       lines.push(`\n### Dune page scrape: ${url}`);
       lines.push(page.text.slice(0, 2000));
@@ -163,6 +171,8 @@ export async function gatherDunePoolResearch({
     searches,
     formatted: lines.join("\n").trim(),
     hints,
+    primaryUrl: primaryUrl || duneSearchUrl(`${slug} ${sym}`.trim()),
     providers: [...new Set(searches.map((s) => s.provider))],
+    traceLogged: Boolean(trace),
   };
 }

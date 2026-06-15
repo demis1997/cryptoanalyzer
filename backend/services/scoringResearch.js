@@ -1,4 +1,5 @@
 import { searchWeb } from "./webResearch.js";
+import { traceWebSearch } from "./researchActivityLog.js";
 
 function enabled() {
   return !/^(0|false|no|off)$/i.test(String(process.env.POOL_SCORING_SEARCH || "1").trim());
@@ -13,6 +14,7 @@ export async function gatherScoringWebResearch({
   issuerSlug,
   symbol,
   chain,
+  trace = null,
 } = {}) {
   if (!enabled()) return { enabled: false, searches: [], formatted: "" };
 
@@ -43,7 +45,14 @@ export async function gatherScoringWebResearch({
   const maxQ = Number(process.env.POOL_SCORING_SEARCH_QUERIES || 7) || 7;
   const searches = [];
   for (const q of [...new Set(queries)].slice(0, maxQ)) {
-    searches.push(await searchWeb(q, { maxResults: 5 }));
+    const r = await searchWeb(q, { maxResults: 5 });
+    searches.push(r);
+    traceWebSearch(trace, {
+      provider: r.provider,
+      query: r.query,
+      hits: r.hits,
+      answer: r.answer,
+    });
   }
 
   const lines = [];
@@ -61,6 +70,7 @@ export async function gatherScoringWebResearch({
     searches,
     formatted: lines.join("\n").trim(),
     providers: [...new Set(searches.map((s) => s.provider))],
+    traceLogged: Boolean(trace),
   };
 }
 

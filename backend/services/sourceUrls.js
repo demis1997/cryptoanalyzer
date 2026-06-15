@@ -1,8 +1,10 @@
 /**
  * Specific source URLs for activity logs and scoring criterion citations.
  */
-import { explorerAddressUrl, explorerInternalTxUrl } from "./etherscanClient.js";
+import { explorerAddressUrl, explorerInternalTxUrl, explorerTxUrl } from "./etherscanClient.js";
 import { normalizePoolChain } from "./poolAddress.js";
+
+export { explorerAddressUrl, explorerInternalTxUrl, explorerTxUrl };
 
 export function defillamaYieldsPoolUrl(poolId) {
   const id = String(poolId || "").trim();
@@ -51,10 +53,30 @@ export function compoundMarketUrl(marketSlug) {
   return `https://app.compound.finance/markets/${encodeURIComponent(slug)}`;
 }
 
+export function pendlePoolUrl(chain, marketAddress) {
+  const c = normalizePoolChain(chain);
+  const addr = String(marketAddress || "").toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(addr)) return "https://app.pendle.finance/";
+  const chainParam = c === "ethereum" ? "ethereum" : c;
+  return `https://app.pendle.finance/trade/pools/${addr}?chain=${chainParam}`;
+}
+
+export function sparkReserveUrl(chain, underlyingAsset) {
+  const c = normalizePoolChain(chain);
+  const addr = String(underlyingAsset || "").toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(addr)) return "https://app.spark.fi/";
+  return `https://app.spark.fi/markets/${c}/${addr}`;
+}
+
+export function morphoVaultUrl(chain, address) {
+  const c = normalizePoolChain(chain);
+  const addr = String(address || "").toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(addr)) return `https://app.morpho.org/${c}`;
+  return `https://app.morpho.org/${c}/vault/${addr}`;
+}
+
 export function duneSearchUrl(query) {
   const q = String(query || "").trim();
   if (!q) return "https://dune.com/search";
   return `https://dune.com/search?q=${encodeURIComponent(q)}`;
 }
-
-export { explorerAddressUrl, explorerInternalTxUrl };

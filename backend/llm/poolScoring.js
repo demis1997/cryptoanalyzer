@@ -9,6 +9,11 @@ import {
   defillamaProtocolUrl,
   defillamaYieldsPoolUrl,
   explorerInternalTxUrl,
+  aaveReserveUrl,
+  compoundMarketUrl,
+  morphoMarketPageUrl,
+  pendlePoolUrl,
+  sparkReserveUrl,
   morphoGraphqlUrl,
   theGraphSubgraphUrl,
 } from "../services/sourceUrls.js";
@@ -791,8 +796,25 @@ function scoringSourceUrls(row, ctx, ext = {}) {
 
   if (row?.poolAgeExplorerUrl) push("Block explorer (pool age)", row.poolAgeExplorerUrl);
   else if (row?.vaultAddress) {
-    const u = explorerInternalTxUrl(row.vaultAddress, row.chain || ctx?.chain);
-    if (u) push("Block explorer (contract)", u);
+    const contractUrl = explorerInternalTxUrl(row.vaultAddress, row.chain || ctx?.chain);
+    if (contractUrl) push("Block explorer (contract)", contractUrl);
+  }
+
+  const issuer = String(row?.project || ctx?.issuerSlug || "").toLowerCase();
+  if (/aave/i.test(issuer) && ctx?.underlyingAsset) {
+    push("Aave reserve", aaveReserveUrl(ctx?.chain || row?.chain, ctx.underlyingAsset));
+  }
+  if (/spark/i.test(issuer) && ctx?.underlyingAsset) {
+    push("Spark reserve", sparkReserveUrl(ctx?.chain || row?.chain, ctx.underlyingAsset));
+  }
+  if (/compound/i.test(issuer) && ctx?.marketSlug) {
+    push("Compound market", compoundMarketUrl(ctx.marketSlug));
+  }
+  if (/morpho/i.test(issuer) && ctx?.marketId) {
+    push("Morpho market", morphoMarketPageUrl(ctx?.chain || row?.chain, ctx.marketId));
+  }
+  if (/pendle/i.test(issuer) && (row?.vaultAddress || ctx?.vaultAddress)) {
+    push("Pendle pool", pendlePoolUrl(ctx?.chain || row?.chain, row?.vaultAddress || ctx?.vaultAddress));
   }
 
   if (ext.defillamaChart?.url) push("DefiLlama APY chart", ext.defillamaChart.url);
@@ -801,7 +823,7 @@ function scoringSourceUrls(row, ctx, ext = {}) {
     if (s?.url) push(s.label || s.provider || s.id, s.url);
   }
 
-  if (/morpho/i.test(String(row?.project || ctx?.issuerSlug || ""))) {
+  if (/morpho/i.test(String(row?.project || ctx?.issuerSlug || "")) && !ctx?.marketId && !ctx?.url) {
     push("Morpho GraphQL API", morphoGraphqlUrl());
   }
 

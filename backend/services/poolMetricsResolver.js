@@ -13,8 +13,10 @@ import { fetchPoolSubgraphMetrics, subgraphExplorerUrlForPool } from "./poolSubg
 import { resolvePoolCreatedAtMs } from "./poolContractAge.js";
 import {
   defillamaYieldsPoolUrl,
+  duneSearchUrl,
   explorerInternalTxUrl,
 } from "./sourceUrls.js";
+import { traceBlockExplorer } from "./researchActivityLog.js";
 
 function defillamaTvlAllowed() {
   return /^(1|true|yes|on)$/i.test(String(process.env.POOL_DEFILLAMA_TVL || "0").trim());
@@ -103,6 +105,7 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
       provider: ctx?.vaultMeta?.source || "protocol",
       ok: true,
       detail: vaultMeta.tvlEvidence || `TVL $${Math.round(vaultMeta.totalAssetsUsd).toLocaleString()}`,
+      url: ctx?.vaultMeta?.marketPageUrl || ctx?.vaultMeta?.sourceUrl || ctx?.url || null,
     });
   }
   if (vaultMeta?.pendleAmmLiquidityUsd != null && isFinite(Number(vaultMeta.pendleAmmLiquidityUsd))) {
@@ -150,11 +153,16 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
     Object.assign(scoringHints, onChainAge);
     sources.push({
       id: "pool_age_on_chain",
-      label: "On-chain pool age",
-      provider: "block explorer",
+      label: "Block explorer · pool age",
+      provider: "Etherscan",
       ok: true,
       detail: onChainAge.poolAgeEvidence,
       url: onChainAge.poolAgeExplorerUrl || explorerInternalTxUrl(poolAgeAddr, chain),
+    });
+    traceBlockExplorer(trace, {
+      label: "Etherscan · pool age",
+      url: onChainAge.poolAgeExplorerUrl || explorerInternalTxUrl(poolAgeAddr, chain),
+      detail: onChainAge.poolAgeEvidence,
     });
   }
 
@@ -227,7 +235,7 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
       }
       sources.push({
         id: "pendle_api",
-        label: "Pendle API",
+        label: "Pendle pool",
         provider: "Pendle",
         ok: true,
         detail: [
@@ -238,7 +246,7 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
         ]
           .filter(Boolean)
           .join(" · "),
-        url: "https://api-v2.pendle.finance",
+        url: pendleMeta?.marketPageUrl || pendleMeta?.sourceUrl || ctx?.url || null,
       });
     }
   }
@@ -279,11 +287,11 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
     });
     sources.push({
       id: "pool_page_crawl",
-      label: "Pool page (Playwright)",
-      provider: "Crawl",
+      label: "Pool page crawl",
+      provider: "Playwright",
       ok: true,
       detail: crawlParsed.tvlEvidence || `TVL $${Math.round(crawlParsed.poolTvlUsd).toLocaleString()}`,
-      url: ctx?.url || null,
+      url: primaryPage?.url || ctx?.url || null,
     });
   }
 
@@ -294,6 +302,7 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
     issuerSlug: ctx?.issuerSlug,
     vaultAddress: /^0x[a-f0-9]{40}$/.test(vaultAddress) ? vaultAddress : null,
     chain,
+    trace,
   });
   if (webResearch) webResearch.duneResearch = duneResearch;
   Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, duneResearch.hints || {}));
@@ -309,7 +318,9 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
       provider: "Dune",
       ok: true,
       detail: `TVL $${Math.round(duneResearch.hints.poolTvlUsd).toLocaleString()}`,
-      url: "https://dune.com",
+      url:
+        duneResearch.primaryUrl ||
+        duneSearchUrl(`${ctx?.issuerSlug || ""} ${row?.symbol || ""}`.trim()),
     });
   }
 

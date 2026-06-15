@@ -5,6 +5,7 @@ import { formatUnits } from "viem";
 import { clientForChain } from "./onChainToken.js";
 import { moralisTokenPriceUsd } from "./moralisClient.js";
 import fetch from "node-fetch";
+import { sparkReserveUrl } from "./sourceUrls.js";
 import { normalizePoolChain } from "./poolAddress.js";
 import { resolvePoolCreatedAtMs } from "./poolContractAge.js";
 
@@ -181,6 +182,7 @@ export async function fetchSparkReserve({ chain, underlyingAsset }) {
       underlyingAsset: addr,
       project: "spark",
       source: "spark_on_chain",
+      sourceUrl: sparkReserveUrl(chain, addr),
       underlyingTokens: [addr],
       scoring,
       ...scoring,

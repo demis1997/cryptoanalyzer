@@ -2,7 +2,7 @@ import fetch from "node-fetch";
 import { normalizePoolChain } from "./poolAddress.js";
 import { parseMorphoLltv } from "./scoringAudit.js";
 import { resolvePoolCreatedAtMs } from "./poolContractAge.js";
-import { explorerInternalTxUrl, morphoGraphqlUrl } from "./sourceUrls.js";
+import { explorerInternalTxUrl, morphoGraphqlUrl, morphoVaultUrl } from "./sourceUrls.js";
 
 const CURATOR_ADDRESSES = {
   "0x827e86072b06674a077f592a531dce4590adecdb": "Steakhouse Financial",
@@ -118,7 +118,8 @@ export async function fetchMorphoVaultByAddress(address, chain) {
       chain: normalizePoolChain(v?.chain?.network || chain),
       chainId: v?.chain?.id ?? chainId,
       source,
-      sourceUrl: morphoGraphqlUrl(),
+      sourceUrl: morphoVaultUrl(normalizePoolChain(v?.chain?.network || chain), addr),
+      marketPageUrl: morphoVaultUrl(normalizePoolChain(v?.chain?.network || chain), addr),
       poolAgeExplorerUrl: ageMeta?.poolAgeExplorerUrl || explorerInternalTxUrl(addr, chain),
       scoring,
       ...scoring,

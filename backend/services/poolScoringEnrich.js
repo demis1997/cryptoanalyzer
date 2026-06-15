@@ -73,6 +73,7 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
     issuerSlug: ctx.issuerSlug,
     symbol: primaryForResearch?.symbol,
     chain: primaryForResearch?.chain || ctx.chain,
+    trace,
   }).catch(() => null);
 
   const mergedWebResearch = {
@@ -86,7 +87,7 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
     /^https?:\/\//i.test(ctx.url) &&
     !mergedWebResearch.crawl?.pages?.some((p) => p.ok && p.textLength > 100)
   ) {
-    mergedWebResearch.crawl = await crawlPoolWebsite(ctx.url, { poolLabel: ctx.label }).catch((e) => ({
+    mergedWebResearch.crawl = await crawlPoolWebsite(ctx.url, { poolLabel: ctx.label, trace }).catch((e) => ({
       enabled: true,
       ok: false,
       error: String(e?.message || e),
@@ -98,35 +99,12 @@ export async function enrichYieldsForScoring(ctx, { trace = null, webResearchIn 
     if (mergedWebResearch.crawl?.formatted) {
       mergedWebResearch.formatted = mergeResearchBlobs(mergedWebResearch, mergedWebResearch.crawl);
     }
-    if (trace && mergedWebResearch.crawl?.ok) {
-      const primary = mergedWebResearch.crawl.pages?.find((p) => p.primary) || mergedWebResearch.crawl.pages?.[0];
-      trace.step("Pool page crawl (Playwright)", {
-        kind: "source",
-        detail: [
-          primary?.rendered ? "rendered SPA" : "static HTML",
-          primary?.metrics?.poolTvlUsd != null
-            ? `TVL $${Math.round(primary.metrics.poolTvlUsd).toLocaleString()}`
-            : `${primary?.textLength || 0} chars text`,
-          primary?.metrics?.utilization != null
-            ? `util ${(primary.metrics.utilization * 100).toFixed(1)}%`
-            : null,
-          primary?.metrics?.lltv != null ? `LLTV ${primary.metrics.lltv}%` : null,
-        ]
-          .filter(Boolean)
-          .join(" · "),
-        sources: [{ label: "Pool URL", url: ctx.url }],
-      });
-    }
   }
 
-  if (scoringResearch?.formatted && trace) {
-    trace.step("Scoring-focused web research", {
+  if (scoringResearch?.formatted && trace && !scoringResearch.traceLogged) {
+    trace.step("Scoring web research", {
       kind: "source",
-      detail: `${scoringResearch.searches?.length || 0} query(s) · pool TVL / oracle / LLTV / utilization / Pendle maturity`,
-      sources: (scoringResearch.searches || []).slice(0, 5).map((s) => ({
-        label: s.query?.slice(0, 52) || "search",
-        url: s.hits?.[0]?.url || null,
-      })),
+      detail: `${scoringResearch.searches?.length || 0} scoring query(s)`,
     });
   }
 

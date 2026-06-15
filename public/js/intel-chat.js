@@ -19,11 +19,11 @@ function formatTime(ts) {
 function renderSources(sources) {
   if (!Array.isArray(sources) || !sources.length) return "";
   return `<div class="intel-chat__sources">${sources
-    .slice(0, 4)
+    .slice(0, 8)
     .map((s) => {
-      const lbl = escapeHtml(s?.label || "source");
+      const lbl = escapeHtml(s?.label || s?.url || "source");
       return s?.url
-        ? `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${lbl}</a>`
+        ? `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener" title="${escapeHtml(s.url)}">${lbl}</a>`
         : `<span>${lbl}</span>`;
     })
     .join(" · ")}</div>`;

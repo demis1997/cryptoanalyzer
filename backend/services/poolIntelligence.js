@@ -68,20 +68,10 @@ function appendCriterionTrace(trace, risk, ctx) {
 
 function appendWebResearchTrace(trace, webResearch) {
   if (!trace || !webResearch) return;
+  if (webResearch.traceLogged) return;
   if (!webResearch.enabled && !webResearch.formatted) {
     trace.step("Web research skipped", { kind: "info", detail: "POOL_WEB_SEARCH off or no pool URL" });
-    return;
   }
-  const providers = (webResearch.providers || []).join(" + ") || "web";
-  const pages = webResearch.crawl?.pages?.length || 0;
-  trace.step("Web research", {
-    kind: "source",
-    detail: `${providers}${pages ? ` · ${pages} page(s) crawled` : ""}`,
-    sources: (webResearch.searches || []).slice(0, 8).map((s) => ({
-      label: s.query || s.provider || "search",
-      url: s.hits?.[0]?.url || null,
-    })),
-  });
 }
 
 function normalizeChain(raw) {
@@ -436,6 +426,7 @@ export async function enrichPoolDiscoverPayload(discover, { poolUrl, useLlm = tr
       poolLabel: discover?.marketLabel,
       poolUrl,
       issuerSlug,
+      trace,
     }).catch(() => null);
   }
   if (webResearch?.formatted) {
@@ -632,6 +623,7 @@ async function resolveContext(input, { trace = null } = {}) {
       poolLabel: web.marketLabel || parsed.url,
       poolUrl: parsed.url,
       issuerSlug: slug,
+      trace,
     }).catch(() => null);
     appendWebResearchTrace(trace, webResearch);
     if (webResearch?.formatted) {
@@ -963,16 +955,13 @@ async function fetchProtocolDetails(integrators) {
 }
 
 async function enrichContextForScoring(ctx, { trace = null } = {}) {
-  trace?.step?.("Fetching external data sources", {
-    detail: "Web search + crawl (primary), protocol API, Dune, on-chain; DefiLlama APY/chart off by default",
-    kind: "source",
-  });
   const enriched = await enrichYieldsForScoring(ctx, { trace, webResearchIn: ctx.webResearch });
   for (const s of enriched.externalData?.sources || []) {
+    if (!s?.url && !s?.detail) continue;
     trace?.step?.(s.label || s.id || "Source", {
-      kind: "source",
+      kind: s.ok === false ? "error" : "source",
       detail: s.detail || "",
-      sources: [{ label: s.label || s.provider, url: s.url || null }],
+      sources: s.url ? [{ label: s.label || s.provider || s.id, url: s.url }] : [],
     });
   }
   return {

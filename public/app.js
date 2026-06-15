@@ -394,7 +394,6 @@ async function runPoolIntelligenceFromQuery() {
   setSearchMode("graph");
   intelChat.startRun({ kind: "pool", query: q, label: q });
   intelChat.pushLocal("DefiLlama discovery", { detail: "Matching pool URL, address, or name" });
-  intelChat.pushLocal("Web research", { detail: "Tavily search + Playwright crawl when configured", kind: "source" });
   setPlatformStatus("Running pool intelligence (DefiLlama discovery + risk + graph save)…");
   shellApi?.setTab("graph");
   setViewMode("landing");

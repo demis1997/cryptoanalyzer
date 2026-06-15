@@ -7,6 +7,7 @@ import {
 import { parsePoolPageContent } from "./poolPageStructuredParse.js";
 import { mergePageMetricsIntoHints } from "./poolPageParse.js";
 import { parseProtocolPoolUrl } from "./protocolUrlParse.js";
+import { traceCrawlPage } from "./researchActivityLog.js";
 
 function poolPlaywrightEnabled() {
   return !/^(0|false|no|off)$/i.test(String(process.env.POOL_PLAYWRIGHT_CRAWL || "1").trim());
@@ -96,7 +97,7 @@ function parsePageMetrics(r, pageUrl, poolUrl) {
 /**
  * Full Playwright-backed crawl of pool site (same stack as protocol Run intelligence).
  */
-export async function crawlPoolWebsite(poolUrl, { timeBudgetMs, maxPages, poolLabel } = {}) {
+export async function crawlPoolWebsite(poolUrl, { timeBudgetMs, maxPages, poolLabel, trace = null } = {}) {
   const url = String(poolUrl || "").trim();
   if (!/^https?:\/\//i.test(url)) {
     return {
@@ -167,6 +168,15 @@ export async function crawlPoolWebsite(poolUrl, { timeBudgetMs, maxPages, poolLa
       html: isPrimary ? r.html || "" : "",
       metrics: pageMetrics,
       primary: isPrimary,
+    });
+
+    traceCrawlPage(trace, {
+      url: pageUrl,
+      rendered: Boolean(r.rendered),
+      ok: r.ok !== false && visible.length > 0,
+      textLength: visible.length,
+      metrics: pageMetrics,
+      error: r.renderError || null,
     });
 
     lines.push(`\n### Crawled page (${r.rendered ? "playwright" : "html"}): ${pageUrl}`);

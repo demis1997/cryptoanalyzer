@@ -29,7 +29,7 @@ const API_FIRST_SOURCES = new Set([
   "kamino_api",
 ]);
 
-async function mergeDlOrSynthetic({ apiMeta, allPools, rowOpts, trace, label, protocolKind = null }) {
+async function mergeDlOrSynthetic({ apiMeta, allPools, rowOpts, trace, label, protocolKind = null, poolUrl = null }) {
   if (!apiMeta) return null;
   const scoring = apiMeta.scoring || apiMeta;
   const hasApiMetrics =
@@ -86,6 +86,9 @@ async function mergeDlOrSynthetic({ apiMeta, allPools, rowOpts, trace, label, pr
   );
   if (apiMeta.tvlSource && row.tvlUsd != null) row.tvlSource = apiMeta.tvlSource;
 
+  const pageUrl = apiMeta.marketPageUrl || apiMeta.sourceUrl || poolUrl || null;
+  const apiLabel = [apiMeta.symbol, apiMeta.project || label].filter(Boolean).join(" · ");
+
   trace?.step?.(label, {
     kind: "source",
     detail: [
@@ -97,12 +100,7 @@ async function mergeDlOrSynthetic({ apiMeta, allPools, rowOpts, trace, label, pr
     ]
       .filter(Boolean)
       .join(" · "),
-    sources: [
-      {
-        label: apiMeta.source || label,
-        url: apiMeta.sourceUrl || apiMeta.marketPageUrl || null,
-      },
-    ],
+    sources: pageUrl ? [{ label: apiLabel || label, url: pageUrl }] : [],
   });
 
   const subgraph = await fetchPoolSubgraphMetrics({
@@ -154,6 +152,7 @@ export async function resolvePoolFromProtocolTarget(ctx, allPools, trace = null)
         trace,
         label: "Aave reserve API",
         protocolKind: "aave_reserve",
+        poolUrl: ctx?.url,
       });
     }
     case "spark_reserve": {
@@ -168,6 +167,7 @@ export async function resolvePoolFromProtocolTarget(ctx, allPools, trace = null)
         trace,
         label: "Spark reserve",
         protocolKind: "spark_reserve",
+        poolUrl: ctx?.url,
       });
     }
     case "morpho_market": {
@@ -179,6 +179,7 @@ export async function resolvePoolFromProtocolTarget(ctx, allPools, trace = null)
         trace,
         label: "Morpho market API",
         protocolKind: "morpho_market",
+        poolUrl: ctx?.url,
       });
     }
     case "morpho_vault": {
@@ -199,7 +200,13 @@ export async function resolvePoolFromProtocolTarget(ctx, allPools, trace = null)
         { ...base, vaultAddress: ctx.vaultAddress, curator: morpho.curator },
         morpho.scoring || morpho
       );
-      trace?.step?.("Morpho vault API", { kind: "source", detail: morpho.symbol || morpho.name });
+      trace?.step?.("Morpho vault API", {
+        kind: "source",
+        detail: morpho.symbol || morpho.name,
+        sources: morpho.marketPageUrl || morpho.sourceUrl
+          ? [{ label: `${morpho.symbol || "Vault"} · Morpho`, url: morpho.marketPageUrl || morpho.sourceUrl }]
+          : [],
+      });
       return { yieldsRows: [row], vaultMeta: morpho };
     }
     case "pendle_market":
@@ -213,6 +220,7 @@ export async function resolvePoolFromProtocolTarget(ctx, allPools, trace = null)
         trace,
         label: "Compound Comet",
         protocolKind: "compound_market",
+        poolUrl: ctx?.url,
       });
     }
     case "fluid_lending": {
@@ -224,6 +232,7 @@ export async function resolvePoolFromProtocolTarget(ctx, allPools, trace = null)
         trace,
         label: "Fluid lending API",
         protocolKind: "fluid_lending",
+        poolUrl: ctx?.url,
       });
     }
     case "hyperliquid_vault": {
@@ -235,6 +244,7 @@ export async function resolvePoolFromProtocolTarget(ctx, allPools, trace = null)
         trace,
         label: "Hyperliquid vault API",
         protocolKind: "hyperliquid_vault",
+        poolUrl: ctx?.url,
       });
     }
     case "maple_pool": {
@@ -246,6 +256,7 @@ export async function resolvePoolFromProtocolTarget(ctx, allPools, trace = null)
         trace,
         label: "Maple GraphQL API",
         protocolKind: "maple_pool",
+        poolUrl: ctx?.url,
       });
     }
     case "kamino_vault": {
@@ -267,6 +278,7 @@ export async function resolvePoolFromProtocolTarget(ctx, allPools, trace = null)
         trace,
         label: "Kamino vault API",
         protocolKind: "kamino_vault",
+        poolUrl: ctx?.url,
       });
     }
     default:
@@ -296,6 +308,12 @@ async function resolvePendle(ctx, allPools, trace) {
     { ...yieldsRow, vaultAddress: addr, issuerSlug: "pendle" },
     vaultMeta.scoring || vaultMeta
   );
-  trace?.step?.("Pendle market API", { kind: "source", detail: found.market.name });
+  trace?.step?.("Pendle market API", {
+    kind: "source",
+    detail: found.market.name,
+    sources: vaultMeta?.marketPageUrl || vaultMeta?.sourceUrl || ctx?.url
+      ? [{ label: `${found.market.name} · Pendle`, url: vaultMeta?.marketPageUrl || vaultMeta?.sourceUrl || ctx?.url }]
+      : [],
+  });
   return { yieldsRows: [row], vaultMeta };
 }

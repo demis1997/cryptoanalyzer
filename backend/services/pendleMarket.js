@@ -3,6 +3,7 @@
  */
 import fetch from "node-fetch";
 import { normalizePoolChain } from "./poolAddress.js";
+import { pendlePoolUrl } from "./sourceUrls.js";
 
 const CHAIN_IDS = { ethereum: 1, arbitrum: 42161, optimism: 10, base: 8453, polygon: 137 };
 
@@ -107,10 +108,14 @@ export function extractPendleScoringMeta(market) {
   const tradingVol = Number(details.tradingVolume ?? 0);
   const hasSecondary = ammLiq >= 50_000 || tradingVol > 0;
 
+  const chainName = Object.entries(CHAIN_IDS).find(([, id]) => id === Number(market.chainId))?.[0] || "ethereum";
+
   return {
     symbol: market.name || null,
     name: market.name || null,
     marketAddress: stripChainPrefix(market.address),
+    marketPageUrl: pendlePoolUrl(chainName, stripChainPrefix(market.address)),
+    sourceUrl: pendlePoolUrl(chainName, stripChainPrefix(market.address)),
     expiry: market.expiry || null,
     pendleDaysToMaturity: daysToMaturity,
     daysToMaturity,

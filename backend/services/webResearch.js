@@ -1,5 +1,6 @@
 import fetch from "node-fetch";
 import { crawlPoolWebsite } from "./poolCrawl.js";
+import { traceLightFetch, traceWebSearch } from "./researchActivityLog.js";
 
 function webSearchEnabled() {
   return !/^(0|false|no|off)$/i.test(String(process.env.POOL_WEB_SEARCH || "1").trim());
@@ -122,7 +123,7 @@ export async function fetchPageText(url, { timeoutMs = 12_000, maxChars = 6000 }
 /**
  * Web research pack for pool integrator discovery: search queries + optional pool page scrape.
  */
-export async function gatherPoolWebResearch({ poolLabel, poolUrl, issuerSlug } = {}) {
+export async function gatherPoolWebResearch({ poolLabel, poolUrl, issuerSlug, trace = null } = {}) {
   if (!webSearchEnabled()) {
     return { enabled: false, searches: [], page: null, formatted: "" };
   }
@@ -142,12 +143,18 @@ export async function gatherPoolWebResearch({ poolLabel, poolUrl, issuerSlug } =
   for (const q of [...new Set(queries)].slice(0, maxQueries)) {
     const r = await searchWeb(q, { maxResults: 6 });
     searches.push(r);
+    traceWebSearch(trace, {
+      provider: r.provider,
+      query: r.query,
+      hits: r.hits,
+      answer: r.answer,
+    });
   }
 
   let page = null;
   let crawl = null;
   if (poolUrl && /^https?:\/\//i.test(poolUrl)) {
-    crawl = await crawlPoolWebsite(poolUrl, { poolLabel }).catch((e) => ({
+    crawl = await crawlPoolWebsite(poolUrl, { poolLabel, trace }).catch((e) => ({
       enabled: true,
       ok: false,
       error: String(e?.message || e),
@@ -157,6 +164,11 @@ export async function gatherPoolWebResearch({ poolLabel, poolUrl, issuerSlug } =
     }));
     if (!crawl?.ok) {
       page = await fetchPageText(poolUrl);
+      traceLightFetch(trace, {
+        url: poolUrl,
+        ok: page?.ok,
+        error: page?.error,
+      });
     }
   }
 
@@ -193,5 +205,6 @@ export async function gatherPoolWebResearch({ poolLabel, poolUrl, issuerSlug } =
     addresses: crawl?.addresses || [],
     formatted: lines.join("\n").trim(),
     providers,
+    traceLogged: Boolean(trace),
   };
 }
