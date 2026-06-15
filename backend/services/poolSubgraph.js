@@ -87,9 +87,9 @@ async function fetchAaveReserveSubgraph({ chain, underlyingAsset }) {
   if (!reserve) return null;
 
   const priceUsd = await priceUsdForAsset(addr, c);
-  const liquidityUsd = bigintUsd(reserve.availableLiquidity, reserve.decimals, priceUsd);
   const supplyUsd = bigintUsd(reserve.totalLiquidity, reserve.decimals, priceUsd);
-  const tvlUsd = liquidityUsd ?? supplyUsd;
+  const liquidityUsd = bigintUsd(reserve.availableLiquidity, reserve.decimals, priceUsd);
+  const tvlUsd = supplyUsd ?? liquidityUsd;
 
   let util = num(reserve.utilizationRate);
   if (util != null && util > 1) util /= RAY;
@@ -113,10 +113,10 @@ async function fetchAaveReserveSubgraph({ chain, underlyingAsset }) {
       supplyAssetsUsd: supplyUsd,
       liquidityAssetsUsd: liquidityUsd,
       tvlEvidence:
-        liquidityUsd != null
-          ? `Aave subgraph availableLiquidity ~$${Math.round(liquidityUsd).toLocaleString()}`
-          : supplyUsd != null
-            ? `Aave subgraph totalLiquidity ~$${Math.round(supplyUsd).toLocaleString()}`
+        supplyUsd != null
+          ? `Aave subgraph totalLiquidity ~$${Math.round(supplyUsd).toLocaleString()} (total deposits)`
+          : liquidityUsd != null
+            ? `Aave subgraph availableLiquidity ~$${Math.round(liquidityUsd).toLocaleString()}`
             : null,
       utilization: util != null && isFinite(util) ? util : null,
       utilizationEvidence:
@@ -161,6 +161,8 @@ async function fetchMorphoMarketSubgraph({ marketId, chain }) {
   const borrow = num(market.totalBorrowBalanceUSD);
   const liquidityUsd =
     deposit != null && borrow != null ? Math.max(0, deposit - borrow) : num(market.totalValueLockedUSD);
+  const marketSizeUsd = deposit;
+  const tvlUsd = marketSizeUsd ?? liquidityUsd;
   const util = deposit != null && deposit > 0 && borrow != null ? borrow / deposit : null;
   const lltv = num(market.maximumLTV);
   const liqThresh = num(market.liquidationThreshold);
@@ -203,13 +205,15 @@ async function fetchMorphoMarketSubgraph({ marketId, chain }) {
     protocol: "morpho-blue",
     symbol: sym || market.name,
     scoring: {
-      totalAssetsUsd: liquidityUsd,
-      supplyAssetsUsd: deposit,
+      totalAssetsUsd: tvlUsd,
+      supplyAssetsUsd: marketSizeUsd ?? deposit,
       liquidityAssetsUsd: liquidityUsd,
       tvlEvidence:
-        liquidityUsd != null
-          ? `Morpho subgraph market liquidity ~$${Math.round(liquidityUsd).toLocaleString()} (supply − borrow)`
-          : null,
+        marketSizeUsd != null
+          ? `Morpho subgraph total market size ~$${Math.round(marketSizeUsd).toLocaleString()} (total deposits)`
+          : liquidityUsd != null
+            ? `Morpho subgraph market liquidity ~$${Math.round(liquidityUsd).toLocaleString()} (supply − borrow)`
+            : null,
       utilization: util,
       utilizationEvidence: util != null ? `Morpho subgraph utilization ${(util * 100).toFixed(1)}%` : null,
       lltvPct,

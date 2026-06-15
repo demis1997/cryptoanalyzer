@@ -525,17 +525,33 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
   }
 
   if (hints.apy != null && isFinite(Number(hints.apy))) {
-    primary.apy = Number(hints.apy);
-    primary.apySource = hints.apySource || "pool_page";
-    primary.apyEvidence = hints.apyEvidence || "Parsed from web research";
+    const protocolApy =
+      primary.apySource === "protocol_api" &&
+      /protocol|aave|morpho|compound|spark|fluid|kamino|maple|pendle|api/i.test(
+        String(primary.apyEvidence || "")
+      );
+    if (!protocolApy) {
+      primary.apy = Number(hints.apy);
+      primary.apySource = hints.apySource || "pool_page";
+      primary.apyEvidence = hints.apyEvidence || "Parsed from web research";
+    }
   }
   if (hints.apyBase != null && isFinite(Number(hints.apyBase))) {
-    primary.apyBase = Number(hints.apyBase);
-    primary.apySource = hints.apySource || "pool_page";
-    primary.apyEvidence = hints.apyEvidence || primary.apyEvidence || "Parsed from web research";
+    const protocolApy =
+      primary.apySource === "protocol_api" &&
+      /protocol|aave|morpho|compound|spark|fluid|kamino|maple|pendle|api/i.test(
+        String(primary.apyEvidence || "")
+      );
+    if (!protocolApy) {
+      primary.apyBase = Number(hints.apyBase);
+      primary.apySource = hints.apySource || "pool_page";
+      primary.apyEvidence = hints.apyEvidence || primary.apyEvidence || "Parsed from web research";
+    }
   }
   if (hints.apyReward != null && isFinite(Number(hints.apyReward))) {
-    primary.apyReward = Number(hints.apyReward);
+    if (primary.apySource !== "protocol_api") {
+      primary.apyReward = Number(hints.apyReward);
+    }
   }
   if (hints.apyCv30d != null) {
     primary.apyCv30d = hints.apyCv30d;

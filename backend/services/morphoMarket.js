@@ -47,12 +47,12 @@ export async function fetchMorphoMarketById(marketId, chain) {
     const coll = m.collateralAsset?.symbol || "?";
     const supplyUsd = Number(m.state?.supplyAssetsUsd);
     const liquidityUsd = Number(m.state?.liquidityAssetsUsd);
-    // Morpho market UI TVL = available loan-side liquidity, not total supply.
+    // Morpho market P.7 TVL = total market size (supply), not borrowable liquidity.
     const tvlUsd =
-      isFinite(liquidityUsd) && liquidityUsd > 0
-        ? liquidityUsd
-        : isFinite(supplyUsd) && supplyUsd > 0
-          ? supplyUsd
+      isFinite(supplyUsd) && supplyUsd > 0
+        ? supplyUsd
+        : isFinite(liquidityUsd) && liquidityUsd > 0
+          ? liquidityUsd
           : null;
     const util = Number(m.state?.utilization);
     const lltv = parseMorphoLltv(m.lltv);
@@ -68,9 +68,9 @@ export async function fetchMorphoMarketById(marketId, chain) {
       liquidityAssetsUsd: isFinite(liquidityUsd) && liquidityUsd > 0 ? liquidityUsd : null,
       tvlEvidence:
         tvlUsd != null
-          ? isFinite(liquidityUsd) && liquidityUsd > 0
-            ? `Morpho API liquidityAssetsUsd $${Math.round(liquidityUsd).toLocaleString()} (market liquidity)`
-            : `Morpho API supplyAssetsUsd $${Math.round(supplyUsd).toLocaleString()}`
+          ? isFinite(supplyUsd) && supplyUsd > 0
+            ? `Morpho API supplyAssetsUsd $${Math.round(supplyUsd).toLocaleString()} (total market size)`
+            : `Morpho API liquidityAssetsUsd $${Math.round(liquidityUsd).toLocaleString()} (market liquidity)`
           : null,
       utilization: isFinite(util) ? util : null,
       utilizationEvidence: isFinite(util) ? `Morpho API market utilization ${(util * 100).toFixed(1)}%` : null,

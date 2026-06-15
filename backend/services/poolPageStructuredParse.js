@@ -214,27 +214,29 @@ export function extractMorphoMarketMetrics(html, marketId) {
   const window = h.slice(Math.max(0, idx - 20_000), idx + 160_000);
   const esc = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const blockRe = new RegExp(
-    `${esc}[\\s\\S]{0,160000}liquidityAssetsUsd\\\\?":\\s*([\\d.]+)[\\s\\S]{0,8000}utilization\\\\?":\\s*([\\d.]+)`
+    `${esc}[\\s\\S]{0,160000}supplyAssetsUsd\\\\?":\\s*([\\d.]+)[\\s\\S]{0,8000}utilization\\\\?":\\s*([\\d.]+)`
   );
   const block = h.match(blockRe);
 
-  const liq = block
+  const supply = block
     ? [null, block[1]]
-    : window.match(/liquidityAssetsUsd\\?":\s*([\d.]+)/);
+    : window.match(/supplyAssetsUsd\\?":\s*([\d.]+)/);
+  const liq = window.match(/liquidityAssetsUsd\\?":\s*([\d.]+)/);
   const util = block
     ? [null, block[2]]
     : window.match(/utilization\\?":\s*([\d.]+)/);
   const lltv = window.match(/lltv\\?":\s*([\d.]+)/);
   const hints = {};
 
-  if (liq) {
-    const usd = Number(liq[1]);
-    if (isFinite(usd) && usd > 0) {
-      hints.poolTvlUsd = usd;
-      hints.tvlSource = "pool_page";
-      hints.tvlEvidence = `Morpho page JSON liquidityAssetsUsd $${Math.round(usd).toLocaleString()}`;
-      hints.availableLiquidityUsd = usd;
-    }
+  const tvlUsd = supply ? Number(supply[1]) : liq ? Number(liq[1]) : null;
+  if (tvlUsd != null && isFinite(tvlUsd) && tvlUsd > 0) {
+    hints.poolTvlUsd = tvlUsd;
+    hints.tvlSource = "pool_page";
+    hints.tvlEvidence = supply
+      ? `Morpho page JSON supplyAssetsUsd $${Math.round(tvlUsd).toLocaleString()} (total market size)`
+      : `Morpho page JSON liquidityAssetsUsd $${Math.round(tvlUsd).toLocaleString()}`;
+    if (liq) hints.availableLiquidityUsd = Number(liq[1]);
+    if (supply) hints.supplyAssetsUsd = Number(supply[1]);
   }
   if (util) {
     let u = Number(util[1]);
@@ -266,6 +268,7 @@ export function extractEmbeddedJsonMetrics(html, { marketId = null, url = "" } =
   if (!h.trim()) return hints;
 
   const jsonFieldPatterns = [
+    { re: /supplyAssetsUsd\\?":\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "supplyAssetsUsd in page JSON (market size)" },
     { re: /liquidityAssetsUsd\\?":\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "liquidityAssetsUsd in page JSON" },
     { re: /availableLiquidityUsd\\?":\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "availableLiquidityUsd in page JSON" },
     { re: /totalLiquidityUsd\\?":\s*([\d.]+)/i, field: "poolTvlUsd", evidence: "totalLiquidityUsd in page JSON" },

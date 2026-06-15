@@ -204,12 +204,12 @@ const morphoMkt = await fetchMorphoMarketById(
   "0x3a85e619751152991742810df6ec69ce473daef99e28a64ab2340d7b7ccfee49",
   "ethereum"
 );
-assert(morphoMkt?.scoring?.liquidityAssetsUsd > 0, "morpho market liquidity");
+assert(morphoMkt?.scoring?.supplyAssetsUsd > 0, "morpho market size");
 assert(
-  morphoMkt.scoring.totalAssetsUsd === morphoMkt.scoring.liquidityAssetsUsd,
-  "P.7 uses liquidity not supply"
+  morphoMkt.scoring.totalAssetsUsd === morphoMkt.scoring.supplyAssetsUsd,
+  "P.7 uses total market size not liquidity"
 );
-assert(morphoMkt.scoring.totalAssetsUsd < morphoMkt.scoring.supplyAssetsUsd / 2, "liquidity << supply");
+assert(morphoMkt.scoring.totalAssetsUsd > morphoMkt.scoring.liquidityAssetsUsd, "market size >> liquidity");
 const morphoRow = applyVaultScoringMetaToRow(
   { symbol: "WBTC/USDC", project: "morpho-blue", tvlSource: "protocol_api" },
   morphoMkt.scoring
@@ -221,13 +221,13 @@ const morphoRisk = buildPoolRiskAssessment({
 });
 const p7m = morphoRisk.criteria.find((c) => c.key === "poolTvl");
 const p6m = morphoRisk.criteria.find((c) => c.key === "poolAge");
-assert(p7m.score === 0.8, `Morpho market P.7 ~$15M liquidity: ${p7m.input} score ${p7m.score}`);
+assert(p7m.score === 1.0, `Morpho market P.7 ~$135M market size: ${p7m.input} score ${p7m.score}`);
 assert(
-  morphoRow.tvlUsd === morphoMkt.scoring.liquidityAssetsUsd &&
-    morphoMkt.scoring.liquidityAssetsUsd < morphoMkt.scoring.supplyAssetsUsd,
-  `P.7 TVL is liquidity not total supply`
+  morphoRow.tvlUsd === morphoMkt.scoring.supplyAssetsUsd &&
+    morphoMkt.scoring.supplyAssetsUsd > morphoMkt.scoring.liquidityAssetsUsd,
+  `P.7 TVL is total market size not liquidity`
 );
-assert(/liquidityAssetsUsd/i.test(p7m.evidence), `P.7 evidence ${p7m.evidence}`);
+assert(/supplyAssetsUsd|market size/i.test(p7m.evidence), `P.7 evidence ${p7m.evidence}`);
 assert(!p6m.unavailable, `P.6 from on-chain market event ${p6m.input}`);
 assert(p6m.score >= 0.5, `P.6 market age scored ${p6m.score}`);
 assert(/on-chain|Morpho Blue/i.test(morphoRow.poolAgeEvidence || ""), `pool age evidence ${morphoRow.poolAgeEvidence}`);
@@ -236,9 +236,10 @@ const aaveDai = await fetchAaveReserve({
   chain: "ethereum",
   underlyingAsset: "0x6b175474e89094c44da98b954eedeac495271d0f",
 });
-assert(aaveDai?.liquidityAssetsUsd > 0, "aave liquidity");
-assert(aaveDai.totalAssetsUsd === aaveDai.liquidityAssetsUsd, "aave P.7 uses available liquidity");
-assert(aaveDai.totalAssetsUsd < aaveDai.supplyAssetsUsd / 2, "aave liquidity << supply");
+assert(aaveDai?.liquidityAssetsUsd > 0, "aave available liquidity tracked");
+assert(aaveDai.totalAssetsUsd === aaveDai.supplyAssetsUsd, "aave P.7 uses total deposits (reserve size)");
+assert(aaveDai.totalAssetsUsd > aaveDai.liquidityAssetsUsd, "aave deposits >> available liquidity");
+assert(aaveDai.apyPct > 0 && aaveDai.apyPct < 50, `aave supply APY ${aaveDai.apyPct}`);
 assert(aaveDai.poolCreatedAt > 0, `aave pool age ${aaveDai.poolCreatedAt}`);
 const aaveRow = applyVaultScoringMetaToRow(
   { symbol: "DAI", project: "aave-v3", tvlSource: "protocol_api" },
@@ -248,7 +249,8 @@ const aaveRisk = buildPoolRiskAssessment({ label: "DAI", issuerSlug: "aave", yie
 const p7a = aaveRisk.criteria.find((c) => c.key === "poolTvl");
 const p6a = aaveRisk.criteria.find((c) => c.key === "poolAge");
 assert(!p6a.unavailable, `Aave P.6 ${p6a.input}`);
-assert(/availableLiquidity/i.test(p7a.evidence), `Aave P.7 ${p7a.evidence}`);
+assert(/total deposits|reserve size/i.test(p7a.evidence), `Aave P.7 ${p7a.evidence}`);
+assert(aaveRow.apy > 0 && aaveRow.apy < 50, `Aave row APY ${aaveRow.apy}`);
 
 const comp = await fetchCompoundMarket({ marketSlug: "usdc-op", chain: "optimism" });
 assert(comp?.liquidityAssetsUsd > 0, "compound cash liquidity");

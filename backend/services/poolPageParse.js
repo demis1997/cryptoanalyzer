@@ -281,8 +281,8 @@ export function mergePageMetricsIntoHints(hints, metrics) {
   const out = { ...hints };
   const m = metrics || {};
   if (m.poolTvlUsd != null) {
-    const precise = /json|liquidityAssetsUsd|protocol|api/i.test(m.tvlEvidence || "");
-    const existingPrecise = /json|liquidityAssetsUsd|protocol|api/i.test(out.tvlEvidence || "");
+    const precise = /json|liquidityAssetsUsd|supplyAssetsUsd|market size|protocol|api/i.test(m.tvlEvidence || "");
+    const existingPrecise = /json|liquidityAssetsUsd|supplyAssetsUsd|market size|protocol|api/i.test(out.tvlEvidence || "");
     const shouldTake =
       out.poolTvlUsd == null ||
       (precise && !existingPrecise) ||

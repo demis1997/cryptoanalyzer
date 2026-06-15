@@ -56,7 +56,12 @@ export function applyVaultScoringMetaToRow(row, meta) {
     );
   }
   if (meta.apyPct != null && isFinite(Number(meta.apyPct))) {
-    next.apyBase = Number(meta.apyPct);
+    const apyVal = Number(meta.apyPct);
+    next.apy = apyVal;
+    next.apyBase = meta.apyBasePct != null ? Number(meta.apyBasePct) : apyVal;
+    if (meta.apyRewardPct != null && isFinite(Number(meta.apyRewardPct))) {
+      next.apyReward = Number(meta.apyRewardPct);
+    }
     next.apySource = "protocol_api";
     next.apyEvidence = meta.apyEvidence || "Protocol API net APY";
   }

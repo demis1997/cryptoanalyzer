@@ -24,6 +24,12 @@ function numUsd(raw) {
   return isFinite(n) && n > 0 ? n : null;
 }
 
+function toApyPercent(raw) {
+  const n = Number(raw);
+  if (!isFinite(n) || n <= 0) return null;
+  return n <= 1 ? n * 100 : n;
+}
+
 export async function fetchAaveReserve({ chain, underlyingAsset }) {
   const addr = String(underlyingAsset || "").toLowerCase();
   if (!/^0x[a-f0-9]{40}$/.test(addr)) return null;
@@ -61,10 +67,10 @@ export async function fetchAaveReserve({ chain, underlyingAsset }) {
 
     const supplyUsd = numUsd(reserve?.size?.usd ?? reserve?.supplyInfo?.total?.usd);
     const liquidityUsd = numUsd(reserve?.borrowInfo?.availableLiquidity?.usd);
-    // Aave UI "available liquidity" for P.7 (not total supplied size).
-    const tvlUsd = liquidityUsd ?? supplyUsd;
+    // Aave P.7 TVL = total deposits (reserve size), not available borrow liquidity.
+    const tvlUsd = supplyUsd ?? liquidityUsd;
     const util = Number(reserve?.borrowInfo?.utilizationRate?.value);
-    const apy = Number(reserve?.supplyInfo?.apy?.value);
+    const apyPct = toApyPercent(reserve?.supplyInfo?.apy?.value);
     const liqThresh = Number(reserve?.supplyInfo?.liquidationThreshold?.value);
     const maxLtv = Number(reserve?.supplyInfo?.maxLTV?.value);
     const lltvPct =
@@ -89,9 +95,9 @@ export async function fetchAaveReserve({ chain, underlyingAsset }) {
       liquidityAssetsUsd: liquidityUsd,
       tvlEvidence:
         tvlUsd != null
-          ? liquidityUsd != null
-            ? `Aave API availableLiquidity $${Math.round(liquidityUsd).toLocaleString()}`
-            : `Aave API reserve size $${Math.round(supplyUsd).toLocaleString()}`
+          ? supplyUsd != null
+            ? `Aave API reserve size $${Math.round(supplyUsd).toLocaleString()} (total deposits)`
+            : `Aave API availableLiquidity $${Math.round(liquidityUsd).toLocaleString()}`
           : null,
       poolCreatedAt: ageMeta?.poolCreatedAt ?? null,
       poolAgeEvidence: ageMeta?.poolAgeEvidence ?? null,
@@ -104,8 +110,8 @@ export async function fetchAaveReserve({ chain, underlyingAsset }) {
         lltvPct != null
           ? `Aave API liquidation threshold ${lltvPct.toFixed(1)}%`
           : null,
-      apyPct: isFinite(apy) ? apy * 100 : null,
-      apyEvidence: isFinite(apy) ? `Aave API supply APY ${(apy * 100).toFixed(2)}%` : null,
+      apyPct,
+      apyEvidence: apyPct != null ? `Aave API supply APY ${apyPct.toFixed(2)}%` : null,
       oracleType: "Chainlink",
       oracleEvidence: "Aave V3 oracle infrastructure (Chainlink/Pyth)",
     };

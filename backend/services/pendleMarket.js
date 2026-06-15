@@ -6,6 +6,12 @@ import { normalizePoolChain } from "./poolAddress.js";
 
 const CHAIN_IDS = { ethereum: 1, arbitrum: 42161, optimism: 10, base: 8453, polygon: 137 };
 
+function toApyPercent(raw) {
+  const n = Number(raw);
+  if (!isFinite(n) || n <= 0) return null;
+  return n <= 1 ? n * 100 : n;
+}
+
 function stripChainPrefix(raw) {
   const s = String(raw || "").trim().toLowerCase();
   const m = s.match(/^(?:\d+-)?(0x[a-f0-9]{40})$/);
@@ -79,8 +85,24 @@ export function extractPendleScoringMeta(market) {
     if (isFinite(expMs)) daysToMaturity = Math.ceil((expMs - Date.now()) / 86400000);
   }
 
-  const implied = Number(details.impliedApy ?? details.aggregatedApy ?? 0);
-  const apyPct = isFinite(implied) && implied > 0 ? (implied <= 1 ? implied * 100 : implied) : null;
+  const implied = Number(details.impliedApy ?? 0);
+  const underlying = Number(details.underlyingApy ?? 0);
+  const swapFee = Number(details.swapFeeApy ?? 0);
+  const pendleReward = Number(details.pendleApy ?? 0);
+  const aggregated = Number(details.aggregatedApy ?? 0);
+  const maxBoosted = Number(details.maxBoostedApy ?? 0);
+
+  // Pendle LP pool APY (trade/pools) = aggregated LP yield, not PT implied APY.
+  const apyTotal =
+    toApyPercent(aggregated) ?? toApyPercent(maxBoosted) ?? toApyPercent(implied);
+  const apyBase = toApyPercent(underlying);
+  const apyRewardPct =
+    apyBase != null && apyTotal != null
+      ? Math.max(0, apyTotal - apyBase)
+      : toApyPercent(swapFee) != null || toApyPercent(pendleReward) != null
+        ? (toApyPercent(swapFee) || 0) + (toApyPercent(pendleReward) || 0)
+        : null;
+  const impliedApyPct = toApyPercent(implied);
 
   const tradingVol = Number(details.tradingVolume ?? 0);
   const hasSecondary = ammLiq >= 50_000 || tradingVol > 0;
@@ -108,8 +130,14 @@ export function extractPendleScoringMeta(market) {
     pendleTradingVolumeUsd: isFinite(tradingVol) && tradingVol > 0 ? tradingVol : null,
     pendleSecondaryMarket: hasSecondary,
     pendleSecondaryEvidence: hasSecondary ? "Pendle API: AMM liquidity / trading volume" : "Low AMM liquidity on Pendle API",
-    apyPct,
-    apyEvidence: apyPct != null ? `Pendle API implied APY ${apyPct.toFixed(2)}%` : null,
+    apyPct: apyTotal,
+    apyBasePct: apyBase,
+    apyRewardPct,
+    impliedApyPct,
+    apyEvidence:
+      apyTotal != null
+        ? `Pendle API LP APY ${apyTotal.toFixed(2)}% (aggregated${apyBase != null ? `, ${apyBase.toFixed(2)}% underlying` : ""})`
+        : null,
     source: "pendle_api",
     scoring: null,
   };
@@ -123,6 +151,8 @@ export function pendleMetaForVault(market) {
     totalAssetsUsd: base.tvlUsd,
     tvlEvidence: base.tvlEvidence,
     apyPct: base.apyPct,
+    apyBasePct: base.apyBasePct,
+    apyRewardPct: base.apyRewardPct,
     apyEvidence: base.apyEvidence,
     pendleDaysToMaturity: base.pendleDaysToMaturity,
     daysToMaturity: base.daysToMaturity,
