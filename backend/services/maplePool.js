@@ -85,14 +85,10 @@ export async function fetchMaplePool({ nameHint, poolId } = {}) {
         util != null
           ? `Maple principalOut / totalAssets ${(util * 100).toFixed(1)}% (cash $${Math.round(cashUsd || 0).toLocaleString()})`
           : null,
-      lltvPct: loanToCollateralPct,
-      lltvEvidence:
-        loanToCollateralPct != null
-          ? `Maple loans/collateral ${loanToCollateralPct.toFixed(1)}% (protocol CR ${collateralRatioPct.toFixed(1)}%)`
-          : null,
+      capUtilization: util,
       apyPct,
       apyEvidence: apyPct != null ? `Maple API weekly APY ${apyPct.toFixed(2)}%` : null,
-      capUtilization: util,
+      collateralRatioPct: isFinite(collateralRatioPct) ? collateralRatioPct : null,
       oracleType: "Chainlink",
       oracleEvidence: "Maple institutional loan oracles / collateral valuation",
     };

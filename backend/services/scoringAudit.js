@@ -73,6 +73,7 @@ export function applyVaultScoringMetaToRow(row, meta) {
   }
   if (meta.top1DepositorPct != null && next.top1DepositorPct == null) {
     next.top1DepositorPct = Number(meta.top1DepositorPct);
+    if (meta.top3DepositorPct != null) next.top3DepositorPct = Number(meta.top3DepositorPct);
     if (meta.depositorConcentrationEvidence) {
       next.depositorConcentrationEvidence = meta.depositorConcentrationEvidence;
     }

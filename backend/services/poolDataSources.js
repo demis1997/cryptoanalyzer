@@ -542,11 +542,22 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
     if (hints.apyStabilityEvidence) primary.apyStabilityEvidence = hints.apyStabilityEvidence;
   }
   if (hints.utilization != null) {
-    primary.utilization = hints.utilization;
-    if (hints.utilizationEvidence) primary.utilizationEvidence = hints.utilizationEvidence;
+    const protocolUtil =
+      primary.utilization != null &&
+      /protocol|morpho|aave|compound|spark|fluid|kamino|maple|hyperliquid|pendle|api/i.test(
+        String(primary.utilizationEvidence || "")
+      );
+    if (!protocolUtil) {
+      primary.utilization = hints.utilization;
+      if (hints.utilizationEvidence) primary.utilizationEvidence = hints.utilizationEvidence;
+    }
   }
-  if (hints.lltv != null) {
+  if (hints.lltv != null && primary.lltv == null) {
     primary.lltv = hints.lltv;
+    if (hints.lltvEvidence) primary.lltvEvidence = hints.lltvEvidence;
+  }
+  if (hints.lltvPct != null && primary.lltv == null) {
+    primary.lltv = hints.lltvPct;
     if (hints.lltvEvidence) primary.lltvEvidence = hints.lltvEvidence;
   }
   if (hints.capUtilization != null) primary.capUtilization = hints.capUtilization;
@@ -571,6 +582,7 @@ export function applyExternalDataToYieldsRows(yieldsRows, externalData, rowOpts 
   }
   if (hints.top1DepositorPct != null && primary.top1DepositorPct == null) {
     primary.top1DepositorPct = hints.top1DepositorPct;
+    if (hints.top3DepositorPct != null) primary.top3DepositorPct = hints.top3DepositorPct;
     if (hints.depositorConcentrationEvidence) {
       primary.depositorConcentrationEvidence = hints.depositorConcentrationEvidence;
     }

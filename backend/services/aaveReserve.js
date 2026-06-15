@@ -36,7 +36,11 @@ export async function fetchAaveReserve({ chain, underlyingAsset }) {
       reserves {
         underlyingToken { symbol address }
         aToken { address }
-        supplyInfo { apy { value } }
+        supplyInfo {
+          apy { value }
+          maxLTV { value formatted }
+          liquidationThreshold { value formatted }
+        }
         borrowInfo {
           utilizationRate { value }
           availableLiquidity { usd }
@@ -61,6 +65,18 @@ export async function fetchAaveReserve({ chain, underlyingAsset }) {
     const tvlUsd = liquidityUsd ?? supplyUsd;
     const util = Number(reserve?.borrowInfo?.utilizationRate?.value);
     const apy = Number(reserve?.supplyInfo?.apy?.value);
+    const liqThresh = Number(reserve?.supplyInfo?.liquidationThreshold?.value);
+    const maxLtv = Number(reserve?.supplyInfo?.maxLTV?.value);
+    const lltvPct =
+      isFinite(liqThresh) && liqThresh > 0
+        ? liqThresh <= 1
+          ? liqThresh * 100
+          : liqThresh
+        : isFinite(maxLtv) && maxLtv > 0
+          ? maxLtv <= 1
+            ? maxLtv * 100
+            : maxLtv
+          : null;
     const aTokenAddr = reserve?.aToken?.address;
 
     const ageMeta = aTokenAddr
@@ -83,6 +99,11 @@ export async function fetchAaveReserve({ chain, underlyingAsset }) {
       poolAgeExplorerUrl: ageMeta?.poolAgeExplorerUrl ?? null,
       utilization: isFinite(util) ? util : null,
       utilizationEvidence: isFinite(util) ? `Aave API utilization ${(util * 100).toFixed(1)}%` : null,
+      lltvPct,
+      lltvEvidence:
+        lltvPct != null
+          ? `Aave API liquidation threshold ${lltvPct.toFixed(1)}%`
+          : null,
       apyPct: isFinite(apy) ? apy * 100 : null,
       apyEvidence: isFinite(apy) ? `Aave API supply APY ${(apy * 100).toFixed(2)}%` : null,
       oracleType: "Chainlink",

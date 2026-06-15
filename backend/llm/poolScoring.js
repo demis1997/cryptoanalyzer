@@ -298,6 +298,33 @@ function scoreLiquidityExit(poolType, row) {
         calcBreakdown: `cooldown=${days}d → band ${band} → score ${sc}`,
       };
     }
+    const util = row?.utilization ?? row?.utilizationRate;
+    if (typeof util === "number" && isFinite(util)) {
+      const u = util > 1 ? util : util * 100;
+      let sc = 0.1;
+      let band = "≥95%";
+      if (u < 70) {
+        sc = 1.0;
+        band = "<70%";
+      } else if (u < 80) {
+        sc = 0.85;
+        band = "70–80%";
+      } else if (u < 90) {
+        sc = 0.6;
+        band = "80–90%";
+      } else if (u < 95) {
+        sc = 0.3;
+        band = "90–95%";
+      }
+      return {
+        score: sc,
+        input: `utilization ${u.toFixed(1)}%`,
+        evidence:
+          row?.utilizationEvidence ||
+          `Structured vault deployment utilization band ${band} → ${sc} (P.2).`,
+        calcBreakdown: `util=${u.toFixed(1)}% → band ${band} → score ${sc}`,
+      };
+    }
     return {
       unavailable: true,
       input: "exit terms unknown",

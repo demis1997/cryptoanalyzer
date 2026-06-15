@@ -88,6 +88,9 @@ export async function resolvePoolMetrics(ctx = {}, { webResearch = null, yieldsR
 
   // Tier 1: protocol API / on-chain (contract address)
   const vaultMeta = ctx?.vaultMeta?.scoring || ctx?.vaultMeta;
+  if (vaultMeta && typeof vaultMeta === "object") {
+    Object.assign(scoringHints, mergePageMetricsIntoHints(scoringHints, vaultMeta));
+  }
   if (vaultMeta?.totalAssetsUsd != null && isFinite(Number(vaultMeta.totalAssetsUsd))) {
     tvlCandidates.push({
       value: Number(vaultMeta.totalAssetsUsd),

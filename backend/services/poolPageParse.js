@@ -302,6 +302,15 @@ export function mergePageMetricsIntoHints(hints, metrics) {
     out.lltv = m.lltv;
     out.lltvEvidence = m.lltvEvidence;
   }
+  if (m.lltvPct != null && out.lltv == null) {
+    out.lltv = m.lltvPct;
+    out.lltvEvidence = m.lltvEvidence;
+  }
+  if (m.top1DepositorPct != null && out.top1DepositorPct == null) {
+    out.top1DepositorPct = m.top1DepositorPct;
+    if (m.top3DepositorPct != null) out.top3DepositorPct = m.top3DepositorPct;
+    if (m.depositorConcentrationEvidence) out.depositorConcentrationEvidence = m.depositorConcentrationEvidence;
+  }
   if (m.pendleDaysToMaturity != null) {
     out.pendleDaysToMaturity = m.pendleDaysToMaturity;
     out.daysToMaturity = m.daysToMaturity;

@@ -93,8 +93,9 @@ async function fetchAaveReserveSubgraph({ chain, underlyingAsset }) {
 
   let util = num(reserve.utilizationRate);
   if (util != null && util > 1) util /= RAY;
+  if (util != null && isFinite(util)) util = Math.max(0, Math.min(1, util));
   if (util == null && supplyUsd && liquidityUsd != null && supplyUsd > 0) {
-    util = 1 - liquidityUsd / supplyUsd;
+    util = Math.max(0, Math.min(1, 1 - liquidityUsd / supplyUsd));
   }
 
   const lltv = num(reserve.reserveLiquidationThreshold);
@@ -142,11 +143,11 @@ async function fetchMorphoMarketSubgraph({ marketId, chain }) {
       id name
       totalDepositBalanceUSD totalBorrowBalanceUSD totalValueLockedUSD
       maximumLTV liquidationThreshold
-      createdTimestamp lastUpdateTimestamp
+      createdTimestamp
       inputToken { symbol decimals }
       borrowedToken { symbol decimals }
-      positions(first: 5, orderBy: balanceUSD, orderDirection: desc) {
-        side balanceUSD account { id }
+      positions(first: 25, where: { side: "SUPPLIER" }) {
+        side balance account { id }
       }
     }
   }`;
@@ -175,10 +176,20 @@ async function fetchMorphoMarketSubgraph({ marketId, chain }) {
         : null;
 
   const positions = Array.isArray(market.positions) ? market.positions : [];
-  const depositPositions = positions.filter((p) => String(p.side || "").toUpperCase() === "DEPOSITOR");
-  const topDepositUsd = depositPositions.reduce((m, p) => Math.max(m, num(p.balanceUSD) || 0), 0);
-  const totalDepositsUsd = num(market.totalDepositBalanceUSD);
-  const top1Pct = totalDepositsUsd > 0 && topDepositUsd > 0 ? (topDepositUsd / totalDepositsUsd) * 100 : null;
+  const supplierBalances = positions
+    .filter((p) => String(p.side || "").toUpperCase() === "SUPPLIER")
+    .map((p) => num(p.balance))
+    .filter((b) => b != null && b > 0)
+    .sort((a, b) => b - a);
+  const totalSupplierBal = supplierBalances.reduce((s, b) => s + b, 0);
+  const top1Pct =
+    totalSupplierBal > 0 && supplierBalances.length
+      ? (supplierBalances[0] / totalSupplierBal) * 100
+      : null;
+  const top3Pct =
+    totalSupplierBal > 0 && supplierBalances.length >= 2
+      ? (supplierBalances.slice(0, 3).reduce((s, b) => s + b, 0) / totalSupplierBal) * 100
+      : null;
 
   const createdMs =
     market.createdTimestamp != null && isFinite(Number(market.createdTimestamp))
@@ -210,9 +221,10 @@ async function fetchMorphoMarketSubgraph({ marketId, chain }) {
           ? `Morpho subgraph market created ${new Date(createdMs).toISOString().slice(0, 10)}`
           : null,
       top1DepositorPct: top1Pct,
+      top3DepositorPct: top3Pct,
       depositorConcentrationEvidence:
         top1Pct != null
-          ? `Morpho subgraph top depositor ~${top1Pct.toFixed(1)}% of supply (sample)`
+          ? `Morpho subgraph top supplier ~${top1Pct.toFixed(1)}% of deposits (${supplierBalances.length} positions sampled)`
           : null,
     },
     subgraphId,

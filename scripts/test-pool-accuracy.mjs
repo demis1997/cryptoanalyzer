@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * Accuracy validation for pool URLs — compares protocol API vs crawl vs final scoring row.
- * Run: POOL_INTELLIGENCE_LLM=0 POOL_WEB_SEARCH=0 node scripts/test-pool-accuracy.mjs
+ * Accuracy validation for pool URLs — P.2, P.4, P.5, P.7 + overall score vs targets.
+ * Run: node scripts/test-pool-accuracy.mjs
  */
+import "dotenv/config";
 import { parseProtocolPoolUrl } from "../backend/services/protocolUrlParse.js";
 import { resolvePoolFromProtocolTarget } from "../backend/services/poolProtocolResolver.js";
 import { enrichYieldsForScoring } from "../backend/services/poolScoringEnrich.js";
@@ -11,10 +12,10 @@ import { buildPoolRiskAssessment } from "../backend/llm/poolScoring.js";
 import { crawlPoolWebsite } from "../backend/services/poolCrawl.js";
 
 const POOLS = [
-  { id: 1, protocol: "Aave V3", symbol: "DAI", chain: "ethereum", url: "https://app.aave.com/reserve-overview/?underlyingAsset=0x6b175474e89094c44da98b954eedeac495271d0f&marketName=proto_mainnet_v3" },
-  { id: 2, protocol: "SparkLend", symbol: "wstETH", chain: "ethereum", url: "https://app.spark.fi/markets/1/0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0" },
-  { id: 3, protocol: "Compound", symbol: "USDC", chain: "optimism", url: "https://app.compound.finance/markets/usdc-op" },
-  { id: 4, protocol: "Pendle", chain: "arbitrum", url: "https://app.pendle.finance/trade/pools/0x299674f6da858f903d77486fba50bc9f2e0db24d/zap/in?chain=arbitrum&page=1" },
+  { id: 1, protocol: "Aave V3", symbol: "DAI", chain: "ethereum", targetScore: 77.4, url: "https://app.aave.com/reserve-overview/?underlyingAsset=0x6b175474e89094c44da98b954eedeac495271d0f&marketName=proto_mainnet_v3" },
+  { id: 2, protocol: "SparkLend", symbol: "wstETH", chain: "ethereum", targetScore: 65, url: "https://app.spark.fi/markets/1/0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0" },
+  { id: 3, protocol: "Compound", symbol: "USDC", chain: "optimism", targetScore: 89.2, url: "https://app.compound.finance/markets/usdc-op" },
+  { id: 4, protocol: "Pendle", chain: "arbitrum", targetScore: 68.2, url: "https://app.pendle.finance/trade/pools/0x299674f6da858f903d77486fba50bc9f2e0db24d/zap/in?chain=arbitrum&page=1" },
   { id: 5, protocol: "Hyperliquid", url: "https://app.hyperliquid.xyz/vaults/0xdfc24b077bc1425ad1dea75bcb6f8158e10df303" },
   { id: 6, protocol: "Pendle", chain: "arbitrum", url: "https://app.pendle.finance/trade/pools/0x46d62a8dede1bf2d0de04f2ed863245cbba5e538/zap/in?chain=arbitrum" },
   { id: 7, protocol: "Morpho", chain: "base", url: "https://app.morpho.org/base/market/0x9103c3b4e834476c9a62ea009ba2c884ee42e94e6e314a26f04d312434191836/cbbtc-usdc" },
@@ -39,6 +40,16 @@ function fmtUsd(n) {
   if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
   if (n >= 1e3) return `$${(n / 1e3).toFixed(1)}K`;
   return `$${Math.round(n)}`;
+}
+
+function crit(risk, key) {
+  return risk?.criteria?.find((c) => c.key === key) || null;
+}
+
+function fmtCrit(c) {
+  if (!c) return "—";
+  if (c.unavailable || c.na) return "N/A";
+  return `${(c.score * 100).toFixed(0)} (${c.input || c.evidence?.slice(0, 40) || "?"})`;
 }
 
 function driftPct(a, b) {
@@ -112,10 +123,24 @@ for (const pool of POOLS) {
     : null;
   line.scoring = {
     poolType: risk?.poolType,
-    score: risk?.poolScore,
-    p7: risk?.criteria?.find((c) => c.key === "poolTvl"),
-    p6: risk?.criteria?.find((c) => c.key === "poolAge"),
+    score: risk?.poolScore != null ? risk.poolScore : null,
+    targetScore: pool.targetScore ?? null,
+    p2: crit(risk, "liquidityExit"),
+    p4: crit(risk, "parameterSafety"),
+    p5: crit(risk, "depositorConcentration"),
+    p7: crit(risk, "poolTvl"),
   };
+
+  if (pool.targetScore != null && line.scoring.score != null) {
+    const delta = Math.abs(line.scoring.score - pool.targetScore);
+    if (delta > 8) line.flags.push(`score delta ${delta.toFixed(1)} vs target ${pool.targetScore}`);
+  }
+  if (line.scoring.p2?.unavailable) line.flags.push("P.2 unavailable");
+  if (line.scoring.p4?.unavailable && risk?.poolType !== "staking" && risk?.poolType !== "amm_lp") {
+    line.flags.push("P.4 unavailable");
+  }
+  if (line.scoring.p5?.unavailable) line.flags.push("P.5 unavailable (no depositor data)");
+  if (line.scoring.p7?.unavailable) line.flags.push("P.7 unavailable");
 
   if (!finalRow?.tvlUsd || finalRow.tvlUncertain) line.flags.push("missing or uncertain final TVL");
   if (finalRow?.tvlUsd > MAX_POOL_TVL) line.flags.push(`TVL looks like protocol aggregate: ${fmtUsd(finalRow.tvlUsd)}`);
@@ -149,12 +174,28 @@ for (const pool of POOLS) {
   console.log(`  URL parse: ${parsed.protocolKind} · ${parsed.chain} · ${parsed.vaultAddress?.slice(0, 10) || parsed.marketId?.slice(0, 14) || "?"}`);
   console.log(`  API:       ${line.api.symbol || "?"} · TVL ${fmtUsd(apiTvl)} (${apiRow?.tvlSource || "?"}) · util ${apiRow?.utilization != null ? (apiRow.utilization * 100).toFixed(1) + "%" : "—"} · LLTV ${apiRow?.lltv ?? "—"}`);
   console.log(`  Crawl:     TVL ${fmtUsd(crawlTvl)} ${crawlEvidence ? `· ${crawlEvidence}` : ""}`);
-  console.log(`  Final:     ${line.final.symbol || "?"} · TVL ${fmtUsd(line.final.tvl)} (${line.final.tvlSource}) · P.7 ${line.scoring.p7?.unavailable ? "N/A" : line.scoring.p7?.score}`);
+  console.log(`  Final:     ${line.final.symbol || "?"} · TVL ${fmtUsd(line.final.tvl)} (${line.final.tvlSource})`);
+  console.log(
+    `  Criteria:  P.2 ${fmtCrit(line.scoring.p2)} · P.4 ${fmtCrit(line.scoring.p4)} · P.5 ${fmtCrit(line.scoring.p5)} · P.7 ${fmtCrit(line.scoring.p7)}`
+  );
+  const scoreLine =
+    line.scoring.score != null
+      ? `Score ${line.scoring.score}${pool.targetScore != null ? ` (target ${pool.targetScore})` : ""}`
+      : "Score —";
+  console.log(`  ${scoreLine} · type ${line.scoring.poolType || "?"}`);
   if (line.flags.length) console.log(`  ⚠ ${line.flags.join(" · ")}`);
   else console.log(`  ✓ OK`);
 }
 
 console.log(`\n=== Summary: ${results.length} pools, ${issues} issue(s) ===`);
+console.log("\n| # | Protocol | Score | Target | P.2 | P.4 | P.5 | P.7 | TVL source |");
+console.log("|---|----------|-------|--------|-----|-----|-----|-----|------------|");
+for (const r of results) {
+  const s = r.scoring;
+  console.log(
+    `| ${r.id} | ${r.protocol} | ${s.score ?? "—"} | ${s.targetScore ?? "—"} | ${fmtCrit(s.p2)} | ${fmtCrit(s.p4)} | ${fmtCrit(s.p5)} | ${fmtCrit(s.p7)} | ${r.final.tvlSource || "—"} |`
+  );
+}
 const failed = results.filter((r) => r.flags.length);
 if (failed.length) {
   for (const r of failed) console.log(`  #${r.id} ${r.protocol}: ${r.flags.join("; ")}`);
