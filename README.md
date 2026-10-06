@@ -55,7 +55,7 @@ node scripts/test-pool-metrics-resolver.mjs
 
 The scoring smoke test uses one synthetic USDC-vault input and asserts a curated-vault classification and a broad expected score band. It produced **86.8/100 with 7 criteria scored** on Node 22.20/macOS ARM. This checks implementation behavior; it is not a measured financial-risk accuracy result. The metrics-resolver script checks fixture source priority with web/Dune search disabled; see [validation details](docs/VALIDATION.md) for its observed outcome.
 
-`test-pool-page-parse.mjs`, `test-pool-url-resolution.mjs`, `test-pool-accuracy.mjs` and `test-pool-subgraph.mjs` include live API/browser dependencies. They are not offline tests; their hardcoded target scores must not be cited as achieved accuracy. The added CI runs only dependency-free syntax and fixture scoring checks, without model credentials.
+`test-pool-page-parse.mjs`, `test-pool-url-resolution.mjs`, `test-pool-accuracy.mjs` and `test-pool-subgraph.mjs` include live API/browser dependencies. They are not offline tests; their hardcoded target scores must not be cited as achieved accuracy. The added CI runs only syntax and fixture scoring checks, with install hooks disabled and without model credentials.
 
 ## Decisions and limits
 

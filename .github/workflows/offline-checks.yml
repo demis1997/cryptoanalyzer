@@ -13,10 +13,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.20.0'
+      - name: Install locked dependencies without browser/model hooks
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Syntax checks
         run: |
           node --check server.js
           node --check public/app.js
           node --check backend/llm/poolScoring.js
-      - name: Offline fixture scoring (no dependencies or credentials)
+      - name: Offline fixture scoring (no model credentials)
         run: node scripts/test-pool-scoring.mjs

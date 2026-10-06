@@ -11,4 +11,6 @@ Inspected revision: master at the start of this portfolio update; no application
 - External protocol/URL/accuracy/subgraph suites, GPT4All inference, hosted inference, PDF rendering, Neo4j and PostgreSQL: not executed.
 - Existing demo URL `https://cryptoanalyzer-five.vercel.app`: HTTP 404 / DEPLOYMENT_NOT_FOUND. Not advertised as a demo.
 
-The CI added by this PR runs server/UI/scorer syntax and the existing dependency-free scoring fixture, with no npm installation or model credentials. Its actual result is visible on the draft PR; no green outcome is assumed in advance.
+The CI added by this PR runs server/UI/scorer syntax and the existing dependency-free scoring fixture, after locked npm installation with hooks disabled, without model credentials. Its actual result is visible on the draft PR; no green outcome is assumed in advance.
+
+The first PR CI run 37548021322 failed because scoring transitively imports node-fetch. The workflow now installs locked dependencies with `--ignore-scripts`; the earlier dependency-free description was incorrect and is corrected. No application behavior changed.
