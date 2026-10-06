@@ -1,0 +1,22 @@
+name: Offline checks
+on:
+  push:
+    branches: [master]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  fixture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.20.0'
+      - name: Syntax checks
+        run: |
+          node --check server.js
+          node --check public/app.js
+          node --check backend/llm/poolScoring.js
+      - name: Offline fixture scoring (no dependencies or credentials)
+        run: node scripts/test-pool-scoring.mjs
